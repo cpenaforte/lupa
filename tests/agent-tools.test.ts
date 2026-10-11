@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENT_LIMITS } from "../src/agent-types.js";
-import { TOOL_DEFS, executeTool, globToRegExp, grepInRoot, resolveWithinRoot } from "../src/agent-tools.js";
+import { TOOL_DEFS, executeTool, grepInRoot, matchGlob, resolveWithinRoot } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 
 const created: string[] = [];
@@ -193,22 +193,32 @@ describe("executeTool", () => {
   });
 });
 
-describe("globToRegExp", () => {
-  it("globToRegExp handles *, **, **/ and ?", () => {
-    const ts = globToRegExp("src/**/*.ts");
-    expect(ts.test("src/a.ts")).toBe(true);
-    expect(ts.test("src/x/y.ts")).toBe(true);
-    expect(ts.test("src/x/y/z.ts")).toBe(true);
-    expect(ts.test("other/a.ts")).toBe(false);
+describe("matchGlob", () => {
+  it("matchGlob handles *, **, **/ and ?", () => {
+    expect(matchGlob("src/a.ts", "src/**/*.ts")).toBe(true);
+    expect(matchGlob("src/x/y.ts", "src/**/*.ts")).toBe(true);
+    expect(matchGlob("src/x/y/z.ts", "src/**/*.ts")).toBe(true);
+    expect(matchGlob("other/a.ts", "src/**/*.ts")).toBe(false);
 
-    const md = globToRegExp("*.md");
-    expect(md.test("a.md")).toBe(true);
-    expect(md.test("a/b.md")).toBe(false);
+    expect(matchGlob("a.md", "*.md")).toBe(true);
+    expect(matchGlob("a/b.md", "*.md")).toBe(false);
 
-    const q = globToRegExp("a?c");
-    expect(q.test("abc")).toBe(true);
-    expect(q.test("a/c")).toBe(false);
-    expect(q.test("ac")).toBe(false);
+    expect(matchGlob("abc", "a?c")).toBe(true);
+    expect(matchGlob("a/c", "a?c")).toBe(false);
+    expect(matchGlob("ac", "a?c")).toBe(false);
+  });
+
+  it("matchGlob treats dots literally (no regex escaping semantics)", () => {
+    expect(matchGlob("a.b", "a.b")).toBe(true);
+    expect(matchGlob("axb", "a.b")).toBe(false);
+    expect(matchGlob("a+b", "a+b")).toBe(true);
+    expect(matchGlob("aab", "a+b")).toBe(false);
+  });
+
+  it("matchGlob stays fast on a pathological glob", () => {
+    const glob = "*a".repeat(15) + "*b";
+    const path = "a".repeat(2000);
+    expect(matchGlob(path, glob)).toBe(false);
   });
 });
 
@@ -259,14 +269,22 @@ describe("grep", () => {
     expect(JSON.parse(r.output)).toEqual({ error: "grep timed out" });
   });
 
-  it("a pattern containing ');require(' is treated as a literal regex, not code", async () => {
+  it("a valid regex with an injection payload reaches the worker without executing", async () => {
     const root = tempRoot();
-    writeFileSync(join(root, "a.txt"), "require('fs')");
-    const r = await grepInRoot(root, { pattern: "');require(" }, 500);
+    const sentinel = join(root, "pwned.txt");
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    // Valid regex that contains `');require(` and, were the pattern interpolated
+    // into the worker source, would execute writeFileSync.
+    const payload = `(x');require('fs').writeFileSync(${JSON.stringify(sentinel)},'pwned')`;
+    const r = await grepInRoot(root, { pattern: payload }, 500);
+    expect(existsSync(sentinel)).toBe(false);
     if (r.isError) {
       expect(JSON.parse(r.output)).toHaveProperty("error");
     } else {
-      expect(JSON.parse(r.output).matches).toEqual([]);
+      const parsed = JSON.parse(r.output);
+      expect(parsed.matches).toEqual([]);
+      // files_scanned > 0 proves the pattern reached and ran inside the worker.
+      expect(parsed.files_scanned).toBeGreaterThan(0);
     }
   });
 });

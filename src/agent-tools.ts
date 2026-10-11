@@ -214,45 +214,62 @@ export const GREP_TIMEOUT_MS = 5000;
 const GREP_MAX_MATCHES = 100;
 const GREP_MAX_FILE_BYTES = 1024 * 1024;
 const GREP_NUL_SCAN_BYTES = 8192;
+const GREP_LINE_CHARS = 200;
 const GLOB_MAX_PATHS = 200;
-const REGEXP_SPECIAL = /[.*+?^${}()|[\]\\]/;
 
 /**
- * Translate a glob to an anchored RegExp. `**\/` matches zero or more path
- * segments, `**` matches anything, `*` matches within a segment, `?` matches a
- * single non-separator character, and every other character is escaped.
+ * Classic wildcard match within a single path segment: `*` matches any run of
+ * characters and `?` matches exactly one. Dynamic programming, so it cannot
+ * backtrack catastrophically.
  */
-export function globToRegExp(glob: string): RegExp {
-  let out = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*") {
-      if (glob[i + 1] === "*") {
-        if (glob[i + 2] === "/") {
-          out += "(?:.*/)?";
-          i += 2;
-        } else {
-          out += ".*";
-          i += 1;
-        }
-      } else {
-        out += "[^/]*";
-      }
-    } else if (c === "?") {
-      out += "[^/]";
-    } else if (REGEXP_SPECIAL.test(c)) {
-      out += "\\" + c;
-    } else {
-      out += c;
+function matchSegment(seg: string, pat: string): boolean {
+  const n = seg.length;
+  const m = pat.length;
+  let prev = new Array<boolean>(m + 1).fill(false);
+  prev[0] = true;
+  for (let j = 1; j <= m; j++) if (pat[j - 1] === "*") prev[j] = prev[j - 1];
+  for (let i = 1; i <= n; i++) {
+    const cur = new Array<boolean>(m + 1).fill(false);
+    for (let j = 1; j <= m; j++) {
+      const pc = pat[j - 1];
+      if (pc === "*") cur[j] = prev[j] || cur[j - 1];
+      else if (pc === "?") cur[j] = prev[j - 1];
+      else cur[j] = prev[j - 1] && seg[i - 1] === pc;
     }
+    prev = cur;
   }
-  return new RegExp("^" + out + "$");
+  return prev[m];
+}
+
+/**
+ * Non-backtracking glob matcher. `path` and `glob` are split on `/`; a `**`
+ * segment matches zero or more path segments, and within a segment `*` matches
+ * any run of characters while `?` matches exactly one. Polynomial time, so a
+ * model-authored glob cannot hang the job the way a regex could.
+ */
+export function matchGlob(path: string, glob: string): boolean {
+  const pathSegs = path.split("/");
+  const globSegs = glob.split("/");
+  const n = pathSegs.length;
+  const m = globSegs.length;
+  let prev = new Array<boolean>(m + 1).fill(false);
+  prev[0] = true;
+  for (let j = 1; j <= m; j++) if (globSegs[j - 1] === "**") prev[j] = prev[j - 1];
+  for (let i = 1; i <= n; i++) {
+    const cur = new Array<boolean>(m + 1).fill(false);
+    for (let j = 1; j <= m; j++) {
+      const g = globSegs[j - 1];
+      if (g === "**") cur[j] = cur[j - 1] || prev[j];
+      else cur[j] = prev[j - 1] && matchSegment(pathSegs[i - 1], g);
+    }
+    prev = cur;
+  }
+  return prev[m];
 }
 
 interface WalkFile {
   abs: string;
   rel: string;
-  size: number;
 }
 
 /** True when the first 8KB of `p` contain a NUL byte (or `p` cannot be read). */
@@ -284,7 +301,7 @@ function relPath(root: string, abs: string): string {
 function includeFile(root: string, abs: string, size: number): WalkFile | null {
   if (size > GREP_MAX_FILE_BYTES) return null;
   if (isBinaryFile(abs)) return null;
-  return { abs, rel: relPath(root, abs), size };
+  return { abs, rel: relPath(root, abs) };
 }
 
 /**
@@ -364,7 +381,7 @@ const GREP_WORKER_SRC = [
   "    if (re.test(lines[i])) {",
   "      if (matches.length >= limit) { hitLimit = true; break; }",
   "      const t = lines[i].trim();",
-  "      matches.push({ file: f.rel, line: i + 1, text: t.length > 200 ? t.slice(0, 200) : t });",
+  "      matches.push({ file: f.rel, line: i + 1, text: t });",
   "    }",
   "  }",
   "  if (hitLimit) break;",
@@ -431,9 +448,8 @@ export async function grepInRoot(
   const startAbs = resolveWithinRoot(root, rel);
   if (!startAbs) return errorResult(`path not accessible: ${rel}`);
 
-  const globRe = args.glob ? globToRegExp(args.glob) : null;
   let files = walkFiles(root, startAbs);
-  if (globRe) files = files.filter((f) => globRe.test(f.rel));
+  if (args.glob) files = files.filter((f) => matchGlob(f.rel, args.glob!));
 
   const requested = args.max_results === undefined ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
@@ -442,18 +458,23 @@ export async function grepInRoot(
   if (outcome.isError) return { output: outcome.output, isError: true };
 
   const { matches, filesScanned, hitLimit } = outcome;
+  const capped: GrepMatch[] = matches.map((m) => ({
+    file: m.file,
+    line: m.line,
+    text: codePointSafeCut(m.text, GREP_LINE_CHARS),
+  }));
   const serialize = (list: GrepMatch[], truncated: boolean): string =>
     JSON.stringify({ matches: list, truncated, files_scanned: filesScanned });
 
   let lo = 0;
-  let hi = matches.length;
+  let hi = capped.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serialize(matches.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
+    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
     else hi = mid - 1;
   }
-  const truncated = hitLimit || lo < matches.length;
-  return okResult(JSON.parse(serialize(matches.slice(0, lo), truncated)));
+  const truncated = hitLimit || lo < capped.length;
+  return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
 }
 
 async function grep(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
@@ -472,10 +493,9 @@ async function glob(args: Record<string, unknown>, ctx: ToolContext): Promise<{ 
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
-  const re = globToRegExp(pattern);
   const paths = walkFiles(resolvedRoot.root, resolvedRoot.root)
     .map((f) => f.rel)
-    .filter((p) => re.test(p))
+    .filter((p) => matchGlob(p, pattern))
     .sort();
 
   const truncated = paths.length > GLOB_MAX_PATHS;
