@@ -39,7 +39,7 @@ import {
   type LlmResult,
 } from "./llm.js";
 import { buildMessages, linkedIssueNumber } from "./prompt.js";
-import { authHeaderFor, resolveEndpoint, validateModelExists, type ResolvedEndpoint } from "./providers.js";
+import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
 import { buildBody, eventFor, exitFor, mapToComments, redactFindings, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 
@@ -87,7 +87,7 @@ export interface Analysis {
   runScanners(o: Parameters<typeof runScanners>[0]): Promise<ScannerResult>;
   runL2(dir: string): Promise<Finding[]>;
   ensureOllama(baseUrl: string, model: string, o: { timeoutSeconds?: number; apiKey?: string }): Promise<void>;
-  validateModelExists(baseUrl: string, model: string, apiKey: string, auth?: { header?: string }): Promise<boolean>;
+  checkModelListed(baseUrl: string, model: string, apiKey: string, protocol: CatalogProtocol): Promise<{ status: "listed" | "absent" | "unknown"; detail?: string }>;
   /** Single call to the endpoint's already-resolved style (explicit style / llm_path override). */
   callByStyle(ep: ResolvedEndpoint, messages: { system: string; user: string }, o: Parameters<typeof callByStyle>[2]): Promise<LlmResult>;
   /** Error-driven style routing (spec §9.5); the real seam logs the winning style. */
@@ -468,7 +468,7 @@ function summaryFor(findings: Finding[]): string {
 
 /**
  * Slow path (LLM). Returns undefined when it is skipped: no key, nothing to send, bad config,
- * a failed model check, or a failed call. Every skip is a warning; the fast path still posts.
+ * an absent model, or a failed call. Every skip is a warning; the fast path still posts.
  * The LLM key is intentional API use; the model is given no tools.
  */
 async function slowPath(
@@ -517,21 +517,15 @@ async function slowPath(
       return undefined;
     }
   }
-  try {
-    // R1: the /models existence check authenticates like the endpoint it talks to.
-    const listed = await deps.analysis.validateModelExists(
-      ep.baseUrl,
-      i.llmModel,
-      i.llmApiKey,
-      authHeaderFor(i.llmProvider, ep.apiStyle),
-    );
-    if (!listed) {
-      core.warning(`slow path skipped: model "${i.llmModel}" is not listed by the provider`);
-      return undefined;
-    }
-  } catch (e) {
-    core.warning(`slow path skipped: model check failed: ${(e as Error).message}`);
+  const check = await deps.analysis.checkModelListed(
+    ep.baseUrl, i.llmModel, i.llmApiKey, catalogProtocolFor(i.llmProvider, ep.apiStyle),
+  );
+  if (check.status === "absent") {
+    core.warning(`slow path skipped: model "${i.llmModel}" is not listed by the provider`);
     return undefined;
+  }
+  if (check.status === "unknown") {
+    core.warning(`model check inconclusive (${check.detail ?? "unknown error"}); continuing`);
   }
   const messages = buildMessages(fast, promptText, issueBody, skipped);
   const llmOpts = {
@@ -945,7 +939,7 @@ function realAnalysis(): Analysis {
     runScanners,
     runL2: (dir) => runL2(dir),
     ensureOllama,
-    validateModelExists,
+    checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved
     // endpoint's adapter; plain `auto` goes through the error-driven probe
     // (spec §9.5), which logs the style that won.

@@ -4,8 +4,8 @@ import {
   resolveEndpoint,
   buildEndpointForStyle,
   UnsupportedModelError,
-  validateModelExists,
-  authHeaderFor,
+  catalogProtocolFor,
+  checkModelListed,
 } from "../src/providers.js";
 
 vi.mock("@actions/core", () => ({ warning: vi.fn() }));
@@ -293,87 +293,88 @@ describe("buildEndpointForStyle", () => {
   });
 });
 
-describe("validateModelExists", () => {
-  it("checks id presence only and sends Bearer auth", async () => {
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ data: [{ id: "m" }, { id: "other" }] }), { status: 200 }),
-    );
+describe("native model discovery", () => {
+  it("catalogProtocolFor maps provider + style to the catalog protocol", () => {
+    expect(catalogProtocolFor("google", "google-models")).toBe("google");
+    expect(catalogProtocolFor("custom", "google-models")).toBe("google");
+    expect(catalogProtocolFor("anthropic", "anthropic-messages")).toBe("anthropic");
+    expect(catalogProtocolFor("custom", "anthropic-messages")).toBe("anthropic");
+    expect(catalogProtocolFor("opencode-go", "google-models")).toBe("openai");
+    expect(catalogProtocolFor("opencode-zen", "openai-chat")).toBe("openai");
+    expect(catalogProtocolFor("ollama", "openai-chat")).toBe("openai");
+  });
+
+  it("checkModelListed reads a google-native models[].name catalog and follows pageToken", async () => {
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (u: string, _init?: RequestInit) => {
+      urls.push(u);
+      return urls.length === 1
+        ? new Response(JSON.stringify({ models: [{ name: "models/other" }], nextPageToken: "t" }), { status: 200 })
+        : new Response(JSON.stringify({ models: [{ name: "models/wanted" }] }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
-    expect(await validateModelExists("https://x", "m", "k")).toBe(true);
-    expect(fetchMock.mock.calls[0][0]).toBe("https://x/models");
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer k");
-    expect(await validateModelExists("https://x", "missing", "k")).toBe(false);
+    expect(await checkModelListed("https://g/v1beta", "wanted", "K", "google")).toEqual({ status: "listed" });
+    expect(urls[1]).toBe("https://g/v1beta/models?pageToken=t&pageSize=1000");
+    const h = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(h["x-goog-api-key"]).toBe("K");
+    expect(h.Authorization).toBeUndefined();
+    expect(h["User-Agent"]).toBe("pr-reviewer/1.0");
   });
 
-  // R1: Google-native endpoints authenticate with x-goog-api-key, never Authorization.
-  it("google-native sends x-goog-api-key and NOT Authorization", async () => {
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ data: [{ id: "m" }] }), { status: 200 }),
-    );
+  it("checkModelListed sends x-api-key + anthropic-version and follows after_id", async () => {
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (u: string, _init?: RequestInit) => {
+      urls.push(u);
+      return urls.length === 1
+        ? new Response(JSON.stringify({ data: [{ id: "other" }], has_more: true, last_id: "other" }), { status: 200 })
+        : new Response(JSON.stringify({ data: [{ id: "wanted" }], has_more: false }), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
-    expect(await validateModelExists("https://x", "m", "SECRETKEY", { header: "x-goog-api-key" })).toBe(true);
-    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
-    expect(headers["x-goog-api-key"]).toBe("SECRETKEY");
-    expect(headers.Authorization).toBeUndefined();
-    expect(fetchMock.mock.calls[0][0]).not.toContain("SECRETKEY");
+    expect(await checkModelListed("https://a/v1", "wanted", "K", "anthropic")).toEqual({ status: "listed" });
+    expect(urls[1]).toBe("https://a/v1/models?after_id=other&limit=1000");
+    const h = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(h["x-api-key"]).toBe("K");
+    expect(h["anthropic-version"]).toBe("2023-06-01");
+    expect(h.Authorization).toBeUndefined();
+    expect(h["User-Agent"]).toBe("pr-reviewer/1.0");
   });
 
-  // R1: the auth header is derived from provider + resolved style at the call site.
-  it("authHeaderFor: google + google-models is x-goog-api-key, everything else is Authorization", () => {
-    expect(authHeaderFor("google", "google-models").header).toBe("x-goog-api-key");
-    expect(authHeaderFor("google", "openai-chat").header).toBe("Authorization");
-    expect(authHeaderFor("opencode-zen", "google-models").header).toBe("Authorization");
-    expect(authHeaderFor("opencode-go", "google-models").header).toBe("Authorization");
-    expect(authHeaderFor("custom", "anthropic-messages").header).toBe("Authorization");
+  it("checkModelListed reads an OpenAI data[].id catalog with Bearer", async () => {
+    const fetchMock = vi.fn(async (_u: string, _init?: RequestInit) =>
+      new Response(JSON.stringify({ data: [{ id: "m" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await checkModelListed("https://o/v1", "m", "K", "openai")).toEqual({ status: "listed" });
+    const h = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(h.Authorization).toBe("Bearer K");
+    expect(h["User-Agent"]).toBe("pr-reviewer/1.0");
   });
 
-  // Micro fix 2: a custom provider on a native Google base must pair with callGoogle's POST auth.
-  it("authHeaderFor: custom + google-models is x-goog-api-key (pairs with callGoogle)", () => {
-    expect(authHeaderFor("custom", "google-models").header).toBe("x-goog-api-key");
+  it("checkModelListed returns absent only for a non-empty catalog missing the model", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "other" }] }), { status: 200 })));
+    expect(await checkModelListed("https://o/v1", "wanted", "K", "openai")).toEqual({ status: "absent" });
   });
 
-  // R4 / F2
-  it("404 returns false", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
-    expect(await validateModelExists("https://x", "m", "k")).toBe(false);
-  });
-
-  it("500 throws naming the status", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
-    await expect(validateModelExists("https://x", "m", "k")).rejects.toThrow(/500/);
-  });
-
-  it("500 with null body still throws naming the status", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 500 })));
-    await expect(validateModelExists("https://x", "m", "k")).rejects.toThrow(/500/);
-  });
-
-  it("401 throws naming the status", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 401 })));
-    await expect(validateModelExists("https://x", "m", "k")).rejects.toThrow(/401/);
-  });
-
-  it("invalid JSON on 200 throws", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>", { status: 200 })));
-    await expect(validateModelExists("https://x", "m", "k")).rejects.toThrow(/invalid JSON/);
-  });
-
-  // F4: timeout via AbortController. Fake timers keep this fast.
-  it("aborts a slow request and rejects", async () => {
+  it("checkModelListed returns unknown for HTTP errors, invalid JSON, bad shape, empty catalog, and timeout", async () => {
+    const cases: Array<() => Response | Promise<Response>> = [
+      () => new Response("nope", { status: 404 }),
+      () => new Response("boom", { status: 500 }),
+      () => new Response("{not json", { status: 200 }),
+      () => new Response(JSON.stringify({ nope: [] }), { status: 200 }),
+      () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    ];
+    for (const c of cases) {
+      vi.stubGlobal("fetch", vi.fn(async () => c()));
+      const result = await checkModelListed("https://o/v1", "m", "K", "openai");
+      expect(result.status).toBe("unknown");
+      expect(result.detail).toEqual(expect.any(String));
+    }
+    vi.stubGlobal("fetch", vi.fn((_u: string, init?: RequestInit) =>
+      new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError")))),
+    ));
     vi.useFakeTimers();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        (_url: string, init?: RequestInit) =>
-          new Promise<Response>((_resolve, reject) => {
-            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-          }),
-      ),
-    );
-    const pending = validateModelExists("https://x", "m", "k");
-    const assertion = expect(pending).rejects.toThrow(/aborted/);
+    const p = checkModelListed("https://o/v1", "m", "K", "openai");
     await vi.advanceTimersByTimeAsync(15_000);
-    await assertion;
+    expect((await p).status).toBe("unknown");
+    vi.useRealTimers();
   });
 });

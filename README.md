@@ -75,7 +75,7 @@ The default wire format is `openai-chat`: `POST {base_url}/chat/completions` wit
 
 - **Key:** `Bearer` with your OpenCode API key, passed as the `llm_api_key` input (the `LLM_API_KEY` secret in the template).
 - **Headers:** the action sends `User-Agent: pr-reviewer/1.0`. `opencode-go` also sends `x-opencode-session: pr-<number>`, stable per PR, so the provider can group the calls.
-- **Model check:** the action calls `GET {base}/models` to confirm the model id exists. It checks the id only and never changes the endpoint.
+- **Model check:** the action reads the provider's model catalog, including native Google and Anthropic formats. The check is advisory: a definitive catalog miss skips the LLM path; an inconclusive check warns and continues to inference. It never changes the inference endpoint.
 - **Routing:** with the default `auto` style, the action discovers the wire format at call time (error-driven routing): it sends the `openai-chat` request first and, on an HTTP 400 or 404 (wrong route or body contract), moves on to `openai-responses`, `anthropic-messages` and `google-models`. The style that works is remembered for the rest of the run. The same model can need different styles on different providers; nothing is hardcoded per model id. Set `llm_api_style` explicitly to skip the probe.
 - **Go limits (operator reference):** a 5-hour window of 20%, a weekly limit of 50%, a monthly limit of 100%, and per-model caps of $15 to $60. When a Go subscription limit is hit, the provider falls back to the Zen balance. The action does not switch providers itself.
 
@@ -92,7 +92,7 @@ The default wire format is `openai-chat`: `POST {base_url}/chat/completions` wit
 
 - Explicit `llm_api_style` values are functional: selecting `openai-responses`, `anthropic-messages` or `google-models` sends that protocol's body to `{base_url}` plus the style's default path (`llm_path` still overrides the path). An explicit style is honored as-is: exactly one request, no probing.
 - `auto` is error-driven, with no model map: each attempt uses the style's full request shape, and only a 400 or 404 advances to the next style. Rate limits (429) and server errors (5xx) use the normal single retry and never advance the probe; a refusal, content filter or unparseable response is returned as-is. If every style is rejected, the slow path is skipped with a warning naming the model and the styles tried, plus the last HTTP error.
-- The `GET {base}/models` check still runs before the probe and only confirms that the model id exists; probing never changes that check.
+- The provider catalog check runs before the probe, including native Google and Anthropic catalogs. A definitive miss skips the LLM path; an inconclusive check warns and continues to inference. Probing never changes the catalog check.
 - A path-only `llm_path` that names a non-chat endpoint (`/messages`, `/responses`, `/models`) is still rejected without a v2 style, because the path alone cannot select a body adapter.
 - All styles share one outcome contract: the same findings schema, the same failure reasons, a 90 s timeout, one retry on 5xx/429, and `temperature`/`top_p` only when set explicitly.
 

@@ -40,7 +40,7 @@ const PRESET_BASE_URLS: Record<string, string> = {
 
 const CHAT_PATH = "/chat/completions";
 const USER_AGENT = "pr-reviewer/1.0";
-/** Timeout for the GET {base}/models existence check. */
+/** Timeout for each GET {base}/models catalog request. */
 const VALIDATE_TIMEOUT_MS = 15_000;
 
 /** Last path segments that identify a non-chat endpoint (path-only misuse). */
@@ -195,71 +195,73 @@ export function buildEndpointForStyle(
   });
 }
 
-/**
- * Auth header for the GET {base}/models existence check, derived from
- * provider + resolved style at the call site: the `google` preset and a
- * `custom` provider pointed at a native Google base (both speaking the
- * google-models protocol) use `x-goog-api-key`, pairing with callGoogle's POST
- * auth. Everything else keeps Bearer — including Zen/Go catalog checks, whose
- * `/models` is the OpenCode catalog even when the POST adapter is google-models.
- */
-export function authHeaderFor(provider: string, apiStyle: ResolvedApiStyle): { header: string } {
-  const googleNative = apiStyle === "google-models" && (provider === "google" || provider === "custom");
-  return { header: googleNative ? "x-goog-api-key" : "Authorization" };
+export type CatalogProtocol = "openai" | "anthropic" | "google";
+
+/** Catalog protocol follows the provider, except custom native endpoints. */
+export function catalogProtocolFor(provider: string, apiStyle: ResolvedApiStyle): CatalogProtocol {
+  if (apiStyle === "google-models" && (provider === "google" || provider === "custom")) return "google";
+  if (provider === "anthropic" || (provider === "custom" && apiStyle === "anthropic-messages")) return "anthropic";
+  return "openai";
 }
 
-/**
- * Checks that `model` is listed by GET {baseUrl}/models. Checks id presence
- * only; never infers or changes the endpoint used for chat requests.
- * `auth.header` (see authHeaderFor) picks the auth header name; the default
- * keeps `Authorization: Bearer`. Non-2xx behavior is unchanged.
- *
- * - 2xx with a JSON `data` array: true iff some entry has id === model.
- * - 404: false (model list endpoint absent / model not found).
- * - Other non-2xx: throws, naming the HTTP status.
- * - Invalid JSON, or missing `data` array on 2xx: throws.
- * - Timeout (VALIDATE_TIMEOUT_MS) or network error: throws.
- */
-export async function validateModelExists(
+function catalogHeaders(protocol: CatalogProtocol, apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = { "User-Agent": USER_AGENT };
+  if (protocol === "google") headers["x-goog-api-key"] = apiKey;
+  else if (protocol === "anthropic") {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+/** An advisory catalog check: only a parsed, non-empty catalog can rule a model absent. */
+export async function checkModelListed(
   baseUrl: string,
   model: string,
   apiKey: string,
-  auth: { header?: string } = {},
-): Promise<boolean> {
-  const url = `${baseUrl.replace(/\/+$/, "")}/models`;
-  const headers: Record<string, string> = { "User-Agent": USER_AGENT };
-  if (auth.header === "x-goog-api-key") {
-    headers["x-goog-api-key"] = apiKey;
-  } else {
-    headers.Authorization = `Bearer ${apiKey}`;
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), VALIDATE_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      headers,
-      signal: controller.signal,
-    });
-    if (res.status === 404) {
-      await res.body?.cancel().catch(() => undefined);
-      return false;
-    }
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => undefined);
-      throw new Error(`GET ${url} failed with HTTP ${res.status}`);
-    }
+  protocol: CatalogProtocol,
+): Promise<{ status: "listed" | "absent" | "unknown"; detail?: string }> {
+  const root = `${baseUrl.replace(/\/+$/, "")}/models`;
+  const headers = catalogHeaders(protocol, apiKey);
+  let url = protocol === "google" ? `${root}?pageSize=1000` : protocol === "anthropic" ? `${root}?limit=1000` : root;
+  let sawModels = false;
+
+  for (let page = 0; page < 5; page++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), VALIDATE_TIMEOUT_MS);
     let body: unknown;
     try {
-      body = await res.json();
+      const res = await fetch(url, { headers, signal: controller.signal });
+      if (!res.ok) return { status: "unknown", detail: `catalog HTTP ${res.status}` };
+      try {
+        body = await res.json();
+      } catch {
+        return { status: "unknown", detail: "catalog returned invalid JSON" };
+      }
     } catch {
-      throw new Error(`GET ${url} returned invalid JSON`);
+      return { status: "unknown", detail: controller.signal.aborted ? "catalog request timed out" : "catalog request failed" };
+    } finally {
+      clearTimeout(timer);
     }
-    const data = (body as { data?: unknown } | null)?.data;
-    if (!Array.isArray(data)) {
-      throw new Error(`GET ${url} returned no "data" array`);
+
+    const catalog = body as Record<string, unknown> | null;
+    const entries = protocol === "google" ? catalog?.models : catalog?.data;
+    if (!Array.isArray(entries)) return { status: "unknown", detail: "catalog has no models array" };
+    if (entries.length > 0) sawModels = true;
+    const found = entries.some((entry) => {
+      const item = entry as Record<string, unknown> | null;
+      const id = protocol === "google" ? item?.name : item?.id;
+      return (protocol === "google" && typeof id === "string" ? id.replace(/^models\//, "") : id) === model;
+    });
+    if (found) return { status: "listed" };
+
+    if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
+      url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
+    } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
+      url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
+    } else {
+      break;
     }
-    return data.some((m) => (m as { id?: unknown } | null)?.id === model);
-  } finally {
-    clearTimeout(timer);
   }
+  return sawModels ? { status: "absent" } : { status: "unknown", detail: "catalog was empty" };
 }

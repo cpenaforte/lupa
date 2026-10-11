@@ -26038,47 +26038,69 @@ function buildEndpointForStyle(provider, model, baseUrl2, apiKey, style, prNumbe
     userBase
   });
 }
-function authHeaderFor(provider, apiStyle) {
-  const googleNative = apiStyle === "google-models" && (provider === "google" || provider === "custom");
-  return { header: googleNative ? "x-goog-api-key" : "Authorization" };
+function catalogProtocolFor(provider, apiStyle) {
+  if (apiStyle === "google-models" && (provider === "google" || provider === "custom"))
+    return "google";
+  if (provider === "anthropic" || provider === "custom" && apiStyle === "anthropic-messages")
+    return "anthropic";
+  return "openai";
 }
-async function validateModelExists(baseUrl2, model, apiKey, auth2 = {}) {
-  const url = `${baseUrl2.replace(/\/+$/, "")}/models`;
+function catalogHeaders(protocol, apiKey) {
   const headers = { "User-Agent": USER_AGENT };
-  if (auth2.header === "x-goog-api-key") {
+  if (protocol === "google")
     headers["x-goog-api-key"] = apiKey;
-  } else {
+  else if (protocol === "anthropic") {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else
     headers.Authorization = `Bearer ${apiKey}`;
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), VALIDATE_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      headers,
-      signal: controller.signal
-    });
-    if (res.status === 404) {
-      await res.body?.cancel().catch(() => void 0);
-      return false;
-    }
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => void 0);
-      throw new Error(`GET ${url} failed with HTTP ${res.status}`);
-    }
+  return headers;
+}
+async function checkModelListed(baseUrl2, model, apiKey, protocol) {
+  const root = `${baseUrl2.replace(/\/+$/, "")}/models`;
+  const headers = catalogHeaders(protocol, apiKey);
+  let url = protocol === "google" ? `${root}?pageSize=1000` : protocol === "anthropic" ? `${root}?limit=1000` : root;
+  let sawModels = false;
+  for (let page = 0; page < 5; page++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), VALIDATE_TIMEOUT_MS);
     let body;
     try {
-      body = await res.json();
+      const res = await fetch(url, { headers, signal: controller.signal });
+      if (!res.ok)
+        return { status: "unknown", detail: `catalog HTTP ${res.status}` };
+      try {
+        body = await res.json();
+      } catch {
+        return { status: "unknown", detail: "catalog returned invalid JSON" };
+      }
     } catch {
-      throw new Error(`GET ${url} returned invalid JSON`);
+      return { status: "unknown", detail: controller.signal.aborted ? "catalog request timed out" : "catalog request failed" };
+    } finally {
+      clearTimeout(timer);
     }
-    const data = body?.data;
-    if (!Array.isArray(data)) {
-      throw new Error(`GET ${url} returned no "data" array`);
+    const catalog = body;
+    const entries = protocol === "google" ? catalog?.models : catalog?.data;
+    if (!Array.isArray(entries))
+      return { status: "unknown", detail: "catalog has no models array" };
+    if (entries.length > 0)
+      sawModels = true;
+    const found = entries.some((entry) => {
+      const item = entry;
+      const id = protocol === "google" ? item?.name : item?.id;
+      return (protocol === "google" && typeof id === "string" ? id.replace(/^models\//, "") : id) === model;
+    });
+    if (found)
+      return { status: "listed" };
+    if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
+      url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
+    } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
+      url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
+    } else {
+      break;
     }
-    return data.some((m) => m?.id === model);
-  } finally {
-    clearTimeout(timer);
   }
+  return sawModels ? { status: "absent" } : { status: "unknown", detail: "catalog was empty" };
 }
 
 // lib/src/adapters/google.js
@@ -28189,15 +28211,13 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prB
       return void 0;
     }
   }
-  try {
-    const listed = await deps.analysis.validateModelExists(ep.baseUrl, i.llmModel, i.llmApiKey, authHeaderFor(i.llmProvider, ep.apiStyle));
-    if (!listed) {
-      warning(`slow path skipped: model "${i.llmModel}" is not listed by the provider`);
-      return void 0;
-    }
-  } catch (e) {
-    warning(`slow path skipped: model check failed: ${e.message}`);
+  const check = await deps.analysis.checkModelListed(ep.baseUrl, i.llmModel, i.llmApiKey, catalogProtocolFor(i.llmProvider, ep.apiStyle));
+  if (check.status === "absent") {
+    warning(`slow path skipped: model "${i.llmModel}" is not listed by the provider`);
     return void 0;
+  }
+  if (check.status === "unknown") {
+    warning(`model check inconclusive (${check.detail ?? "unknown error"}); continuing`);
   }
   const messages = buildMessages(fast, promptText, issueBody, skipped);
   const llmOpts = {
@@ -28520,7 +28540,7 @@ function realAnalysis() {
     runScanners,
     runL2: (dir) => runL2(dir),
     ensureOllama,
-    validateModelExists,
+    checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved
     // endpoint's adapter; plain `auto` goes through the error-driven probe
     // (spec §9.5), which logs the style that won.

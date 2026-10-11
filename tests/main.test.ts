@@ -4,10 +4,10 @@ import { join } from "node:path";
 import * as core from "@actions/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Wrap core.info in a spy (ESM namespaces cannot be spied on directly); behavior is unchanged.
+// Wrap logging in spies (ESM namespaces cannot be spied on directly); behavior is unchanged.
 vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
-  return { ...actual, info: vi.fn(actual.info) };
+  return { ...actual, info: vi.fn(actual.info), warning: vi.fn(actual.warning) };
 });
 import { cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
 import { readPrMeta } from "../src/diff.js";
@@ -79,7 +79,7 @@ interface Rec {
   /** Which seam served the slow-path LLM call (spec §9.5 wiring). */
   llmVia?: "probe" | "style";
   ollamaCalled: number;
-  validateAuth?: { header?: string };
+  modelProtocol?: "openai" | "anthropic" | "google";
   scanEnv?: NodeJS.ProcessEnv;
   l2Env?: NodeJS.ProcessEnv;
   agentCalled: number;
@@ -192,7 +192,7 @@ interface MockOpts {
   postComment?: boolean;
   binaryOnly?: boolean;
   prNumber?: number | null;
-  validateModel?: boolean | "reject";
+  modelCheck?: "listed" | "absent" | "unknown";
   write403?: boolean;
   staleDuringPost?: boolean;
   issueFallback?: boolean;
@@ -278,10 +278,9 @@ async function runWithMocks(o: MockOpts = {}) {
       ensureOllama: async () => {
         rec.ollamaCalled += 1;
       },
-      validateModelExists: async (_baseUrl, _model, _key, auth) => {
-        rec.validateAuth = auth;
-        if (o.validateModel === "reject") throw new Error("GET /models failed with HTTP 500");
-        return o.validateModel !== false;
+      checkModelListed: async (_baseUrl, _model, _key, protocol) => {
+        rec.modelProtocol = protocol;
+        return { status: o.modelCheck ?? "listed" };
       },
       callByStyle: async () => {
         rec.llmCalled += 1;
@@ -341,7 +340,7 @@ async function runWithMocks(o: MockOpts = {}) {
     reviewAttempts: rec.reviewAttempts,
     issueComments: rec.issueComments,
     getPrCalls: rec.getPrCalls,
-    validateAuth: rec.validateAuth,
+    modelProtocol: rec.modelProtocol,
     body: rec.reviews.at(-1)?.body,
     llmCalled: rec.llmCalled,
     llmVia: rec.llmVia,
@@ -433,7 +432,7 @@ async function runPrivileged(o: PrivOpts = {}) {
       runScanners: spyFail("scanners"),
       runL2: spyFail("l2"),
       ensureOllama: spyFail("ollama"),
-      validateModelExists: spyFail("models"),
+      checkModelListed: spyFail("models"),
       callByStyle: spyFail("llm"),
       callWithProbe: spyFail("llm"),
       callByStyleAgent: spyFail("llm-agent"),
@@ -510,12 +509,24 @@ describe("run() orchestration", () => {
     );
   });
 
-  it("validateModelExists rejection skips the slow path with a warning but still posts fast-path", async () => {
-    const r = await runWithMocks({ validateModel: "reject" });
+  it("an inconclusive model check warns and continues to inference", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ modelCheck: "unknown" });
+    expect(r.posted).toBe(true);
+    expect(r.slowPathSkipped).toBe(false);
+    expect(r.findingsFrom).not.toBe("fastpath");
+    expect(r.llmCalled).toBeGreaterThan(0);
+    expect(vi.mocked(core.warning).mock.calls.some(([message]) => String(message).includes("model check inconclusive"))).toBe(true);
+  });
+
+  it("an absent model skips the slow path with a warning but still posts fast-path", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ modelCheck: "absent" });
     expect(r.posted).toBe(true);
     expect(r.slowPathSkipped).toBe(true);
     expect(r.findingsFrom).toBe("fastpath");
     expect(r.llmCalled).toBe(0);
+    expect(vi.mocked(core.warning).mock.calls.some(([message]) => String(message).includes("is not listed by the provider"))).toBe(true);
   });
 
   it("missing pr-meta.json in the privileged flow is a clear error and posts nothing", async () => {
@@ -548,7 +559,7 @@ describe("run() orchestration", () => {
         ensureOllama: () => {
           throw new Error("ollama must not run");
         },
-        validateModelExists: () => {
+        checkModelListed: () => {
           throw new Error("models must not run");
         },
         callByStyle: () => {
@@ -919,15 +930,20 @@ describe("run() orchestration", () => {
     ]);
   });
 
-  // R1: the slow path derives the /models auth header from provider + resolved style.
-  it("models check uses Authorization Bearer by default", async () => {
+  it("models check uses the OpenAI catalog by default", async () => {
     const r = await runWithMocks({});
-    expect(r.validateAuth?.header).toBe("Authorization");
+    expect(r.modelProtocol).toBe("openai");
   });
 
-  it("models check uses x-goog-api-key for the google preset speaking google-models", async () => {
+  it("models check uses the Google catalog for the google preset speaking google-models", async () => {
     const r = await runWithMocks({ llmProvider: "google", llmApiStyle: "google-models", llmModel: "gemini-x", llmBaseUrl: "" });
-    expect(r.validateAuth?.header).toBe("x-goog-api-key");
+    expect(r.modelProtocol).toBe("google");
+    expect(r.slowPathSkipped).toBe(false);
+  });
+
+  it("models check uses the Anthropic catalog for the anthropic preset", async () => {
+    const r = await runWithMocks({ llmProvider: "anthropic", llmApiStyle: "anthropic-messages", llmModel: "claude-x", llmBaseUrl: "" });
+    expect(r.modelProtocol).toBe("anthropic");
     expect(r.slowPathSkipped).toBe(false);
   });
 
@@ -1151,7 +1167,7 @@ describe("findings from binaries, renames and skip paths", () => {
         runScanners: fail("scanners"),
         runL2: fail("l2"),
         ensureOllama: fail("ollama"),
-        validateModelExists: fail("models"),
+        checkModelListed: fail("models"),
         callByStyle: fail("llm"),
         callWithProbe: fail("llm"),
         callByStyleAgent: fail("llm-agent"),
