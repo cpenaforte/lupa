@@ -620,6 +620,107 @@ describe("run() orchestration", () => {
     expect(r.summaryWritten).toBe(true);
   });
 
+  it("Step Summary includes an inline-only finding and its remediation", async () => {
+    const finding = { ...LLM_FINDING, suggestion: "Use a bounded check." };
+    const normal = await runWithMocks({ llm: [finding] });
+    const summary = readFileSync(normal.summaryPath, "utf8");
+    for (const text of ["warning", "src/a.ts:2", "logic", "llm message", "Suggested remediation (advice only)", "Use a bounded check."]) {
+      expect(summary).toContain(text);
+    }
+  });
+
+  it("dry-run Step Summary includes an inline-only finding and its remediation", async () => {
+    const finding = { ...LLM_FINDING, suggestion: "Keep this advice." };
+    const dry = await runWithMocks({ postComment: false, llm: [finding] });
+    expect(dry.posted).toBe(false);
+    const summary = readFileSync(dry.summaryPath, "utf8");
+    for (const text of ["warning", "src/a.ts:2", "logic", "llm message", "Suggested remediation (advice only)", "Keep this advice."]) {
+      expect(summary).toContain(text);
+    }
+  });
+
+  it("issue fallback publishes the complete report for an inline-only finding", async () => {
+    const finding = { ...LLM_FINDING, suggestion: "Use a bounded check." };
+    const refused = await runWithMocks({ write403: true, issueFallback: true, llm: [finding] });
+    const summary = readFileSync(refused.summaryPath, "utf8");
+    for (const text of ["warning", "src/a.ts:2", "logic", "llm message", "Use a bounded check."]) {
+      expect(refused.issueComments[0]).toContain(text);
+    }
+    expect(refused.issueComments[0]).toBe(summary.trimEnd());
+    expect(refused.posted).toBe(true);
+  });
+
+  it("complete fallback report stays out of the compact review body", async () => {
+    const finding = { ...LLM_FINDING, suggestion: "Use a bounded check." };
+    const normal = await runWithMocks({ llm: [finding] });
+    expect(normal.reviews[0]!.comments[0]!.body).toContain(finding.message);
+    expect(normal.reviews[0]!.comments[0]!.body).toContain(finding.suggestion);
+    expect(normal.reviews[0]!.body).toContain("1 finding(s)");
+    expect(normal.reviews[0]!.body).not.toContain(finding.message);
+    expect(normal.reviews[0]!.body).not.toContain(finding.suggestion);
+  });
+
+  it("normal Step Summary redacts GitHub and LLM secrets", async () => {
+    const githubToken = "gh-secret-token-123";
+    const llmApiKey = "sk-secret-key-456";
+    const leaked: Finding = {
+      severity: "warning",
+      file: `src/${githubToken}-${llmApiKey}.ts`,
+      line: 2,
+      rule: `${githubToken}-${llmApiKey}`,
+      message: `${githubToken} ${llmApiKey}`,
+      suggestion: `replace ${githubToken} ${llmApiKey}`,
+    };
+    const result = await runWithMocks({ githubToken, llmApiKey, llm: [leaked] });
+    const summary = readFileSync(result.summaryPath, "utf8");
+    expect(summary).not.toContain(githubToken);
+    expect(summary).not.toContain(llmApiKey);
+    for (const redacted of ["src/[REDACTED]-[REDACTED].ts:2", "[REDACTED]-[REDACTED]", "[REDACTED] [REDACTED]", "replace [REDACTED] [REDACTED]"]) {
+      expect(summary).toContain(redacted);
+    }
+  });
+
+  it("dry-run Step Summary redacts GitHub and LLM secrets", async () => {
+    const githubToken = "gh-secret-token-123";
+    const llmApiKey = "sk-secret-key-456";
+    const leaked: Finding = {
+      severity: "warning",
+      file: `src/${githubToken}-${llmApiKey}.ts`,
+      line: 2,
+      rule: `${githubToken}-${llmApiKey}`,
+      message: `${githubToken} ${llmApiKey}`,
+      suggestion: `replace ${githubToken} ${llmApiKey}`,
+    };
+    const result = await runWithMocks({ githubToken, llmApiKey, postComment: false, llm: [leaked] });
+    expect(result.posted).toBe(false);
+    const summary = readFileSync(result.summaryPath, "utf8");
+    expect(summary).not.toContain(githubToken);
+    expect(summary).not.toContain(llmApiKey);
+    for (const redacted of ["src/[REDACTED]-[REDACTED].ts:2", "[REDACTED]-[REDACTED]", "[REDACTED] [REDACTED]", "replace [REDACTED] [REDACTED]"]) {
+      expect(summary).toContain(redacted);
+    }
+  });
+
+  it("issue fallback redacts both fallback report destinations", async () => {
+    const githubToken = "gh-secret-token-123";
+    const llmApiKey = "sk-secret-key-456";
+    const leaked: Finding = {
+      severity: "warning",
+      file: `src/${githubToken}-${llmApiKey}.ts`,
+      line: 2,
+      rule: `${githubToken}-${llmApiKey}`,
+      message: `${githubToken} ${llmApiKey}`,
+      suggestion: `replace ${githubToken} ${llmApiKey}`,
+    };
+    const result = await runWithMocks({ githubToken, llmApiKey, write403: true, issueFallback: true, llm: [leaked] });
+    const summary = readFileSync(result.summaryPath, "utf8");
+    for (const output of [summary, result.issueComments[0]!]) {
+      expect(output).not.toContain(githubToken);
+      expect(output).not.toContain(llmApiKey);
+      expect(output).toContain("replace [REDACTED] [REDACTED]");
+    }
+  });
+
   it("issue fallback posts a summary comment when the review is refused and fallback is enabled", async () => {
     const r = await runWithMocks({ write403: true, issueFallback: true });
     expect(r.reviewAttempts).toBe(1);

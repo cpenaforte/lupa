@@ -27728,6 +27728,80 @@ function locate(f) {
     return "(repository)";
   return isValidLine(f.line) ? `${f.file}:${f.line}` : f.file;
 }
+function buildFallbackReport(findings, options = {}) {
+  const heading = findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
+  const fullRecords = findings.map((f, index) => {
+    const field = (value) => {
+      const fence = fenceFor(value);
+      return `${fence}text
+${value}
+${fence}`;
+    };
+    const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
+    return [
+      `### Finding ${index + 1}`,
+      "",
+      `- Severity: ${f.severity}`,
+      `- Location:
+${field(locate(f))}`,
+      `- Rule:
+${field(f.rule)}`,
+      `- Message/evidence:
+${field(f.message)}`,
+      `- Suggested remediation (advice only):
+${field(suggestion)}`
+    ].join("\n");
+  });
+  const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
+  const prefixBytes = [0];
+  for (const length of recordBytes) {
+    const previous = prefixBytes[prefixBytes.length - 1];
+    prefixBytes.push(previous + (prefixBytes.length > 1 ? 2 : 0) + length);
+  }
+  const headingBytes = Buffer.byteLength(heading, "utf8");
+  const render = (retained2, marker) => {
+    const records = fullRecords.slice(0, retained2).join("\n\n");
+    if (marker === void 0)
+      return retained2 === 0 ? heading : `${heading}
+
+${records}`;
+    return retained2 === 0 ? `${heading}
+
+${marker}` : `${heading}
+
+${records}
+
+${marker}`;
+  };
+  if (options.maxBytes === void 0) {
+    return render(findings.length);
+  }
+  const maxBytes = options.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    throw new RangeError("maxBytes must be a non-negative safe integer");
+  if (findings.length === 0) {
+    if (headingBytes <= maxBytes)
+      return heading;
+    throw new RangeError("maxBytes is too small for the report heading");
+  }
+  if (headingBytes + 2 + prefixBytes[findings.length] <= maxBytes)
+    return render(findings.length);
+  let retained = -1;
+  let omissionMarker = "";
+  for (let candidateRetained = findings.length - 1; candidateRetained >= 0; candidateRetained--) {
+    const omitted = findings.length - candidateRetained;
+    const marker = `> Omitted: ${omitted} finding(s) omitted because the report output limit was reached.`;
+    const candidateBytes = headingBytes + 2 + prefixBytes[candidateRetained] + (candidateRetained > 0 ? 2 : 0) + Buffer.byteLength(marker, "utf8");
+    if (candidateBytes <= maxBytes) {
+      retained = candidateRetained;
+      omissionMarker = marker;
+      break;
+    }
+  }
+  if (retained < 0)
+    throw new RangeError("maxBytes is too small for the report heading and omission marker");
+  return render(retained, omissionMarker);
+}
 function buildBody(general, summary2) {
   const head = summary2.trim() === "" ? FALLBACK_SUMMARY : summary2.trim();
   if (general.length === 0)
@@ -28381,6 +28455,7 @@ function runtimeSecrets(env) {
 async function publishReview(a) {
   const findings = redactFindings(a.findings, runtimeSecrets(a.env));
   const { inline, general } = mapToComments(findings, parseHunks(a.hunks));
+  const report = buildFallbackReport(findings);
   const body = buildBody(general, summaryFor(findings));
   const payload = {
     commit_id: a.headSha,
@@ -28389,7 +28464,7 @@ async function publishReview(a) {
     comments: inline
   };
   if (a.env.summaryPath !== void 0) {
-    appendFileSync2(a.env.summaryPath, body + "\n", "utf8");
+    appendFileSync2(a.env.summaryPath, report + "\n", "utf8");
     a.out.summaryWritten = true;
   }
   if (!a.env.inputs.postComment) {
@@ -28426,7 +28501,7 @@ async function publishReview(a) {
       return;
     }
     try {
-      await a.deps.gh.createIssueComment(a.pr, body, { enabled: a.env.issueFallback, issuesWrite });
+      await a.deps.gh.createIssueComment(a.pr, report, { enabled: a.env.issueFallback, issuesWrite });
       a.out.posted = true;
     } catch (fallbackErr) {
       warning(`issue fallback failed: ${fallbackErr.message}`);

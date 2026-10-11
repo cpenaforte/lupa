@@ -40,7 +40,7 @@ import {
 } from "./llm.js";
 import { buildMessages, linkedIssueNumber } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, eventFor, exitFor, mapToComments, redactFindings, type ReviewPayload } from "./review.js";
+import { buildBody, buildFallbackReport, eventFor, exitFor, mapToComments, redactFindings, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 
 /** Everything the run needs from the environment. Built by readRunEnv() in production. */
@@ -642,6 +642,7 @@ interface PublishArgs {
 async function publishReview(a: PublishArgs): Promise<void> {
   const findings = redactFindings(a.findings, runtimeSecrets(a.env));
   const { inline, general } = mapToComments(findings, parseHunks(a.hunks));
+  const report = buildFallbackReport(findings);
   const body = buildBody(general, summaryFor(findings));
   const payload: ReviewPayload = {
     commit_id: a.headSha,
@@ -650,7 +651,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
     comments: inline,
   };
   if (a.env.summaryPath !== undefined) {
-    appendFileSync(a.env.summaryPath, body + "\n", "utf8");
+    appendFileSync(a.env.summaryPath, report + "\n", "utf8");
     a.out.summaryWritten = true;
   }
   if (!a.env.inputs.postComment) {
@@ -695,7 +696,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
       return;
     }
     try {
-      await a.deps.gh.createIssueComment(a.pr, body, { enabled: a.env.issueFallback, issuesWrite });
+      await a.deps.gh.createIssueComment(a.pr, report, { enabled: a.env.issueFallback, issuesWrite });
       a.out.posted = true;
     } catch (fallbackErr) {
       core.warning(`issue fallback failed: ${(fallbackErr as Error).message}`);
