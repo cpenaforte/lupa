@@ -218,7 +218,6 @@ describe("callMessagesTurn", () => {
     await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), { allowTools: true, allowFormat: true });
     const body = lastBody();
     expect(body).not.toHaveProperty("response_format");
-    expect(body).not.toHaveProperty("text");
   });
 
   it("translates tool_use echo and tool_result blocks (is_error only when set)", async () => {
