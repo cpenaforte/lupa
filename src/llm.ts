@@ -3,9 +3,11 @@ import type { Conversation, ToolCall } from "./agent-types.js";
 import { PR_REVIEW_SCHEMA } from "./prompt.js";
 import { buildEndpointForStyle } from "./providers.js";
 import type { ApiStyle, ResolvedApiStyle, ResolvedEndpoint } from "./providers.js";
-import { callGoogle } from "./adapters/google.js";
-import { callMessages } from "./adapters/messages.js";
-import { callResponses } from "./adapters/responses.js";
+import { callGoogle, callGoogleTurn } from "./adapters/google.js";
+import { callMessages, callMessagesTurn } from "./adapters/messages.js";
+import { callResponses, callResponsesTurn } from "./adapters/responses.js";
+import { runAgent } from "./agent.js";
+import type { ToolContext } from "./agent-tools.js";
 import * as core from "@actions/core";
 
 export class InvalidJsonError extends Error {}
@@ -630,6 +632,232 @@ export async function callWithProbe(
   }
 
   // Every tried style answered 400/404: report the last failure, name what was tried.
+  core.warning(
+    `model "${model}": no API style accepted the request; tried ${attempted.join(" → ")}. ` +
+      `Set llm_api_style explicitly to skip the probe.`,
+  );
+  const detail = last !== undefined && !last.ok ? last.detail : "no API style accepted the request";
+  const status = last !== undefined && !last.ok && last.reason === "http-error" ? last.status : undefined;
+  return {
+    result: {
+      ok: false,
+      reason: "http-error",
+      detail: redact(detail, key),
+      ...(status !== undefined ? { status } : {}),
+    },
+    via: attempted.at(-1),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent-mode probe integration: the same error-driven style walk, but each
+// style runs the tool loop (runAgent) instead of a single shot. A model that
+// rejects tools falls back to single-shot for the rest of the process.
+// ---------------------------------------------------------------------------
+
+/** In-process memo of models that reject tools, keyed provider:model. */
+export const TOOLS_MEMO = new Map<string, boolean>();
+
+/** Test-only: clears the in-process tools memo (production never resets it). */
+export function resetToolsMemo(): void {
+  TOOLS_MEMO.clear();
+}
+
+/**
+ * Dispatches one agent turn to the adapter of the endpoint's resolved API
+ * style. Same options shape as `callByStyle`; the `flags` gate the
+ * tool/format fields exactly like the per-adapter turn calls.
+ */
+export async function callTurnByStyle(
+  ep: ResolvedEndpoint,
+  conv: Conversation,
+  o: {
+    model: string;
+    apiKey: string;
+    temperature?: number;
+    topP?: number;
+    maxTokens: number;
+    timeoutSeconds: number;
+    provider: string;
+  },
+  flags: { allowTools: boolean; allowFormat: boolean },
+): Promise<AgentReply> {
+  // No fallback for a missing/malformed apiStyle: resolveEndpoint always sets it,
+  // so an endpoint without one is a programming error that should fail loudly.
+  switch (ep.apiStyle) {
+    case "openai-responses":
+      return callResponsesTurn(ep, conv, o, flags);
+    case "anthropic-messages":
+      return callMessagesTurn(ep, conv, o, flags);
+    case "google-models":
+      // Google posts to {base}/models/<id>:generateContent: the model id rides the path.
+      return callGoogleTurn(ep, o.model, conv, o, flags);
+    case "openai-chat":
+      return callChatTurn(ep, conv, o, flags);
+    default:
+      // Unreachable by type; guards forged/malformed endpoints at runtime.
+      throw new Error("unsupported apiStyle: " + String(ep.apiStyle));
+  }
+}
+
+type AgentCallOptions = {
+  model: string;
+  apiKey: string;
+  temperature?: number;
+  topP?: number;
+  maxTokens: number;
+  timeoutSeconds: number;
+  provider: string;
+  maxTurns: number;
+  maxSeconds: number;
+};
+
+/**
+ * Binds one agent-loop turn to `callTurnByStyle` on a fixed endpoint. The
+ * per-turn timeout from the loop overrides the base timeout, mirroring the
+ * remaining-budget behavior of the agent runner.
+ */
+function agentCallFor(ep: ResolvedEndpoint, o: AgentCallOptions) {
+  return (
+    c: Conversation,
+    flags: { allowTools: boolean; allowFormat: boolean },
+    callOpts: { timeoutSeconds: number },
+  ): Promise<AgentReply> =>
+    callTurnByStyle(
+      ep,
+      c,
+      {
+        model: o.model,
+        apiKey: o.apiKey,
+        temperature: o.temperature,
+        topP: o.topP,
+        maxTokens: o.maxTokens,
+        timeoutSeconds: callOpts.timeoutSeconds,
+        provider: o.provider,
+      },
+      flags,
+    );
+}
+
+/**
+ * Runs the agent tool loop against one already-resolved endpoint. The `agent
+ * done` summary is logged through runAgent; the loop's final result is
+ * returned directly.
+ */
+export async function callByStyleAgent(
+  ep: ResolvedEndpoint,
+  conv: Conversation,
+  o: AgentCallOptions,
+  toolCtx: ToolContext,
+): Promise<LlmResult> {
+  const outcome = await runAgent(
+    conv,
+    toolCtx,
+    { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds },
+    { call: agentCallFor(ep, o), log: core.info },
+  );
+  return outcome.result;
+}
+
+/**
+ * Agent-mode error-driven routing. Like `callWithProbe` but each style runs
+ * the tool loop: an explicit style is honored as-is (one loop, no probe),
+ * otherwise the memoized style goes first and a 400/404 advances to the next
+ * style. A turn-0 400 that succeeds without tools marks the model as
+ * tools-unsupported (single-shot fallback, memoized); a 400 that fails even
+ * without tools advances the probe instead — the style itself is wrong, so
+ * the advance wins over the tools fallback. Any other outcome is returned
+ * as-is. When every tried style fails the result is http-error carrying the
+ * last (redacted) detail and status, plus a warning naming the model and
+ * every style tried.
+ */
+export async function callWithProbeAgent(
+  provider: string,
+  model: string,
+  baseUrl: string,
+  key: string,
+  conv: Conversation,
+  o: ProbeOptions & { maxTurns: number; maxSeconds: number },
+  toolCtx: ToolContext,
+  explicitStyle?: Exclude<ApiStyle, "custom-path">,
+): Promise<ProbeOutcome> {
+  if (key === "") {
+    return { result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+  }
+
+  const memoKey = `${provider}:${model}`;
+
+  // A model that already proved it rejects tools skips the loop entirely.
+  // The conversation has no turns at this point, so this is single-shot.
+  if (TOOLS_MEMO.get(memoKey) === false) {
+    core.info("agent tools unsupported for this model: using single-shot");
+    return callWithProbe(provider, model, baseUrl, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+  }
+
+  const agentOpts: AgentCallOptions = {
+    model,
+    apiKey: key,
+    temperature: o.temperature,
+    topP: o.topP,
+    maxTokens: o.maxTokens,
+    timeoutSeconds: o.timeoutSeconds,
+    provider,
+    maxTurns: o.maxTurns,
+    maxSeconds: o.maxSeconds,
+  };
+
+  const runStyle = async (style: ResolvedApiStyle) => {
+    const ep = buildEndpointForStyle(provider, model, baseUrl, key, style, o.prNumber ?? null, o.userBase ?? false);
+    const outcome = await runAgent(
+      conv,
+      toolCtx,
+      { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds },
+      { call: agentCallFor(ep, agentOpts), log: core.info },
+    );
+    return { outcome, via: style };
+  };
+
+  // Explicit style: the user decided; exactly one loop, no probe.
+  if (explicitStyle !== undefined && explicitStyle !== "auto") {
+    const { outcome } = await runStyle(explicitStyle);
+    return { result: outcome.result, via: explicitStyle };
+  }
+
+  // A stale memo must not dead-end the probe: the memoized style goes first,
+  // then every other style in PROBE_ORDER order.
+  const memoized = PROBE_MEMO.get(memoKey);
+  const order: readonly ResolvedApiStyle[] =
+    memoized !== undefined ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
+
+  const attempted: ResolvedApiStyle[] = [];
+  let last: LlmResult | undefined;
+  for (const style of order) {
+    attempted.push(style);
+    const { outcome } = await runStyle(style);
+    last = outcome.result;
+    if (outcome.probeAdvance) {
+      // A 400/404 invalidates any memoized style for this pair: drop it and
+      // keep probing through the remaining styles. This wins over the tools
+      // fallback below: a 400 that fails even without tools means the style
+      // itself is wrong.
+      PROBE_MEMO.delete(memoKey);
+      continue;
+    }
+    if (outcome.toolsUnsupported) {
+      // The loop fell back to single-shot: remember it for this model. The
+      // result may still be ok (fallback success), so this check must come
+      // before the ok branch.
+      TOOLS_MEMO.set(memoKey, false);
+      return { result: outcome.result, via: style };
+    }
+    if (outcome.result.ok) {
+      PROBE_MEMO.set(memoKey, style);
+      return { result: outcome.result, via: style };
+    }
+    return { result: outcome.result, via: style };
+  }
+
+  // Every tried style failed: report the last failure, name what was tried.
   core.warning(
     `model "${model}": no API style accepted the request; tried ${attempted.join(" → ")}. ` +
       `Set llm_api_style explicitly to skip the probe.`,

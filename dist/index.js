@@ -25887,6 +25887,33 @@ async function callResponses(ep, messages, o) {
   return { ok: true, findings };
 }
 
+// lib/src/agent-tools.js
+var GREP_MAX_FILE_BYTES = 1024 * 1024;
+var GREP_WORKER_SRC = [
+  'const { parentPort, workerData } = require("node:worker_threads");',
+  'const { readFileSync } = require("node:fs");',
+  "const { pattern, files, limit } = workerData;",
+  "const re = new RegExp(pattern);",
+  "const matches = [];",
+  "let filesScanned = 0;",
+  "let hitLimit = false;",
+  "for (const f of files) {",
+  "  filesScanned++;",
+  "  let content;",
+  '  try { content = readFileSync(f.abs, "utf8"); } catch { continue; }',
+  '  const lines = content.split("\\n");',
+  "  for (let i = 0; i < lines.length; i++) {",
+  "    if (re.test(lines[i])) {",
+  "      if (matches.length >= limit) { hitLimit = true; break; }",
+  "      const t = lines[i].trim();",
+  "      matches.push({ file: f.rel, line: i + 1, text: t });",
+  "    }",
+  "  }",
+  "  if (hitLimit) break;",
+  "}",
+  "parentPort.postMessage({ matches, filesScanned, hitLimit });"
+].join("\n");
+
 // lib/src/llm.js
 var InvalidJsonError = class extends Error {
 };
