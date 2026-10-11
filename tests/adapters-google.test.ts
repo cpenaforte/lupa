@@ -360,6 +360,45 @@ describe("callGoogleTurn", () => {
     ]);
   });
 
+  it("matches a native function call ID on the next functionResponse", async () => {
+    stubFetch((_c, n) => n === 1
+      ? json(200, {
+          candidates: [{
+            content: { parts: [
+              { text: "checking", thoughtSignature: "sig-native" },
+              { functionCall: { id: "native-call-7", name: "read_file", args: { path: "a.ts" } } },
+            ] },
+            finishReason: "STOP",
+          }],
+        })
+      : json(200, okGoogle("done")));
+
+    const first = await callGoogleTurn(fakeGoogleEp(), MODEL, conv(), opts(), turnFlags);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const call = first.toolCalls[0]!;
+    await callGoogleTurn(fakeGoogleEp(), MODEL, {
+      system: "s",
+      user: "u",
+      tools: [toolDef],
+      turns: [
+        { role: "assistant", text: first.text, toolCalls: first.toolCalls, rawItems: first.rawItems },
+        { role: "tool", id: call.id, name: call.name, output: "file contents" },
+      ],
+    }, opts(), turnFlags);
+
+    expect(lastBody().contents).toEqual([
+      { role: "user", parts: [{ text: "u" }] },
+      { role: "model", parts: [
+        { text: "checking", thoughtSignature: "sig-native" },
+        { functionCall: { id: "native-call-7", name: "read_file", args: { path: "a.ts" } } },
+      ] },
+      { role: "user", parts: [
+        { functionResponse: { id: "native-call-7", name: "read_file", response: { output: "file contents" } } },
+      ] },
+    ]);
+  });
+
   it("parses functionCall parts with synthesized fc_ ids", async () => {
     stubFetch(() =>
       json(200, {

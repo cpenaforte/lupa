@@ -26188,6 +26188,7 @@ function buildGoogleBody(conv, modelId, o, flags) {
     { role: "user", parts: [{ text: conv.user }] }
   ];
   let pendingResults = [];
+  const nativeCallIds = /* @__PURE__ */ new Set();
   const flushResults = () => {
     if (pendingResults.length > 0) {
       contents.push({ role: "user", parts: pendingResults });
@@ -26197,7 +26198,18 @@ function buildGoogleBody(conv, modelId, o, flags) {
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
       flushResults();
+      nativeCallIds.clear();
       if (turn.rawItems !== void 0) {
+        for (const item of turn.rawItems) {
+          if (typeof item !== "object" || item === null)
+            continue;
+          const functionCall = item.functionCall;
+          if (typeof functionCall !== "object" || functionCall === null)
+            continue;
+          const id = functionCall.id;
+          if (typeof id === "string" && id !== "")
+            nativeCallIds.add(id);
+        }
         contents.push({ role: "model", parts: turn.rawItems });
         continue;
       }
@@ -26209,11 +26221,14 @@ function buildGoogleBody(conv, modelId, o, flags) {
       }
       contents.push({ role: "model", parts });
     } else if (turn.role === "tool") {
+      const functionResponse = {
+        name: turn.name,
+        response: turn.isError ? { error: turn.output } : { output: turn.output }
+      };
+      if (nativeCallIds.has(turn.id))
+        functionResponse.id = turn.id;
       pendingResults.push({
-        functionResponse: {
-          name: turn.name,
-          response: turn.isError ? { error: turn.output } : { output: turn.output }
-        }
+        functionResponse
       });
     } else {
       flushResults();
@@ -26282,7 +26297,7 @@ function parseGoogleReply(json, flags) {
         const call = fc;
         const args = call.args;
         toolCalls.push({
-          id: `fc_${toolCalls.length}`,
+          id: typeof call.id === "string" && call.id !== "" ? call.id : `fc_${toolCalls.length}`,
           name: typeof call.name === "string" ? call.name : "",
           args,
           // Gemini's FunctionCall.args is optional; rawArgs is typed string, so
