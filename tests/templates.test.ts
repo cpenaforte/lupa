@@ -150,6 +150,16 @@ describe("workflow templates", () => {
     expect(t).toContain('- name: "Upload SARIF (same-repo PRs; needs security-events: write + actions: read above)"');
   });
 
+  it("moves concurrency to the review job and gates non-review comments", () => {
+    const t = fs.readFileSync("docs/workflow-template.yml", "utf8");
+    expect(t.slice(0, t.indexOf("jobs:"))).not.toContain("concurrency:");
+    const job = t.slice(t.indexOf("  review:"));
+    expect(job).toContain("concurrency:");
+    expect(job).toContain("cancel-in-progress: true");
+    expect(t).toContain("contains(github.event.comment.body, '/review')");
+    expect(t).toContain("github.event.review.body != ''");
+  });
+
   it("SARIF enablement documents that BOTH permissions are required and the failure mode", () => {
     const t = fs.readFileSync("docs/workflow-template.yml", "utf8");
     // Both lines stay commented by default (least privilege).
@@ -158,7 +168,7 @@ describe("workflow templates", () => {
     expect(t).not.toMatch(/^ {2}security-events: write$/m);
     expect(t).not.toMatch(/^ {2}actions: read$/m);
     // The permissions comment names both and says why private repos need actions: read.
-    const perms = t.slice(t.indexOf("permissions:"), t.indexOf("concurrency:"));
+    const perms = t.slice(t.indexOf("permissions:"), t.indexOf("jobs:"));
     expect(perms).toContain("security-events: write");
     expect(perms).toContain("actions: read");
     expect(perms).toContain("Resource not accessible by integration");

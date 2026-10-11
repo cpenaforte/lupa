@@ -42,17 +42,16 @@ permissions:
   # security-events: write
   # actions: read
 
-concurrency:
-  group: pr-reviewer-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     # Association gate at job level (M11): re-trigger comments and reviews need a trusted author.
     # The action repeats the check, so a missed gate here still never runs a review.
     if: >-
-      (github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
-      && (github.event_name != 'pull_request_review' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association))
+      (github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/review') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+      && (github.event_name != 'pull_request_review' || (github.event.review.body != '' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)))
+    concurrency:
+      group: pr-reviewer-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     env:
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
