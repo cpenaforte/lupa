@@ -360,6 +360,47 @@ describe("native model discovery", () => {
     expect(await checkModelListed("https://g/v1beta", "wanted", "K", "google")).toEqual({ status: "absent" });
   });
 
+  it("checkModelListed returns unknown when Anthropic has more pages but no usable cursor", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [{ id: "other" }], has_more: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await checkModelListed("https://a/v1", "wanted", "K", "anthropic")).status).toBe("unknown");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("checkModelListed returns unknown when Google advertises an unreadable next page token", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ models: [{ name: "models/other" }], nextPageToken: 7 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await checkModelListed("https://g/v1beta", "wanted", "K", "google")).status).toBe("unknown");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["google", "anthropic"] as const)("checkModelListed returns unknown when %s pagination remains unfinished at five pages", async (protocol) => {
+    const response = protocol === "google"
+      ? { models: [{ name: "models/other" }], nextPageToken: "more" }
+      : { data: [{ id: "other" }], has_more: true, last_id: "other" };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await checkModelListed("https://p/v1", "wanted", "K", protocol)).status).toBe("unknown");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([
+    ["openai", { data: [null, {}] }],
+    ["anthropic", { data: [{ id: "other" }, null], has_more: false }],
+    ["google", { models: [{ name: "models/other" }, {}] }],
+  ] as const)("checkModelListed returns unknown for unreadable %s catalog rows", async (protocol, catalog) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(catalog), { status: 200 })));
+    expect((await checkModelListed("https://p/v1", "wanted", "K", protocol)).status).toBe("unknown");
+  });
+
+  it("checkModelListed returns listed when a readable row matches despite another malformed row", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ data: [null, { id: "wanted" }] }), { status: 200 })));
+    expect(await checkModelListed("https://o/v1", "wanted", "K", "openai")).toEqual({ status: "listed" });
+  });
+
   it("checkModelListed treats an invalid Google page token as unknown without throwing", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ models: [{ name: "models/other" }], nextPageToken: "\uD800" }), { status: 200 }));

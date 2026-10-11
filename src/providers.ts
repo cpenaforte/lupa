@@ -214,7 +214,7 @@ function catalogHeaders(protocol: CatalogProtocol, apiKey: string): Record<strin
   return headers;
 }
 
-/** An advisory catalog check: only a parsed, non-empty catalog can rule a model absent. */
+/** An advisory catalog check: only a complete, readable, non-empty catalog can rule a model absent. */
 export async function checkModelListed(
   baseUrl: string,
   model: string,
@@ -225,6 +225,8 @@ export async function checkModelListed(
   const headers = catalogHeaders(protocol, apiKey);
   let url = protocol === "google" ? `${root}?pageSize=1000` : protocol === "anthropic" ? `${root}?limit=1000` : root;
   let sawModels = false;
+  let unreadableRows = false;
+  let completed = false;
 
   for (let page = 0; page < 5; page++) {
     const controller = new AbortController();
@@ -260,21 +262,42 @@ export async function checkModelListed(
     const found = entries.some((entry) => {
       const item = entry as Record<string, unknown> | null;
       const id = protocol === "google" ? item?.name : item?.id;
-      return (protocol === "google" && typeof id === "string" ? id.replace(/^models\//, "") : id) === model;
+      const name = protocol === "google" && typeof id === "string" ? id.replace(/^models\//, "") : id;
+      if (typeof name !== "string" || name === "") {
+        unreadableRows = true;
+        return false;
+      }
+      return name === model;
     });
     if (found) return { status: "listed" };
 
     try {
-      if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
-        url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
-      } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
+      if (protocol === "google") {
+        const token = catalog?.nextPageToken;
+        if (token === undefined || token === "") {
+          completed = true;
+          break;
+        }
+        if (typeof token !== "string") return { status: "unknown", detail: "catalog returned an invalid page cursor" };
+        url = `${root}?pageToken=${encodeURIComponent(token)}&pageSize=1000`;
+      } else if (protocol === "anthropic") {
+        if (catalog?.has_more === false) {
+          completed = true;
+          break;
+        }
+        if (catalog?.has_more !== true || typeof catalog.last_id !== "string" || catalog.last_id === "") {
+          return { status: "unknown", detail: "catalog returned an invalid page cursor" };
+        }
         url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
       } else {
+        completed = true;
         break;
       }
     } catch {
       return { status: "unknown", detail: "catalog returned an invalid page cursor" };
     }
   }
+  if (!completed) return { status: "unknown", detail: "catalog pagination limit reached" };
+  if (unreadableRows) return { status: "unknown", detail: "catalog has unreadable model rows" };
   return sawModels ? { status: "absent" } : { status: "unknown", detail: "catalog was empty" };
 }
