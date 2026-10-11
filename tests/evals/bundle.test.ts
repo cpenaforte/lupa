@@ -173,6 +173,16 @@ describe("synthetic bundle regression cases", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("documents the Flow B refusal expectation as never-asserted", () => {
+    expect(flowBRefusalCase.expected).toEqual({
+      promptDiffSnippet: "",
+      findings: [],
+      exitCode: 0,
+      summary: "",
+      publication: { kind: "none" },
+    });
+  });
+
   it("keeps a post_comment:false run summary-only", async () => {
     const testCase = evalCases.find(({ id }) => id === "synthetic-dry-run-post-comment-off")!;
     const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
@@ -208,6 +218,15 @@ describe("synthetic bundle regression cases", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects a concurrent runBundleEval while the error bridge is installed", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-non-trigger-push-event")!;
+    vi.stubGlobal("fetch", vi.fn(() => { throw new Error("unexpected network request"); }));
+    const settled = await Promise.allSettled([runBundleEval(testCase), runBundleEval(testCase)]);
+    const rejected = settled.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0]?.reason as Error)?.message ?? String(rejected[0]?.reason)).toMatch(/re-entrant/i);
+  });
+
   it("merges scanner findings into the review and the SARIF artifact", async () => {
     const testCase = evalCases.find(({ id }) => id === "synthetic-scanner-merge-into-review")!;
     const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
@@ -216,6 +235,12 @@ describe("synthetic bundle regression cases", () => {
     assertCommonCaseContract(testCase, result);
     const sarif = JSON.parse(readFileSync(join(result.artifactDir, "sarif.json"), "utf8"));
     expect(sarif.runs[0].results[0].ruleId).toBe("authorization-missing");
+    expect(result.findings).toContainEqual(
+      expect.objectContaining({ severity: "info", file: "", rule: "l2-note", message: "Synthetic L2 note." }),
+    );
+    expect(result.publications[0]?.payload?.comments ?? []).toHaveLength(1);
+    expect(JSON.stringify(result.publications[0]?.payload?.comments ?? [])).not.toContain("l2-note");
+    expect(JSON.stringify(sarif)).not.toContain("l2-note");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

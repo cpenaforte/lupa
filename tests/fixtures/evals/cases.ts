@@ -98,6 +98,11 @@ const forkL2Skipped = {
   message: "L2 native toolchains were not executed: fork PR with secrets in scope. Semgrep, gitleaks and trivy still ran.",
 } as const;
 
+const mergeL2Note = {
+  severity: "info", file: "", rule: "l2-note",
+  message: "Synthetic L2 note.",
+} as const;
+
 function summaryForMany(findings: readonly { severity: string; file: string; line?: number; rule: string; message: string }[]): string {
   return [`lupa: ${findings.length} finding(s).`, ...findings.flatMap((finding, index) => [
     "", `### Finding ${index + 1}`, "", `- Severity: ${finding.severity}`, "- Location:", "```text",
@@ -355,10 +360,18 @@ export const evalCases: readonly EvalCase[] = [
     syntheticRationale: "Synthetic merge control: a scanner finding reaches the review and the SARIF artifact beside an empty LLM result.",
     patchFixture: "positive-authz.patch",
     scannerFindings: [authzFinding],
+    l2Findings: [mergeL2Note],
     llmFindings: [],
     expected: {
-      promptDiffSnippet: "+  return record;", findings: [authzFinding], exitCode: 2, summary: authzSummary,
-      publication: { kind: "review", payload: authzReviewPayload },
+      promptDiffSnippet: "+  return record;", findings: [authzFinding, mergeL2Note], exitCode: 2,
+      summary: summaryForMany([authzFinding, mergeL2Note]),
+      publication: {
+        kind: "review",
+        payload: {
+          ...authzReviewPayload,
+          body: "lupa: 2 finding(s).\n\n**Findings not placed inline:**\n- **info** (repository) [l2-note] Synthetic L2 note.",
+        },
+      },
     },
   },
   {
@@ -422,8 +435,9 @@ export const flowBRefusalCase: EvalCase = {
   artifactFiles: { "pr-meta.json": flowBMeta(999), "findings.json": flowBArtifactFindings },
   fakeGatewayMode: "flowBPrs",
   llmFindings: [],
+  // run() rejects for this case, so expected is never asserted: it keeps the fresh-outcome defaults.
   expected: {
-    promptDiffSnippet: "", findings: [authzFinding], exitCode: 2, summary: authzSummary,
-    publication: { kind: "review", payload: authzReviewPayload },
+    promptDiffSnippet: "", findings: [], exitCode: 0, summary: "",
+    publication: { kind: "none" },
   },
 };

@@ -50,6 +50,7 @@ function defaultInputs(): ActionInputs {
  */
 const BUNDLE_ERROR_NAMES: ReadonlySet<string> = new Set(["ReadonlyTokenError", "StaleHeadError"]);
 const ordinaryHasInstance = Function.prototype[Symbol.hasInstance];
+let bridgeInstalled = false;
 function bundleErrorHasInstance(this: unknown, e: unknown): boolean {
   if (
     typeof this === "function" &&
@@ -63,11 +64,18 @@ function bundleErrorHasInstance(this: unknown, e: unknown): boolean {
   return ordinaryHasInstance.call(this as Function, e);
 }
 function bridgeBundleErrors(): () => void {
+  // MUST NOT be used re-entrantly: the bridge mutates the shared global Error object, so a
+  // second concurrent runBundleEval (e.g. via Promise.all / it.concurrent) would see the first
+  // run's bridge and corrupt its restore. Sequential use is safe (installed here, removed in
+  // runBundleEval's finally). The flag below turns a future re-entrant caller into a loud error.
+  if (bridgeInstalled) throw new Error("lupa eval harness: bridgeBundleErrors entered re-entrantly");
+  bridgeInstalled = true;
   const prior = Object.getOwnPropertyDescriptor(Error, Symbol.hasInstance);
   Object.defineProperty(Error, Symbol.hasInstance, { configurable: true, value: bundleErrorHasInstance });
   return () => {
     if (prior === undefined) Reflect.deleteProperty(Error, Symbol.hasInstance);
     else Object.defineProperty(Error, Symbol.hasInstance, prior);
+    bridgeInstalled = false;
   };
 }
 
