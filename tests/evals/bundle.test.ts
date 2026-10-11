@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { evalCases } from "./corpus.js";
+import { authzFinding, evalCases, flowBRefusalCase, highFinding } from "./corpus.js";
 import { cleanupEvalRuns, runBundleEval } from "./harness.js";
 import type { EvalCase, EvalRun } from "./types.js";
 import { PER_FILE_CAP } from "../../src/diff.js";
@@ -37,7 +37,24 @@ function assertCommonCaseContract(testCase: EvalCase, result: EvalRun): void {
   }
 }
 
-const requiredCategories = ["positive", "safe-negative", "repaired", "deletion", "force-push", "fork-readonly", "large-diff", "unchanged-baseline"] as const;
+const requiredCategories = [
+  "positive",
+  "safe-negative",
+  "repaired",
+  "deletion",
+  "force-push",
+  "fork-readonly",
+  "large-diff",
+  "unchanged-baseline",
+  "flow-b",
+  "dry-run",
+  "non-trigger",
+  "issue-fallback",
+  "scanner-merge",
+  "high-gate",
+  "llm-failure",
+  "stale-post",
+] as const;
 
 function promptDiff(result: EvalRun): string {
   return result.prompts.user.split("<untrusted-diff>\n")[1]?.split("\n</untrusted-diff>")[0] ?? "";
@@ -132,6 +149,114 @@ describe("synthetic bundle regression cases", () => {
     expect(promptDiff(result)).toContain("--- src/safe.ts");
     expect(promptDiff(result)).not.toContain("src/legacy-vulnerability.ts");
     expect(result.publications.flatMap((publication) => publication.payload?.comments ?? []).some(({ path }) => path === "src/legacy-vulnerability.ts")).toBe(false);
+  });
+
+  it("publishes the Flow B review from the staged artifact without analysis", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-flow-b-publish-artifact")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.analysisCalls).toEqual([]);
+    expect(result.gatewayCalls.filter(({ method }) => method === "findPrsByHead")).toHaveLength(1);
+    expect(result.publications[0]).toMatchObject({ path: "review", pr: 17, payload: {
+      commit_id: "a".repeat(40),
+      comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**warning** [authorization-missing] " + authzFinding.message }],
+    } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Flow B post when the artifact pr_number does not match the live PR", async () => {
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(runBundleEval(flowBRefusalCase)).rejects.toThrow(/refusing to post/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a post_comment:false run summary-only", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-dry-run-post-comment-off")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.publications).toEqual([]);
+    expect(result.outcome.posted).toBeFalsy();
+    expect(result.outcome.exitCode).toBe(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("notes a non-triggering push event without analysis or writes", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-non-trigger-push-event")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.summary).toContain("does not trigger a review");
+    expect(result.publications).toEqual([]);
+    expect(result.analysisCalls).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to an issue comment when the review post is refused", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-issue-fallback-after-refusal")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.outcome.posted).toBe(true);
+    expect(result.outcome.exitCode).toBe(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("merges scanner findings into the review and the SARIF artifact", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-scanner-merge-into-review")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    const sarif = JSON.parse(readFileSync(join(result.artifactDir, "sarif.json"), "utf8"));
+    expect(sarif.runs[0].results[0].ruleId).toBe("authorization-missing");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("gates a high-severity finding behind REQUEST_CHANGES", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-high-gate-request-changes")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.publications[0]?.payload?.event).toBe("REQUEST_CHANGES");
+    expect(result.publications[0]?.payload?.comments).toContainEqual({
+      path: "src/auth.ts",
+      line: 2,
+      side: "RIGHT",
+      body: "**high** [missing-auth] " + highFinding.message,
+    });
+    expect(result.outcome.exitCode).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the fast-only clean review when the LLM call fails", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-llm-failure-fast-only")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.outcome.slowPathSkipped).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("exits cleanly when GitHub rejects the post as stale", async () => {
+    const testCase = evalCases.find(({ id }) => id === "synthetic-stale-on-post-skip")!;
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runBundleEval(testCase);
+    assertCommonCaseContract(testCase, result);
+    expect(result.outcome.staleSkipped).toBe(true);
+    expect(result.outcome.exitCode).toBe(0);
+    expect(result.publications).toEqual([]);
+    expect(result.summary).toContain("skipping review for the stale head");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("imports the bundle for a push event without launching main", () => {

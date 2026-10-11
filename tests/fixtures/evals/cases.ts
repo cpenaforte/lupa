@@ -2,12 +2,20 @@ import type { EvalCase } from "../../evals/types.js";
 
 export const EVAL_CORPUS_VERSION = 1;
 
-const authzFinding = {
+export const authzFinding = {
   severity: "warning",
   file: "src/auth.ts",
   line: 2,
   rule: "authorization-missing",
   message: "The new path returns a record without checking that the caller may read it.",
+} as const;
+
+export const highFinding = {
+  severity: "high",
+  file: "src/auth.ts",
+  line: 2,
+  rule: "missing-auth",
+  message: "The changed check runs without any authentication.",
 } as const;
 
 const commandFinding = {
@@ -109,6 +117,46 @@ function inlinePayload(finding: typeof deletionFinding, side: "LEFT" | "RIGHT") 
     comments: [{ path: finding.file, line: finding.line, side, body: `**${finding.severity}** [${finding.rule}] ${finding.message}` }],
   };
 }
+
+const HEAD_SHA = "a".repeat(40);
+const BASE_SHA = "b".repeat(40);
+const PR_NUMBER = 17;
+const SYNTHETIC_REPO = "synthetic-owner/synthetic-repo";
+const SYNTHETIC_BRANCH = "synthetic-branch";
+
+const authzReviewPayload = {
+  commit_id: HEAD_SHA,
+  body: "lupa: 1 finding(s).",
+  event: "COMMENT" as const,
+  comments: [{
+    path: "src/auth.ts",
+    line: 2,
+    side: "RIGHT" as const,
+    body: "**warning** [authorization-missing] " + authzFinding.message,
+  }],
+};
+
+const workflowRunPayload = {
+  workflow_run: {
+    head_sha: HEAD_SHA,
+    head_repository: { full_name: SYNTHETIC_REPO },
+    head_branch: SYNTHETIC_BRANCH,
+  },
+};
+
+function flowBMeta(prNumber: number): string {
+  return JSON.stringify(
+    { pr_number: prNumber, head_sha: HEAD_SHA, base_sha: BASE_SHA, head_repo_full_name: SYNTHETIC_REPO, is_fork: false },
+    null,
+    2,
+  ) + "\n";
+}
+
+const flowBArtifactFindings = JSON.stringify([authzFinding], null, 2) + "\n";
+
+const staleSkipNote =
+  `lupa: PR head moved during posting; analyzed ${HEAD_SHA}, live ${"c".repeat(40)}; ` +
+  "skipping review for the stale head — a fresh run will cover the new head.";
 
 export const evalCases: readonly EvalCase[] = [
   {
@@ -248,4 +296,134 @@ export const evalCases: readonly EvalCase[] = [
       promptDiffSnippet: "+  return `ready: ${name}`;", findings: [], exitCode: 0, summary: "lupa: no findings.", publication: { kind: "review", payload: cleanPayload },
     },
   },
+  {
+    id: "synthetic-flow-b-publish-artifact",
+    categories: ["flow-b"],
+    syntheticRationale: "Synthetic privileged flow: the workflow_run post replays the PR run's staged artifact without re-analysis.",
+    patchFixture: "positive-authz.patch",
+    eventOverride: { eventName: "workflow_run", payload: workflowRunPayload },
+    artifactFiles: { "pr-meta.json": flowBMeta(PR_NUMBER), "findings.json": flowBArtifactFindings },
+    fakeGatewayMode: "flowBPrs",
+    llmFindings: [],
+    expected: {
+      promptDiffSnippet: "", findings: [authzFinding], exitCode: 2, summary: authzSummary,
+      publication: { kind: "review", payload: authzReviewPayload },
+    },
+  },
+  {
+    id: "synthetic-dry-run-post-comment-off",
+    categories: ["dry-run"],
+    syntheticRationale: "Synthetic dry-run control: post_comment false writes the summary and publishes nothing.",
+    patchFixture: "positive-authz.patch",
+    inputOverrides: { postComment: false },
+    llmFindings: [authzFinding],
+    expected: {
+      promptDiffSnippet: "+  return record;", findings: [authzFinding], exitCode: 2, summary: authzSummary,
+      publication: { kind: "none" },
+    },
+  },
+  {
+    id: "synthetic-non-trigger-push-event",
+    categories: ["non-trigger"],
+    syntheticRationale: "Synthetic non-trigger control: a push event never starts analysis or writes to GitHub.",
+    patchFixture: "positive-authz.patch",
+    eventOverride: { eventName: "push", payload: {} },
+    expected: {
+      promptDiffSnippet: "",
+      findings: [],
+      exitCode: 0,
+      summary: `lupa: event "push" does not trigger a review; nothing to do.`,
+      publication: { kind: "none" },
+    },
+  },
+  {
+    id: "synthetic-issue-fallback-after-refusal",
+    categories: ["issue-fallback"],
+    syntheticRationale: "Synthetic refusal regression: a refused review post degrades to the issue-comment fallback report.",
+    patchFixture: "positive-authz.patch",
+    fakeGatewayMode: "refusedReview",
+    envOverrides: { issueFallback: true },
+    llmFindings: [authzFinding],
+    expected: {
+      promptDiffSnippet: "+  return record;", findings: [authzFinding], exitCode: 2, summary: authzSummary,
+      publication: { kind: "issue-comment", body: authzSummary },
+    },
+  },
+  {
+    id: "synthetic-scanner-merge-into-review",
+    categories: ["scanner-merge"],
+    syntheticRationale: "Synthetic merge control: a scanner finding reaches the review and the SARIF artifact beside an empty LLM result.",
+    patchFixture: "positive-authz.patch",
+    scannerFindings: [authzFinding],
+    llmFindings: [],
+    expected: {
+      promptDiffSnippet: "+  return record;", findings: [authzFinding], exitCode: 2, summary: authzSummary,
+      publication: { kind: "review", payload: authzReviewPayload },
+    },
+  },
+  {
+    id: "synthetic-high-gate-request-changes",
+    categories: ["high-gate"],
+    syntheticRationale: "Synthetic gate regression: fail_level high turns a high-severity finding into REQUEST_CHANGES.",
+    patchFixture: "positive-authz.patch",
+    inputOverrides: { failLevel: "high" },
+    llmFindings: [highFinding],
+    expected: {
+      promptDiffSnippet: "+  return record;",
+      findings: [highFinding],
+      exitCode: 1,
+      summary: summaryForMany([highFinding]),
+      publication: {
+        kind: "review",
+        payload: {
+          commit_id: HEAD_SHA,
+          body: "lupa: 1 finding(s).",
+          event: "REQUEST_CHANGES",
+          comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**high** [missing-auth] " + highFinding.message }],
+        },
+      },
+    },
+  },
+  {
+    id: "synthetic-llm-failure-fast-only",
+    categories: ["llm-failure"],
+    syntheticRationale: "Synthetic provider refusal: a failed LLM call leaves the fast-only findings and a clean review.",
+    patchFixture: "positive-authz.patch",
+    llmError: { reason: "content-filter", detail: "synthetic refusal" },
+    expected: {
+      promptDiffSnippet: "+  return record;", findings: [], exitCode: 0, summary: "lupa: no findings.",
+      publication: { kind: "review", payload: cleanPayload },
+    },
+  },
+  {
+    id: "synthetic-stale-on-post-skip",
+    categories: ["stale-post"],
+    syntheticRationale: "Synthetic stale race: GitHub rejects the post as stale and the run exits cleanly without a review.",
+    patchFixture: "positive-authz.patch",
+    fakeGatewayMode: "staleOnPost",
+    llmFindings: [authzFinding],
+    expected: {
+      promptDiffSnippet: "+  return record;",
+      findings: [authzFinding],
+      exitCode: 0,
+      summary: `${authzSummary}\n${staleSkipNote}`,
+      publication: { kind: "none" },
+    },
+  },
 ];
+
+/** Flow B's artifact-binding refusal: run() rejects, so it never joins evalCases/it.each. */
+export const flowBRefusalCase: EvalCase = {
+  id: "synthetic-flow-b-refusal-pr-mismatch",
+  categories: ["flow-b"],
+  syntheticRationale: "Synthetic artifact-binding regression: the artifact's pr_number disagrees with the PR derived from workflow_run.",
+  patchFixture: "positive-authz.patch",
+  eventOverride: { eventName: "workflow_run", payload: workflowRunPayload },
+  artifactFiles: { "pr-meta.json": flowBMeta(999), "findings.json": flowBArtifactFindings },
+  fakeGatewayMode: "flowBPrs",
+  llmFindings: [],
+  expected: {
+    promptDiffSnippet: "", findings: [authzFinding], exitCode: 2, summary: authzSummary,
+    publication: { kind: "review", payload: authzReviewPayload },
+  },
+};

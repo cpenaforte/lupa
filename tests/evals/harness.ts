@@ -1,9 +1,11 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ActionInputs } from "../../src/inputs.js";
+import { ReadonlyTokenError, StaleHeadError } from "../../src/github.js";
 import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/main.js";
+import type { LlmResult } from "../../src/llm.js";
 import type { EvalCase, EvalPublication, EvalRun } from "./types.js";
 
 const BASE_SHA = "b".repeat(40);
@@ -37,6 +39,38 @@ function defaultInputs(): ActionInputs {
   };
 }
 
+/**
+ * `dist/index.js` instantiates its own ReadonlyTokenError/StaleHeadError classes, unreachable
+ * from the test realm (the bundle exports only run/main/readRunEnv/...), so the harness's
+ * src-realm fakes would fail publishReview's `instanceof` checks. `instanceof` resolves
+ * @@hasInstance through the shared native Error object the bundle's classes extend, so this
+ * installs a scoped own-property bridge: while bundled.run() executes, an error whose class
+ * name matches one of the two bundle error classes is recognized as an instance; every other
+ * check delegates to the ordinary builtin, preserving default semantics. Removed in `finally`.
+ */
+const BUNDLE_ERROR_NAMES: ReadonlySet<string> = new Set(["ReadonlyTokenError", "StaleHeadError"]);
+const ordinaryHasInstance = Function.prototype[Symbol.hasInstance];
+function bundleErrorHasInstance(this: unknown, e: unknown): boolean {
+  if (
+    typeof this === "function" &&
+    this !== Error &&
+    e instanceof Error &&
+    (e as Error).name === (this as { name: string }).name &&
+    BUNDLE_ERROR_NAMES.has((e as Error).name)
+  ) {
+    return true;
+  }
+  return ordinaryHasInstance.call(this as Function, e);
+}
+function bridgeBundleErrors(): () => void {
+  const prior = Object.getOwnPropertyDescriptor(Error, Symbol.hasInstance);
+  Object.defineProperty(Error, Symbol.hasInstance, { configurable: true, value: bundleErrorHasInstance });
+  return () => {
+    if (prior === undefined) Reflect.deleteProperty(Error, Symbol.hasInstance);
+    else Object.defineProperty(Error, Symbol.hasInstance, prior);
+  };
+}
+
 export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
   const root = mkdtempSync(join(tmpdir(), "lupa-eval-"));
   scratchRoots.push(root);
@@ -47,6 +81,9 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
   mkdirSync(artifactDir, { recursive: true });
   writeFileSync(summaryPath, "", "utf8");
   copyFileSync(new URL(testCase.patchFixture, fixtureDir), join(artifactDir, "diff.patch"));
+  for (const [name, contents] of Object.entries(testCase.artifactFiles ?? {})) {
+    writeFileSync(join(artifactDir, name), contents, "utf8");
+  }
   for (const [name, contents] of Object.entries(testCase.repoFiles ?? {})) {
     const path = join(workDir, name);
     mkdirSync(dirname(path), { recursive: true });
@@ -79,6 +116,7 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     },
     async findPrsByHead(headRepo, headRef) {
       gatewayCalls.push({ method: "findPrsByHead", args: [headRepo, headRef] });
+      if (testCase.fakeGatewayMode === "flowBPrs") return [PR_NUMBER];
       return [];
     },
     async getIssueBody(issue) {
@@ -91,6 +129,8 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     },
     async createReview(pr, payload) {
       gatewayCalls.push({ method: "createReview", args: [pr, payload] });
+      if (testCase.fakeGatewayMode === "refusedReview") throw new ReadonlyTokenError("refused", 403);
+      if (testCase.fakeGatewayMode === "staleOnPost") throw new StaleHeadError("a".repeat(40), "c".repeat(40));
       publications.push({ path: "review", pr, payload });
     },
     async createIssueComment(pr, body) {
@@ -98,13 +138,17 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
       publications.push({ path: "issue-comment", pr, body });
     },
   };
-  const llm = async (method: "callByStyle" | "callWithProbe", args: unknown[]) => {
+  const llm = async (method: "callByStyle" | "callWithProbe", args: unknown[]): Promise<LlmResult> => {
     analysisCalls.push({ method, args });
     const messages = method === "callByStyle"
       ? args[1] as { system: string; user: string }
       : args[4] as { system: string; user: string };
     prompts.system = messages.system;
     prompts.user = messages.user;
+    if (testCase.llmError !== undefined) {
+      const error = testCase.llmError;
+      return { ok: false as const, reason: error.reason, detail: error.detail } as LlmResult;
+    }
     return { ok: true as const, findings: [...(testCase.llmFindings ?? [])] };
   };
   const analysis: Analysis = {
@@ -135,8 +179,8 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     },
   };
   const env: RunEnv = {
-    eventName: "pull_request",
-    payload: { action: "synchronize", pull_request: { number: PR_NUMBER } },
+    eventName: testCase.eventOverride?.eventName ?? "pull_request",
+    payload: (testCase.eventOverride?.payload ?? { action: "synchronize", pull_request: { number: PR_NUMBER } }) as Record<string, unknown>,
     inputs: { ...defaultInputs(), ...testCase.inputOverrides },
     workDir,
     artifactDir,
@@ -147,8 +191,17 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     summaryPath,
     ...testCase.envOverrides,
   };
-  const outcome = await bundled.run(env, { gh: gateway, analysis } satisfies Deps);
-  const findings = JSON.parse(readFileSync(join(artifactDir, "findings.json"), "utf8")) as EvalRun["findings"];
+  const restoreHasInstance = bridgeBundleErrors();
+  let outcome: Awaited<ReturnType<typeof bundled.run>>;
+  try {
+    outcome = await bundled.run(env, { gh: gateway, analysis } satisfies Deps);
+  } finally {
+    restoreHasInstance();
+  }
+  const findingsPath = join(artifactDir, "findings.json");
+  const findings = existsSync(findingsPath)
+    ? (JSON.parse(readFileSync(findingsPath, "utf8")) as EvalRun["findings"])
+    : [];
   return {
     outcome,
     prompts,

@@ -14,12 +14,18 @@ export interface EvalCase {
   syntheticRationale: string;
   patchFixture: string;
   repoFiles?: Record<string, string>;
+  /** Extra files staged into artifactDir before run() (e.g. Flow B's pr-meta.json/findings.json). */
+  artifactFiles?: Record<string, string>;
+  /** Replaces the harness default pull_request/synchronize event. */
+  eventOverride?: { eventName: string; payload: unknown };
   inputOverrides?: Partial<ActionInputs>;
   envOverrides?: Partial<Pick<RunEnv, "tokenIsApp" | "issueFallback">>;
-  fakeGatewayMode?: "normal" | "headMovesBeforePost" | "isFork";
+  fakeGatewayMode?: "normal" | "headMovesBeforePost" | "isFork" | "refusedReview" | "staleOnPost" | "flowBPrs";
   scannerFindings?: Finding[];
   l2Findings?: Finding[];
   llmFindings?: Finding[];
+  /** When set, callByStyle/callWithProbe return { ok: false, reason, detail } instead. */
+  llmError?: { reason: string; detail: string };
   expected: {
     promptDiffSnippet: string;
     findings: Finding[];
@@ -29,7 +35,23 @@ export interface EvalCase {
   };
 }
 
-export type EvalCategory = "positive" | "safe-negative" | "repaired" | "deletion" | "force-push" | "fork-readonly" | "large-diff" | "unchanged-baseline";
+export type EvalCategory =
+  | "positive"
+  | "safe-negative"
+  | "repaired"
+  | "deletion"
+  | "force-push"
+  | "fork-readonly"
+  | "large-diff"
+  | "unchanged-baseline"
+  | "flow-b"
+  | "dry-run"
+  | "non-trigger"
+  | "issue-fallback"
+  | "scanner-merge"
+  | "high-gate"
+  | "llm-failure"
+  | "stale-post";
 
 export interface EvalPublication {
   path: "review" | "issue-comment";
