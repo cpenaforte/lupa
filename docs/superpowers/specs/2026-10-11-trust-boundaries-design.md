@@ -68,7 +68,8 @@ wins over a contradictory exit code. A failed/partial invocation emits a
 as a general review item, alongside usable partial findings, never instead of them.
 Clean-empty stays silent. Known coverage limitation: invocation health only fires
 where the scanner emits `runs[].invocations[]` (verified for semgrep; unconfirmed
-for trivy/osv-scanner/gitleaks file reports, which stay on the exit-code rule).
+for trivy/osv-scanner, which stay on the exit-code rule, and for the gitleaks file
+report, which is invocation-only).
 Fixtures: exit-2 + `executionSuccessful: false` + error notification + zero results
 yields exactly one warning; partial yields findings plus warning; semgrep exit-1 with clean
 successful SARIF yields findings only; trivy exit-1 with parseable SARIF yields
