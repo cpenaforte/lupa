@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   callLlm,
+  callChatTurn,
   validateSampling,
   tokenFieldFor,
   parseContent,
@@ -9,6 +10,7 @@ import {
   InvalidJsonError,
 } from "../src/llm.js";
 import type { ResolvedEndpoint } from "../src/providers.js";
+import type { Conversation } from "../src/agent-types.js";
 
 // ---------- helpers ----------
 
@@ -576,5 +578,114 @@ describe("ensureOllama", () => {
       "Ollama is not reachable at http://localhost:11434 (HTTP 503)",
     );
     expect(fetchCallCount()).toBe(1);
+  });
+});
+
+describe("callChatTurn", () => {
+  const toolDef = {
+    name: "read_file",
+    description: "Read a file",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  };
+
+  const conv = (): Conversation => ({ system: "s", user: "u", tools: [toolDef] });
+  const turnOpts = (provider = "openai") => opts(provider);
+  const toolFlags = { allowTools: true, allowFormat: false };
+
+  /** A chat reply carrying one read_file tool call. */
+  const toolReply = (args: string, content: string | null = null) => ({
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: {
+          content,
+          tool_calls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: args } }],
+        },
+      },
+    ],
+  });
+
+  it("turn mode sends tools and no response_format", async () => {
+    await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.tools[0].function.name).toBe("read_file");
+    expect(body.tools[0].function.parameters).toEqual(toolDef.parameters);
+    expect("response_format" in body).toBe(false);
+  });
+
+  it("translates assistant echo and tool results", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "",
+          toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+        },
+        { role: "tool", id: "c1", name: "read_file", output: "ok" },
+      ],
+      tools: [toolDef],
+    };
+    await callChatTurn(fakeOpenAiEp(), c, turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.messages[2].role).toBe("assistant");
+    expect(body.messages[2].content).toBeNull();
+    expect(body.messages[2].tool_calls[0]).toEqual({
+      id: "c1",
+      type: "function",
+      function: { name: "read_file", arguments: '{"path":"a.ts"}' },
+    });
+    expect(body.messages[3]).toEqual({ role: "tool", tool_call_id: "c1", content: "ok" });
+  });
+
+  it("parses tool_calls into AgentReply with rawArgs", async () => {
+    stubFetch(() => json(200, toolReply('{"path":"a.ts"}')));
+    const r = await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    expect(r).toEqual({
+      ok: true,
+      text: "",
+      toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+    });
+  });
+
+  it("keeps text when text and tool calls arrive together", async () => {
+    stubFetch(() => json(200, toolReply('{"path":"a.ts"}', "here you go")));
+    const r = await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.text).toBe("here you go");
+      expect(r.toolCalls).toHaveLength(1);
+    }
+  });
+
+  it("null content with tool calls is not an error", async () => {
+    stubFetch(() => json(200, toolReply('{"path":"a.ts"}', null)));
+    const r = await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.text).toBe("");
+  });
+
+  it("malformed tool arguments do not throw (args undefined)", async () => {
+    stubFetch(() => json(200, toolReply("{not json")));
+    const r = await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.toolCalls[0]!.args).toBeUndefined();
+      expect(r.toolCalls[0]!.rawArgs).toBe("{not json");
+    }
+  });
+
+  it("refusal and finish_reason=length keep single-shot mappings in turn mode", async () => {
+    stubFetch(() => json(200, { choices: [{ finish_reason: "stop", message: { content: "hi", refusal: "x" } }] }));
+    expect(await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags)).toEqual({
+      ok: false,
+      result: { ok: false, reason: "content-filter", detail: "model refused the request" },
+    });
+    stubFetch(() => json(200, { choices: [{ finish_reason: "length", message: { content: "hi" } }] }));
+    expect(await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags)).toEqual({
+      ok: false,
+      result: { ok: false, reason: "invalid-json", detail: "response truncated (finish_reason=length)" },
+    });
   });
 });

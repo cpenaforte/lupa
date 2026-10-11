@@ -25822,6 +25822,89 @@ async function attempt(ep, payload, o) {
     clearTimeout(timer);
   }
 }
+function buildChatBody(conv, o, flags) {
+  const messages = [
+    { role: "system", content: conv.system },
+    { role: "user", content: conv.user }
+  ];
+  for (const turn of conv.turns ?? []) {
+    if (turn.role === "assistant") {
+      messages.push({
+        role: "assistant",
+        content: turn.text || null,
+        tool_calls: turn.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: { name: tc.name, arguments: tc.rawArgs }
+        }))
+      });
+    } else if (turn.role === "tool") {
+      messages.push({ role: "tool", tool_call_id: turn.id, content: turn.output });
+    } else {
+      messages.push({ role: "user", content: turn.text });
+    }
+  }
+  const body = {
+    model: o.model,
+    messages,
+    [tokenFieldFor(o.model)]: o.maxTokens
+  };
+  if (flags.allowTools && conv.tools !== void 0) {
+    body.tools = conv.tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters }
+    }));
+  }
+  if (flags.allowFormat) {
+    const rf = responseFormatFor(o.provider);
+    if (rf !== void 0)
+      body.response_format = rf;
+  }
+  if (!flags.anthropic) {
+    if (o.temperature !== void 0)
+      body.temperature = o.temperature;
+    if (o.topP !== void 0)
+      body.top_p = o.topP;
+  }
+  return body;
+}
+function parseChatReply(json, flags) {
+  const choice = json?.choices?.[0];
+  const msg = choice?.message;
+  if (!flags.anthropic && typeof msg?.refusal === "string" && msg.refusal !== "") {
+    return { ok: false, result: { ok: false, reason: "content-filter", detail: "model refused the request" } };
+  }
+  if (choice?.finish_reason === "content_filter") {
+    return {
+      ok: false,
+      result: { ok: false, reason: "content-filter", detail: "provider content filter stopped the response" }
+    };
+  }
+  if (choice?.finish_reason === "length") {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response truncated (finish_reason=length)" } };
+  }
+  const toolCalls = [];
+  if (flags.allowTools && Array.isArray(msg?.tool_calls)) {
+    for (const raw of msg.tool_calls) {
+      const tc = raw ?? {};
+      const rawArgs = typeof tc.function?.arguments === "string" ? tc.function.arguments : "";
+      let args;
+      try {
+        args = JSON.parse(rawArgs);
+      } catch {
+        args = void 0;
+      }
+      toolCalls.push({
+        id: typeof tc.id === "string" ? tc.id : "",
+        name: typeof tc.function?.name === "string" ? tc.function.name : "",
+        args,
+        rawArgs
+      });
+    }
+  }
+  const text = typeof msg?.content === "string" ? msg.content : void 0;
+  return { ok: true, text, toolCalls };
+}
 async function callLlm(ep, messages, o) {
   const key = o.apiKey;
   if (key === "")
@@ -25832,24 +25915,8 @@ async function callLlm(ep, messages, o) {
   } catch (e) {
     return { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) };
   }
-  const body = {
-    model: o.model,
-    messages: [
-      { role: "system", content: messages.system },
-      { role: "user", content: messages.user }
-    ],
-    [tokenFieldFor(o.model)]: o.maxTokens
-  };
-  const rf = responseFormatFor(o.provider);
-  if (rf !== void 0)
-    body.response_format = rf;
-  if (!anthropic) {
-    if (o.temperature !== void 0)
-      body.temperature = o.temperature;
-    if (o.topP !== void 0)
-      body.top_p = o.topP;
-  }
-  const payload = JSON.stringify(body);
+  const flags = { allowTools: false, allowFormat: true, anthropic };
+  const payload = JSON.stringify(buildChatBody({ system: messages.system, user: messages.user }, o, flags));
   let a = await attempt(ep, payload, o);
   if (a.kind === "fail")
     return a.result;
@@ -25869,23 +25936,15 @@ async function callLlm(ep, messages, o) {
   } catch {
     return { ok: false, reason: "invalid-json", detail: "response body is not JSON" };
   }
-  const choice = json?.choices?.[0];
-  const msg = choice?.message;
-  if (!anthropic && typeof msg?.refusal === "string" && msg.refusal !== "") {
-    return { ok: false, reason: "content-filter", detail: "model refused the request" };
-  }
-  if (choice?.finish_reason === "content_filter") {
-    return { ok: false, reason: "content-filter", detail: "provider content filter stopped the response" };
-  }
-  if (choice?.finish_reason === "length") {
-    return { ok: false, reason: "invalid-json", detail: "response truncated (finish_reason=length)" };
-  }
-  if (typeof msg?.content !== "string") {
+  const reply = parseChatReply(json, flags);
+  if (!reply.ok)
+    return reply.result;
+  if (typeof reply.text !== "string") {
     return { ok: false, reason: "invalid-json", detail: "response has no content" };
   }
   let parsed;
   try {
-    parsed = parseContent(msg.content);
+    parsed = parseContent(reply.text);
   } catch (e) {
     return { ok: false, reason: "invalid-json", detail: errMessage(e) };
   }
