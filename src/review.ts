@@ -154,6 +154,50 @@ function locate(f: Finding): string {
   return isValidLine(f.line) ? `${f.file}:${f.line}` : f.file;
 }
 
+/** A complete, standalone report for fallback destinations. */
+export function buildFallbackReport(
+  findings: readonly Finding[],
+  options: { maxBytes?: number } = {},
+): string {
+  const heading = findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
+  const fullRecords = findings.map((f, index) => {
+    const field = (value: string): string => {
+      const fence = fenceFor(value);
+      return `${fence}text\n${value}\n${fence}`;
+    };
+    const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
+    return [
+      `### Finding ${index + 1}`,
+      "",
+      `- Severity: ${f.severity}`,
+      `- Location:\n${field(locate(f))}`,
+      `- Rule:\n${field(f.rule)}`,
+      `- Message/evidence:\n${field(f.message)}`,
+      `- Suggested remediation (advice only):\n${field(suggestion)}`,
+    ].join("\n");
+  });
+
+  if (options.maxBytes === undefined) {
+    return findings.length === 0 ? heading : `${heading}\n\n${fullRecords.join("\n\n")}`;
+  }
+  const maxBytes = options.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new RangeError("maxBytes must be a non-negative safe integer");
+  const bytes = (value: string): number => Buffer.byteLength(value, "utf8");
+  const complete = findings.length === 0 ? heading : `${heading}\n\n${fullRecords.join("\n\n")}`;
+  if (bytes(complete) <= maxBytes) return complete;
+  if (findings.length === 0) throw new RangeError("maxBytes is too small for the report heading");
+
+  for (let retained = findings.length - 1; retained >= 0; retained--) {
+    const omitted = findings.length - retained;
+    const marker = `> Omitted: ${omitted} finding(s) omitted because the report output limit was reached.`;
+    const output = retained === 0
+      ? `${heading}\n\n${marker}`
+      : `${heading}\n\n${fullRecords.slice(0, retained).join("\n\n")}\n\n${marker}`;
+    if (bytes(output) <= maxBytes) return output;
+  }
+  throw new RangeError("maxBytes is too small for the report heading and omission marker");
+}
+
 /**
  * Review body: summary plus any findings that could not be placed inline. Suggestions are
  * rendered as plain text here (never as a fence). Never empty.

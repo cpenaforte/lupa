@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, eventFor, exitFor, mapToComments, redactFindings } from "../src/review.js";
+import { buildBody, buildFallbackReport, eventFor, exitFor, mapToComments, redactFindings } from "../src/review.js";
 import { parseHunks } from "../src/diff.js";
 import type { Finding } from "../src/fastpath.js";
 
@@ -14,6 +14,77 @@ function rangeFixture() {
 function highFinding(): Finding[] {
   return [{ severity: "high", file: "a.ts", line: 4, rule: "r", message: "m" }];
 }
+
+describe("buildFallbackReport", () => {
+  it("renders every finding once in input order with all report fields", () => {
+    const inline: Finding = { severity: "warning", file: "src/a.ts", line: 2, rule: "logic", message: "first evidence", suggestion: "apply first fix" };
+    const general: Finding = { severity: "high", file: "", rule: "repository-rule", message: "second evidence" };
+    const report = buildFallbackReport([inline, general]);
+    expect(report).toContain("lupa: 2 finding(s).");
+    expect(report).toContain("### Finding 1");
+    expect(report).toContain("### Finding 2");
+    for (const value of ["warning", "src/a.ts:2", "logic", "first evidence", "apply first fix", "high", "(repository)", "repository-rule", "second evidence", "No remediation supplied"]) expect(report).toContain(value);
+    expect(report.indexOf("first evidence")).toBeLessThan(report.indexOf("second evidence"));
+    expect(report.match(/first evidence/g)).toHaveLength(1);
+    expect(report.match(/second evidence/g)).toHaveLength(1);
+  });
+
+  it("renders the no-findings heading", () => {
+    expect(buildFallbackReport([])).toBe("lupa: no findings.");
+  });
+
+  it("renders file-only and repository locations and explicit missing remediation", () => {
+    const fileOnly = buildFallbackReport([{ severity: "info", file: "b.ts", rule: "line-less", message: "file evidence" }]);
+    expect(fileOnly).toContain("b.ts");
+    expect(fileOnly).toContain("No remediation supplied");
+    const repository = buildFallbackReport([{ severity: "info", file: "", rule: "repo", message: "repo evidence" }]);
+    expect(repository).toContain("(repository)");
+  });
+
+  it("contains hostile Markdown and multiline values in dynamic text fences", () => {
+    const finding: Finding = { severity: "warning", file: "src/a.ts```\nmalicious", line: 2, rule: "rule````", message: "first line\n**bold** ```\n## fake heading", suggestion: "change ```\n- fake item" };
+    const report = buildFallbackReport([finding]);
+    expect(report).toContain("lupa: 1 finding(s).");
+    expect(report).toContain("- Location:\n````text\nsrc/a.ts```\nmalicious:2\n````");
+    expect(report).toContain("- Rule:\n`````text\nrule````\n`````");
+    expect(report).toContain("- Message/evidence:\n````text\nfirst line\n**bold** ```\n## fake heading\n````");
+    expect(report).toContain("- Suggested remediation (advice only):\n````text\nchange ```\n- fake item\n````");
+    expect(report).not.toContain("suggestion\n");
+  });
+
+  it("fits the exact UTF-8 limit and reports omissions one byte below it", () => {
+    const first: Finding = { severity: "info", file: "α.ts", line: 2, rule: "first", message: "evidence é" };
+    const second: Finding = { severity: "warning", file: "b.ts", rule: "second", message: "é".repeat(256) };
+    const findings = [first, second];
+    const full = buildFallbackReport(findings);
+    const fullBytes = Buffer.byteLength(full, "utf8");
+    expect(buildFallbackReport(findings, { maxBytes: fullBytes })).toBe(full);
+    const markerOne = "> Omitted: 1 finding(s) omitted because the report output limit was reached.";
+    const firstRecordAndMarker = ["lupa: 2 finding(s).", "", "### Finding 1", "", "- Severity: info", "- Location:", "```text", "α.ts:2", "```", "- Rule:", "```text", "first", "```", "- Message/evidence:", "```text", "evidence é", "```", "- Suggested remediation (advice only):", "```text", "No remediation supplied", "```", "", markerOne].join("\n");
+    const oneByteShort = buildFallbackReport(findings, { maxBytes: fullBytes - 1 });
+    expect(oneByteShort).toBe(firstRecordAndMarker);
+    expect(Buffer.byteLength(oneByteShort, "utf8")).toBeLessThanOrEqual(fullBytes - 1);
+  });
+
+  it("permits zero retained records when the heading and marker fit", () => {
+    const first: Finding = { severity: "info", file: "α.ts", line: 2, rule: "first", message: "evidence é" };
+    const second: Finding = { severity: "warning", file: "b.ts", rule: "second", message: "é".repeat(256) };
+    const findings = [first, second];
+    const zeroRecords = "lupa: 2 finding(s).\n\n> Omitted: 2 finding(s) omitted because the report output limit was reached.";
+    const minimumBytes = Buffer.byteLength(zeroRecords, "utf8");
+    expect(buildFallbackReport(findings, { maxBytes: minimumBytes })).toBe(zeroRecords);
+    expect(() => buildFallbackReport(findings, { maxBytes: minimumBytes - 1 })).toThrow(RangeError);
+    expect(buildFallbackReport([], { maxBytes: Buffer.byteLength("lupa: no findings.", "utf8") })).toBe("lupa: no findings.");
+    expect(() => buildFallbackReport([], { maxBytes: Buffer.byteLength("lupa: no findings.", "utf8") - 1 })).toThrow(RangeError);
+  });
+
+  it("rejects invalid and undersized byte limits", () => {
+    const first: Finding = { severity: "info", file: "a.ts", rule: "r", message: "m" };
+    for (const maxBytes of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) expect(() => buildFallbackReport([first], { maxBytes })).toThrow(RangeError);
+    const minimum = Buffer.byteLength("lupa: 1 finding(s).\n\n> Omitted: 1 finding(s) omitted because the report output limit was reached.", "utf8");
+    expect(() => buildFallbackReport([first], { maxBytes: minimum - 1 })).toThrow(RangeError);
+  });
+});
 
 describe("mapToComments", () => {
   it("deletion maps LEFT, addition RIGHT, off-diff goes general", () => {
