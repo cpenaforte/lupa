@@ -571,7 +571,10 @@ async function slowPath(
             return deps.gh.getRepoSize(o!, n!);
           },
         });
-        if ("dir" in r) toolCtx.roots.linked!.set(alias, r.dir);
+        if ("dir" in r) {
+          toolCtx.roots.linked!.set(alias, r.dir);
+          if ("sha" in r && r.sha !== "") core.info(`agent linked repo ${alias} at ${r.sha}`);
+        }
         return r;
       },
     };

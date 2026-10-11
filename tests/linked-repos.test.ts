@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureLinkedRepo, parseLinkedRepos } from "../src/linked-repos.js";
@@ -63,18 +63,17 @@ describe("ensureLinkedRepo", () => {
     const baseDir = tempRoot();
     const token = "s3cret-token";
     const expectedDir = join(baseDir, "acme__tools");
-    let seenArgs: string[] = [];
-    let seenEnv: NodeJS.ProcessEnv = {};
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
     const deps: CloneDeps = {
       run: async (_cmd, args, o) => {
-        seenArgs = args;
-        seenEnv = o.env;
+        calls.push({ args, env: o.env });
         return { code: 0, stdout: "", stderr: "" };
       },
     };
     const res = await ensureLinkedRepo("acme/tools", { token, baseDir, deps });
-    expect(res).toEqual({ dir: expectedDir });
-    expect(seenArgs).toEqual([
+    expect(res).toEqual({ dir: expectedDir, sha: "" });
+    const cloneCall = calls.find((c) => c.args[0] === "clone");
+    expect(cloneCall!.args).toEqual([
       "clone",
       "--depth",
       "1",
@@ -82,12 +81,24 @@ describe("ensureLinkedRepo", () => {
       "https://github.com/acme/tools.git",
       expectedDir,
     ]);
-    expect(seenArgs.join(" ")).not.toContain(token);
-    expect(seenEnv.GIT_CONFIG_VALUE_0).toBe(
+    expect(cloneCall!.args.join(" ")).not.toContain(token);
+    expect(cloneCall!.env.GIT_CONFIG_VALUE_0).toBe(
       "Authorization: Basic " + Buffer.from("x-access-token:" + token, "utf8").toString("base64"),
     );
-    expect(seenEnv.GIT_CONFIG_COUNT).toBe("1");
-    expect(seenEnv.GIT_CONFIG_KEY_0).toBe("http.extraHeader");
+    expect(cloneCall!.env.GIT_CONFIG_COUNT).toBe("1");
+    expect(cloneCall!.env.GIT_CONFIG_KEY_0).toBe("http.extraHeader");
+    // Git introspection for validation/marker carries no token vars.
+    for (const c of calls.filter((c) => c.args[0] !== "clone")) {
+      expect(c.env.GIT_CONFIG_COUNT).toBeUndefined();
+      expect(c.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+      expect(c.env.GIT_TERMINAL_PROMPT).toBe("0");
+    }
+    // A fresh clone records its marker for later validation.
+    expect(JSON.parse(readFileSync(join(expectedDir, ".lupa-clone.json"), "utf8"))).toEqual({
+      repo: "acme/tools",
+      branch: "",
+      sha: "",
+    });
 
     // Empty token omits the GIT_CONFIG_* vars.
     let emptyEnv: NodeJS.ProcessEnv = {};
@@ -99,18 +110,154 @@ describe("ensureLinkedRepo", () => {
     expect(emptyEnv.GIT_CONFIG_COUNT).toBeUndefined();
     expect(emptyEnv.GIT_CONFIG_VALUE_0).toBeUndefined();
 
-    // Already-cloned dir is returned without running git.
+    // An existing dir without git metadata is never trusted: wipe and re-clone.
     mkdirSync(join(baseDir, "cached__repo"));
+    const recloneArgv: string[][] = [];
     const cached = await ensureLinkedRepo("cached/repo", {
       token,
       baseDir,
       deps: {
-        run: async () => {
-          throw new Error("must not run when dir exists");
+        run: async (_cmd, args) => {
+          recloneArgv.push(args);
+          if (args[0] === "clone") {
+            mkdirSync(args[args.length - 1]!, { recursive: true });
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          return { code: 0, stdout: "", stderr: "" };
         },
       },
     });
-    expect(cached).toEqual({ dir: join(baseDir, "cached__repo") });
+    expect(recloneArgv.some((a) => a[0] === "clone")).toBe(true);
+    expect(cached).toEqual({ dir: join(baseDir, "cached__repo"), sha: "" });
+  });
+
+  it("re-clones on origin mismatch", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(
+      join(dir, ".lupa-clone.json"),
+      JSON.stringify({ repo: "a/b", branch: "main", sha: "0".repeat(40) }),
+    );
+    const argv: string[][] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        argv.push(args);
+        if (args[0] === "clone") {
+          mkdirSync(args[args.length - 1]!, { recursive: true });
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "config") return { code: 0, stdout: "https://github.com/other/repo.git\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
+    expect(argv.some((a) => a[0] === "clone")).toBe(true);
+    expect(res).toEqual({ dir, sha: "" });
+    expect(JSON.parse(readFileSync(join(dir, ".lupa-clone.json"), "utf8")).repo).toBe("a/b");
+  });
+
+  it("re-clones when rev-parse fails (corrupt .git) without throwing", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(
+      join(dir, ".lupa-clone.json"),
+      JSON.stringify({ repo: "a/b", branch: "main", sha: "0".repeat(40) }),
+    );
+    const argv: string[][] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        argv.push(args);
+        if (args[0] === "clone") {
+          mkdirSync(args[args.length - 1]!, { recursive: true });
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "config") return { code: 0, stdout: "https://github.com/a/b.git\n", stderr: "" };
+        throw new Error("fatal: not a git repository");
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
+    expect(argv.some((a) => a[0] === "clone")).toBe(true);
+    expect(res).toEqual({ dir, sha: "" });
+  });
+
+  it("reuses a valid cache with zero git-mutating calls and returns its sha", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    // The marker sha is stale on purpose: the sha comes from git, never the marker.
+    writeFileSync(
+      join(dir, ".lupa-clone.json"),
+      JSON.stringify({ repo: "a/b", branch: "main", sha: "0".repeat(40) }),
+    );
+    const head = "d".repeat(40);
+    const argv: string[][] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, args, o) => {
+        argv.push(args);
+        expect(o.cwd).toBe(dir);
+        expect(o.env.GIT_CONFIG_COUNT).toBeUndefined();
+        expect(o.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+        if (args[0] === "config") return { code: 0, stdout: "https://github.com/a/b.git\n", stderr: "" };
+        if (args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
+        if (args[0] === "rev-parse") return { code: 0, stdout: head + "\n", stderr: "" };
+        throw new Error("unexpected git call: " + args.join(" "));
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
+    expect(res).toEqual({ dir, sha: head });
+    expect(argv.some((a) => a[0] === "clone")).toBe(false);
+    for (const a of argv) expect(["config", "rev-parse"]).toContain(a[0]);
+  });
+
+  it("skips the size check when maxBytes is undefined", async () => {
+    const seed = (): { baseDir: string; dir: string } => {
+      const baseDir = tempRoot();
+      const dir = join(baseDir, "a__b");
+      mkdirSync(join(dir, ".git"), { recursive: true });
+      writeFileSync(
+        join(dir, ".lupa-clone.json"),
+        JSON.stringify({ repo: "a/b", branch: "main", sha: "0".repeat(40) }),
+      );
+      writeFileSync(join(dir, "big.bin"), Buffer.alloc(4096, 1));
+      return { baseDir, dir };
+    };
+    const head = "e".repeat(40);
+    const validatingDeps = (argv: string[][]): CloneDeps => ({
+      run: async (_cmd, args) => {
+        argv.push(args);
+        if (args[0] === "clone") {
+          mkdirSync(args[args.length - 1]!, { recursive: true });
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "config") return { code: 0, stdout: "https://github.com/a/b.git\n", stderr: "" };
+        if (args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
+        if (args[0] === "rev-parse") return { code: 0, stdout: head + "\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    // No maxBytes: the oversized (but otherwise valid) cache is reused.
+    const seeded = seed();
+    const reuseArgv: string[][] = [];
+    const reused = await ensureLinkedRepo("a/b", {
+      token: "",
+      baseDir: seeded.baseDir,
+      deps: validatingDeps(reuseArgv),
+    });
+    expect(reused).toEqual({ dir: seeded.dir, sha: head });
+    expect(reuseArgv.some((a) => a[0] === "clone")).toBe(false);
+    // With maxBytes set: the same layout exceeds the budget and is re-cloned.
+    const seeded2 = seed();
+    const sizedArgv: string[][] = [];
+    const resized = await ensureLinkedRepo("a/b", {
+      token: "",
+      baseDir: seeded2.baseDir,
+      maxBytes: 1024,
+      deps: validatingDeps(sizedArgv),
+    });
+    expect(sizedArgv.some((a) => a[0] === "clone")).toBe(true);
+    expect(resized).toEqual({ dir: seeded2.dir, sha: head });
   });
 
   it("ensureLinkedRepo returns not-accessible on failure with token redacted", async () => {
@@ -173,6 +320,6 @@ describe("ensureLinkedRepo", () => {
       run: async () => ({ code: 0, stdout: "", stderr: "" }),
     };
     const res = await ensureLinkedRepo("a/b/c", { token: "", baseDir, deps });
-    expect(res).toEqual({ dir: join(baseDir, "a__b__c") });
+    expect(res).toEqual({ dir: join(baseDir, "a__b__c"), sha: "" });
   });
 });

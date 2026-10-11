@@ -24497,7 +24497,7 @@ function getOctokit(token, options, ...additionalPlugins) {
 }
 
 // lib/src/main.js
-import { appendFileSync as appendFileSync2, copyFileSync, existsSync as existsSync5, readFileSync as readFileSync5, rmSync as rmSync2, statSync as statSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { appendFileSync as appendFileSync2, copyFileSync, existsSync as existsSync5, readFileSync as readFileSync6, rmSync as rmSync2, statSync as statSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename as basename3, dirname as dirname2, join as join6 } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25624,7 +25624,7 @@ function readOptionalInt(name, min) {
 
 // lib/src/linked-repos.js
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync4, mkdirSync, readdirSync as readdirSync3, renameSync, rmSync, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 var CLONE_TIMEOUT_MS = 6e4;
 function defaultRun(cmd, args, o) {
@@ -25724,9 +25724,13 @@ function removeDir(dir) {
 }
 async function ensureLinkedRepo(alias, o) {
   const dir = join4(o.baseDir, alias.split("/").join("__"));
-  if (existsSync4(dir))
-    return { dir };
   const deps = o.deps ?? { run: defaultRun, ...o.sizeKb !== void 0 ? { sizeKb: o.sizeKb } : {} };
+  if (existsSync4(dir)) {
+    const sha = await validateCache(deps, alias, dir, o);
+    if (sha !== null)
+      return { dir, sha };
+    removeDir(dir);
+  }
   if (o.maxBytes !== void 0 && deps.sizeKb) {
     let kb;
     try {
@@ -25770,7 +25774,76 @@ async function ensureLinkedRepo(alias, o) {
       return { error: "repository too large" };
     }
   }
-  return { dir };
+  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync2(join4(dir, MARKER_NAME), JSON.stringify({ repo: alias, branch: head.branch, sha: head.sha }), "utf8");
+  return { dir, sha: head.sha };
+}
+var MARKER_NAME = ".lupa-clone.json";
+function readMarker(dir) {
+  let raw;
+  try {
+    raw = readFileSync5(join4(dir, MARKER_NAME), "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.repo !== "string" || typeof parsed.branch !== "string" || typeof parsed.sha !== "string") {
+      return null;
+    }
+    return { repo: parsed.repo, branch: parsed.branch, sha: parsed.sha };
+  } catch {
+    return null;
+  }
+}
+async function cloneHead(deps, dir, timeoutMs) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  let branch = "";
+  let sha = "";
+  try {
+    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
+    if (b.code === 0)
+      branch = b.stdout.trim();
+    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs });
+    if (h.code === 0)
+      sha = h.stdout.trim();
+  } catch {
+  }
+  return { branch, sha };
+}
+async function validateCache(deps, alias, dir, o) {
+  if (!existsSync4(join4(dir, ".git")))
+    return null;
+  const marker = readMarker(dir);
+  if (marker === null || marker.repo !== alias)
+    return null;
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const timeoutMs = o.timeoutMs ?? CLONE_TIMEOUT_MS;
+  try {
+    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs });
+    if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`)
+      return null;
+    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
+    if (branch.code !== 0 || branch.stdout.trim() !== marker.branch)
+      return null;
+    if (o.maxBytes !== void 0) {
+      let total;
+      try {
+        total = dirBytes(dir);
+      } catch {
+        return null;
+      }
+      if (total > o.maxBytes)
+        return null;
+    }
+    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs });
+    if (head.code !== 0)
+      return null;
+    return head.stdout.trim();
+  } catch {
+    return null;
+  }
 }
 
 // lib/src/prompt.js
@@ -27901,7 +27974,7 @@ function readDiff(dir) {
   const path = join6(dir, "diff.patch");
   if (!existsSync5(path))
     throw new Error(`pr-reviewer: diff.patch not found in ${dir}`);
-  return readFileSync5(path, "utf8");
+  return readFileSync6(path, "utf8");
 }
 function sizeOf(workDir, file) {
   if (workDir === void 0)
@@ -27986,7 +28059,7 @@ function readFindings(dir) {
     throw new Error(`pr-reviewer: findings.json not found in ${dir}`);
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync5(path, "utf8"));
+    parsed = JSON.parse(readFileSync6(path, "utf8"));
   } catch {
     throw new Error("pr-reviewer: findings.json is malformed JSON");
   }
@@ -27996,7 +28069,7 @@ function readFindings(dir) {
   return parsed;
 }
 function writeFindings(dir, findings) {
-  writeFileSync2(join6(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
+  writeFileSync3(join6(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
 }
 function capText(s, cap) {
   const cps = Array.from(s);
@@ -28147,8 +28220,11 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prB
             return deps.gh.getRepoSize(o, n);
           }
         });
-        if ("dir" in r)
+        if ("dir" in r) {
           toolCtx.roots.linked.set(alias, r.dir);
+          if ("sha" in r && r.sha !== "")
+            info(`agent linked repo ${alias} at ${r.sha}`);
+        }
         return r;
       }
     };
@@ -28333,7 +28409,7 @@ async function runFlowA(env, deps, out) {
   const all = [...fast, ...llm ?? []].map(sanitizeFinding);
   const redacted = redactFindings(all, runtimeSecrets(env));
   writeFindings(env.artifactDir, redacted);
-  writeFileSync2(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
+  writeFileSync3(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
   await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
   if (!out.staleSkipped)
     out.exitCode = exitFor(env.inputs.failLevel, all);
@@ -28455,7 +28531,7 @@ function realAnalysis() {
 }
 function readRunEnv() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync5(eventPath, "utf8")) : {};
+  const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync6(eventPath, "utf8")) : {};
   const inputs = getInputs();
   return {
     eventName: process.env.GITHUB_EVENT_NAME ?? "",

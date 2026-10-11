@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import * as core from "@actions/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -844,6 +845,36 @@ describe("run() orchestration", () => {
     // Mixed-case linked alias passes the gate: the size pre-check sees the alias as passed through.
     await gate("Someone/Else");
     expect(r.repoSizeCalls).toContainEqual(["Someone", "Else"]);
+  });
+
+  it("logs the linked repo SHA on reuse", async () => {
+    const prevRunnerTemp = process.env.RUNNER_TEMP;
+    const scratchDir = scratch();
+    process.env.RUNNER_TEMP = scratchDir;
+    try {
+      const dir = join(scratchDir, "lupa-linked", "someone__else");
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-b", "main"], { cwd: dir });
+      execFileSync("git", ["remote", "add", "origin", "https://github.com/someone/else.git"], { cwd: dir });
+      execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"], {
+        cwd: dir,
+      });
+      const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+      writeFileSync(join(dir, ".lupa-clone.json"), JSON.stringify({ repo: "someone/else", branch: "main", sha }));
+      const info = vi.mocked(core.info);
+      info.mockClear();
+      const r = await runWithMocks({
+        llmAgent: true,
+        agentToolProbe: true,
+        prBody: "See https://github.com/someone/else for context",
+      });
+      expect(r.posted).toBe(true);
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      expect(lines).toContain(`agent linked repo someone/else at ${sha}`);
+    } finally {
+      if (prevRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+      else process.env.RUNNER_TEMP = prevRunnerTemp;
+    }
   });
 
   // Task 19 wiring: with plain `auto` the slow path probes (error-driven, spec §9.5) —
