@@ -67,13 +67,13 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     headSha: HEAD_SHA,
     headRepo: "synthetic-owner/synthetic-repo",
     headRef: "synthetic-branch",
-    isFork: testCase.fakeGatewayMode === "readonly-fork",
+    isFork: testCase.fakeGatewayMode === "isFork",
   };
   const gateway: Gateway = {
     async getPr(pr) {
       gatewayCalls.push({ method: "getPr", args: [pr] });
       getPrCount += 1;
-      if (testCase.fakeGatewayMode === "stale-head" && getPrCount > 1)
+      if (testCase.fakeGatewayMode === "headMovesBeforePost" && getPrCount > 1)
         return { ...normalPr, headSha: "c".repeat(40) };
       return normalPr;
     },

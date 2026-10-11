@@ -1,0 +1,8 @@
+diff --git a/src/safe.ts b/src/safe.ts
+index 1111111..2222222 100644
+--- a/src/safe.ts
++++ b/src/safe.ts
+@@ -1,2 +1,3 @@
+ export function status(name: string) {
++  return `ready: ${name}`;
+ }

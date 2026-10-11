@@ -10,13 +10,13 @@ export type EvalPublicationExpectation =
 
 export interface EvalCase {
   id: string;
-  categories: readonly string[];
+  categories: readonly EvalCategory[];
   syntheticRationale: string;
   patchFixture: string;
   repoFiles?: Record<string, string>;
   inputOverrides?: Partial<ActionInputs>;
   envOverrides?: Partial<Pick<RunEnv, "tokenIsApp" | "issueFallback">>;
-  fakeGatewayMode?: "normal" | "readonly-fork" | "stale-head";
+  fakeGatewayMode?: "normal" | "headMovesBeforePost" | "isFork";
   scannerFindings?: Finding[];
   l2Findings?: Finding[];
   llmFindings?: Finding[];
@@ -28,6 +28,8 @@ export interface EvalCase {
     publication: EvalPublicationExpectation;
   };
 }
+
+export type EvalCategory = "positive" | "safe-negative" | "repaired" | "deletion" | "force-push" | "fork-readonly" | "large-diff" | "unchanged-baseline";
 
 export interface EvalPublication {
   path: "review" | "issue-comment";

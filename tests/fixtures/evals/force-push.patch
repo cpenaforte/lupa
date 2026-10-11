@@ -1,0 +1,8 @@
+diff --git a/src/force.ts b/src/force.ts
+index 1111111..2222222 100644
+--- a/src/force.ts
++++ b/src/force.ts
+@@ -1,2 +1,3 @@
+ export function transition() {
++  state = next;
+ }

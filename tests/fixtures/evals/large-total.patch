@@ -1,0 +1,16 @@
+diff --git a/src/included.ts b/src/included.ts
+index 1111111..2222222 100644
+--- a/src/included.ts
++++ b/src/included.ts
+@@ -1,1 +1,2 @@
+ export function included() {
++  return true;
+ }
+diff --git a/src/omitted.ts b/src/omitted.ts
+index 1111111..2222222 100644
+--- a/src/omitted.ts
++++ b/src/omitted.ts
+@@ -1,1 +1,2 @@
+ export function omitted() {
++  return false;
+ }
