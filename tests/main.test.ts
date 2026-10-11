@@ -4,10 +4,10 @@ import { join } from "node:path";
 import * as core from "@actions/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Wrap logging in spies (ESM namespaces cannot be spied on directly); behavior is unchanged.
+// Capture action logs for assertions without printing expected fixture messages during tests.
 vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
-  return { ...actual, info: vi.fn(actual.info), warning: vi.fn(actual.warning) };
+  return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
 import { cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
 import { readPrMeta } from "../src/diff.js";
