@@ -88,6 +88,26 @@ describe("ci workflow", () => {
     expect(c).toMatch(/os:\s*\[\s*ubuntu-latest,\s*macos-latest,\s*windows-latest\s*\]/);
   });
 
+  it("runs deterministic synthetic evaluations after the build without provider credentials", () => {
+    const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8")) as { scripts: Record<string, string> };
+    expect(packageJson.scripts.evals).toBe("vitest run tests/evals --reporter=verbose");
+
+    const job = jobBlock(fs.readFileSync(CI, "utf8"), "build");
+    const build = job.indexOf("- name: Build bundle");
+    const evals = job.indexOf("- name: Deterministic synthetic review evaluations");
+    const syntax = job.indexOf("- name: Syntax-check the bundle");
+    expect(build).toBeGreaterThan(-1);
+    expect(evals).toBeGreaterThan(build);
+    expect(syntax).toBeGreaterThan(evals);
+
+    const evalStepEnd = job.indexOf("\n      - name:", evals + 1);
+    const evalStep = job.slice(evals, evalStepEnd === -1 ? undefined : evalStepEnd);
+    expect(evalStep).toContain("run: npm run evals");
+    expect(evalStep).not.toMatch(/\bsecrets\./);
+    expect(evalStep).not.toMatch(/^\s+env:\s*$/m);
+    expect(evalStep).not.toMatch(/INPUT_(?:LLM|OPENAI|ANTHROPIC|GEMINI|OLLAMA)/i);
+  });
+
   it("no-secret smoke simulates a fork: no secrets, summary-only, job-scoped assertions", () => {
     const c = fs.readFileSync(CI, "utf8");
     const job = jobBlock(c, "no-secret-smoke");

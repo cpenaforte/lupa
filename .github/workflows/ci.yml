@@ -43,6 +43,9 @@ jobs:
       - name: Build bundle
         run: npm run build
 
+      - name: Deterministic synthetic review evaluations
+        run: npm run evals
+
       - name: Syntax-check the bundle
         run: |
           set -euo pipefail
