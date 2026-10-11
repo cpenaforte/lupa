@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { callMessages } from "../src/adapters/messages.js";
+import { callMessages, callMessagesTurn } from "../src/adapters/messages.js";
 import type { ResolvedEndpoint } from "../src/providers.js";
+import type { Conversation } from "../src/agent-types.js";
 
 // ---------- helpers ----------
 
@@ -191,5 +192,175 @@ describe("callMessages", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "unsupported" });
     expect(calls.length).toBe(0);
+  });
+});
+
+describe("callMessagesTurn", () => {
+  const toolDef = {
+    name: "read_file",
+    description: "Read a file",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  };
+
+  const conv = (): Conversation => ({ system: "s", user: "u", tools: [toolDef] });
+  const turnOpts = () => ({ model: "claude-sonnet-5-5", apiKey: "k", maxTokens: 50, timeoutSeconds: 5 });
+  const toolFlags = { allowTools: true, allowFormat: false };
+
+  it("turn mode sends tools with input_schema", async () => {
+    await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.tools).toEqual([
+      { name: "read_file", description: "Read a file", input_schema: toolDef.parameters },
+    ]);
+  });
+
+  it("never adds format fields (no structured output on this protocol)", async () => {
+    await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), { allowTools: true, allowFormat: true });
+    const body = lastBody();
+    expect(body).not.toHaveProperty("response_format");
+    expect(body).not.toHaveProperty("text");
+  });
+
+  it("translates tool_use echo and tool_result blocks (is_error only when set)", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "",
+          toolCalls: [{ id: "t1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+        },
+        { role: "tool", id: "t1", name: "read_file", output: "ok", isError: true },
+        { role: "tool", id: "t2", name: "read_file", output: "fine" },
+      ],
+      tools: [toolDef],
+    };
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.messages).toEqual([
+      { role: "user", content: "u" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } }] },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "ok", is_error: true },
+          { type: "tool_result", tool_use_id: "t2", content: "fine" },
+        ],
+      },
+    ]);
+  });
+
+  it("stop_reason=tool_use parses tool_use blocks with input object", async () => {
+    stubFetch(() =>
+      json(200, {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } }],
+        stop_reason: "tool_use",
+      }),
+    );
+    const r = await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags);
+    expect(r).toEqual({
+      ok: true,
+      text: "",
+      toolCalls: [{ id: "t1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+    });
+  });
+
+  it("text plus tool_use in one message parses both", async () => {
+    stubFetch(() =>
+      json(200, {
+        type: "message",
+        role: "assistant",
+        content: [
+          { type: "text", text: "thinking" },
+          { type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } },
+        ],
+        stop_reason: "tool_use",
+      }),
+    );
+    const r = await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.text).toBe("thinking");
+      expect(r.toolCalls).toHaveLength(1);
+      expect(r.toolCalls[0]!.id).toBe("t1");
+    }
+  });
+
+  it("groups multiple tool results in one user message", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "hi",
+          toolCalls: [
+            { id: "t1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' },
+            { id: "t2", name: "read_file", args: { path: "b.ts" }, rawArgs: '{"path":"b.ts"}' },
+          ],
+        },
+        { role: "tool", id: "t1", name: "read_file", output: "a" },
+        { role: "tool", id: "t2", name: "read_file", output: "b" },
+      ],
+      tools: [toolDef],
+    };
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.messages).toEqual([
+      { role: "user", content: "u" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "hi" },
+          { type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } },
+          { type: "tool_use", id: "t2", name: "read_file", input: { path: "b.ts" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "a" },
+          { type: "tool_result", tool_use_id: "t2", content: "b" },
+        ],
+      },
+    ]);
+  });
+
+  it("user note becomes a text block in its own user message", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [{ role: "user", text: "please continue" }],
+      tools: [toolDef],
+    };
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.messages).toEqual([
+      { role: "user", content: "u" },
+      { role: "user", content: [{ type: "text", text: "please continue" }] },
+    ]);
+  });
+
+  it("keeps refusal/max_tokens mappings on the turn path", async () => {
+    stubFetch(() => json(200, { type: "message", content: [], stop_reason: "refusal" }));
+    expect(await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags)).toEqual({
+      ok: false,
+      result: { ok: false, reason: "content-filter", detail: "model refused the request" },
+    });
+
+    stubFetch(() =>
+      json(200, {
+        type: "message",
+        content: [{ type: "tool_use", id: "t1", name: "read_file", input: {} }],
+        stop_reason: "max_tokens",
+      }),
+    );
+    expect(await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags)).toEqual({
+      ok: false,
+      result: { ok: false, reason: "invalid-json", detail: "response truncated (stop_reason=max_tokens)" },
+    });
   });
 });

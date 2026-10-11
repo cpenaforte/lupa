@@ -25500,6 +25500,88 @@ function joinContentText(json) {
   }
   return texts.length > 0 ? texts.join("") : void 0;
 }
+function buildMessagesBody(conv, o, flags) {
+  const messages = [{ role: "user", content: conv.user }];
+  let pendingResults = [];
+  const flushResults = () => {
+    if (pendingResults.length > 0) {
+      messages.push({ role: "user", content: pendingResults });
+      pendingResults = [];
+    }
+  };
+  for (const turn of conv.turns ?? []) {
+    if (turn.role === "assistant") {
+      flushResults();
+      const content = [];
+      if (turn.text)
+        content.push({ type: "text", text: turn.text });
+      for (const tc of turn.toolCalls) {
+        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args });
+      }
+      messages.push({ role: "assistant", content });
+    } else if (turn.role === "tool") {
+      pendingResults.push({
+        type: "tool_result",
+        tool_use_id: turn.id,
+        content: turn.output,
+        ...turn.isError ? { is_error: true } : {}
+      });
+    } else {
+      flushResults();
+      messages.push({ role: "user", content: [{ type: "text", text: turn.text }] });
+    }
+  }
+  flushResults();
+  const body = {
+    model: o.model,
+    // max_tokens is REQUIRED on every /messages call, including reasoning models.
+    max_tokens: o.maxTokens,
+    system: conv.system,
+    messages
+  };
+  if (flags.allowTools && conv.tools !== void 0) {
+    body.tools = conv.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.parameters
+    }));
+  }
+  if (o.temperature !== void 0)
+    body.temperature = o.temperature;
+  if (o.topP !== void 0)
+    body.top_p = o.topP;
+  return body;
+}
+function parseMessagesReply(json, flags) {
+  const stopReason = json?.stop_reason;
+  if (stopReason === "refusal") {
+    return { ok: false, result: { ok: false, reason: "content-filter", detail: "model refused the request" } };
+  }
+  if (stopReason === "max_tokens") {
+    return {
+      ok: false,
+      result: { ok: false, reason: "invalid-json", detail: "response truncated (stop_reason=max_tokens)" }
+    };
+  }
+  const toolCalls = [];
+  const content = json?.content;
+  if (flags.allowTools && Array.isArray(content)) {
+    for (const part of content) {
+      if (typeof part !== "object" || part === null)
+        continue;
+      const p = part;
+      if (p.type !== "tool_use")
+        continue;
+      toolCalls.push({
+        id: typeof p.id === "string" ? p.id : "",
+        name: typeof p.name === "string" ? p.name : "",
+        args: p.input,
+        rawArgs: JSON.stringify(p.input)
+      });
+    }
+  }
+  return { ok: true, text: joinContentText(json), toolCalls };
+}
 async function callMessages(ep, messages, o) {
   const key = o.apiKey;
   if (key === "")
@@ -25509,18 +25591,8 @@ async function callMessages(ep, messages, o) {
   } catch (e) {
     return { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) };
   }
-  const body = {
-    model: o.model,
-    // max_tokens is REQUIRED on every /messages call, including reasoning models.
-    max_tokens: o.maxTokens,
-    system: messages.system,
-    messages: [{ role: "user", content: messages.user }]
-  };
-  if (o.temperature !== void 0)
-    body.temperature = o.temperature;
-  if (o.topP !== void 0)
-    body.top_p = o.topP;
-  const payload = JSON.stringify(body);
+  const flags = { allowTools: false, allowFormat: false };
+  const payload = JSON.stringify(buildMessagesBody({ system: messages.system, user: messages.user }, o, flags));
   const headers = {
     ...ep.headers,
     "x-api-key": key,
@@ -25550,14 +25622,10 @@ async function callMessages(ep, messages, o) {
   } catch {
     return { ok: false, reason: "invalid-json", detail: "response body is not JSON" };
   }
-  const stopReason = json?.stop_reason;
-  if (stopReason === "refusal") {
-    return { ok: false, reason: "content-filter", detail: "model refused the request" };
-  }
-  if (stopReason === "max_tokens") {
-    return { ok: false, reason: "invalid-json", detail: "response truncated (stop_reason=max_tokens)" };
-  }
-  const text = joinContentText(json);
+  const reply = parseMessagesReply(json, flags);
+  if (!reply.ok)
+    return reply.result;
+  const text = reply.text;
   if (text === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response has no content" };
   }
