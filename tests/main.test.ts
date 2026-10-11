@@ -294,7 +294,7 @@ async function runWithMocks(o: MockOpts = {}) {
               try {
                 rec.earlyFindingsRaw = readFileSync(join(artifactDir, "findings.json"), "utf8");
               } catch {
-                rec.earlyFindingsRaw = undefined;
+                // No early payload on disk; leave earlyFindingsRaw unset.
               }
               return { ok: true, findings: o.llm ?? [LLM_FINDING] };
             },
