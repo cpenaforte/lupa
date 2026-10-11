@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENT_LIMITS } from "../src/agent-types.js";
-import { TOOL_DEFS, executeTool, resolveWithinRoot } from "../src/agent-tools.js";
+import { TOOL_DEFS, executeTool, globToRegExp, grepInRoot, resolveWithinRoot } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 
 const created: string[] = [];
@@ -190,5 +190,115 @@ describe("executeTool", () => {
     });
     expect(failed.isError).toBe(true);
     expect(JSON.parse(failed.output)).toEqual({ error: "repository not accessible: o/missing" });
+  });
+});
+
+describe("globToRegExp", () => {
+  it("globToRegExp handles *, **, **/ and ?", () => {
+    const ts = globToRegExp("src/**/*.ts");
+    expect(ts.test("src/a.ts")).toBe(true);
+    expect(ts.test("src/x/y.ts")).toBe(true);
+    expect(ts.test("src/x/y/z.ts")).toBe(true);
+    expect(ts.test("other/a.ts")).toBe(false);
+
+    const md = globToRegExp("*.md");
+    expect(md.test("a.md")).toBe(true);
+    expect(md.test("a/b.md")).toBe(false);
+
+    const q = globToRegExp("a?c");
+    expect(q.test("abc")).toBe(true);
+    expect(q.test("a/c")).toBe(false);
+    expect(q.test("ac")).toBe(false);
+  });
+});
+
+describe("grep", () => {
+  it("grep finds matches with file:line and skips .git and binaries", async () => {
+    const root = tempRoot();
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "sub", "a.txt"), "hello world\nfoo\n");
+    writeFileSync(join(root, "b.txt"), "hello again\n");
+    mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".git", "secret.txt"), "hello secret\n");
+    writeFileSync(join(root, "bin.dat"), Buffer.from([0x68, 0x00, 0x69]));
+
+    const r = await executeTool("grep", { pattern: "hello" }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.matches).toContainEqual({ file: "sub/a.txt", line: 1, text: "hello world" });
+    expect(parsed.matches).toContainEqual({ file: "b.txt", line: 1, text: "hello again" });
+    expect(parsed.matches.some((m: { file: string }) => m.file.includes(".git"))).toBe(false);
+    expect(parsed.matches.some((m: { file: string }) => m.file === "bin.dat")).toBe(false);
+    expect(parsed.files_scanned).toBeGreaterThan(0);
+    expect(parsed.truncated).toBe(false);
+  });
+
+  it("grep respects max_results and reports truncation", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), Array.from({ length: 10 }, (_, i) => `hit ${i}`).join("\n"));
+    const r = await executeTool("grep", { pattern: "hit", max_results: 3 }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.matches).toHaveLength(3);
+    expect(parsed.truncated).toBe(true);
+  });
+
+  it("grep with an invalid regex returns isError", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "x");
+    const r = await executeTool("grep", { pattern: "(" }, ctxFor(root));
+    expect(r.isError).toBe(true);
+    expect(JSON.parse(r.output)).toHaveProperty("error");
+  });
+
+  it("grep kills a catastrophic pattern within the timeout", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "evil.txt"), "a".repeat(40000) + "b");
+    const r = await grepInRoot(root, { pattern: "(a+)+$" }, 200);
+    expect(r.isError).toBe(true);
+    expect(JSON.parse(r.output)).toEqual({ error: "grep timed out" });
+  });
+
+  it("a pattern containing ');require(' is treated as a literal regex, not code", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "require('fs')");
+    const r = await grepInRoot(root, { pattern: "');require(" }, 500);
+    if (r.isError) {
+      expect(JSON.parse(r.output)).toHaveProperty("error");
+    } else {
+      expect(JSON.parse(r.output).matches).toEqual([]);
+    }
+  });
+});
+
+describe("glob", () => {
+  it("glob lists root-relative paths, sorted and capped", async () => {
+    const root = tempRoot();
+    mkdirSync(join(root, "src", "x"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    writeFileSync(join(root, "src", "x", "y.ts"), "");
+    writeFileSync(join(root, "src", "b.md"), "");
+    const r = await executeTool("glob", { pattern: "src/**/*.ts" }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.paths).toEqual(["src/a.ts", "src/x/y.ts"]);
+    expect(parsed.truncated).toBe(false);
+  });
+});
+
+describe("grep and glob symlinks", () => {
+  it("grep and glob skip symlinked directories", async () => {
+    const root = tempRoot();
+    mkdirSync(join(root, "real"));
+    writeFileSync(join(root, "real", "a.txt"), "target line");
+    symlinkSync(join(root, "real"), join(root, "link"));
+
+    const g = await executeTool("grep", { pattern: "target" }, ctxFor(root));
+    expect(g.isError).toBe(false);
+    expect(JSON.parse(g.output).matches.map((m: { file: string }) => m.file)).toEqual(["real/a.txt"]);
+
+    const gl = await executeTool("glob", { pattern: "**/*.txt" }, ctxFor(root));
+    expect(gl.isError).toBe(false);
+    expect(JSON.parse(gl.output).paths).toEqual(["real/a.txt"]);
   });
 });

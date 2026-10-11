@@ -1,5 +1,6 @@
-import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Worker } from "node:worker_threads";
 import { AGENT_LIMITS } from "./agent-types.js";
 import type { ToolDef } from "./agent-types.js";
 
@@ -209,6 +210,278 @@ async function listDir(args: Record<string, unknown>, ctx: ToolContext): Promise
   return okResult({ path: rel, entries: entries.slice(0, cap), truncated });
 }
 
+export const GREP_TIMEOUT_MS = 5000;
+const GREP_MAX_MATCHES = 100;
+const GREP_MAX_FILE_BYTES = 1024 * 1024;
+const GREP_NUL_SCAN_BYTES = 8192;
+const GLOB_MAX_PATHS = 200;
+const REGEXP_SPECIAL = /[.*+?^${}()|[\]\\]/;
+
+/**
+ * Translate a glob to an anchored RegExp. `**\/` matches zero or more path
+ * segments, `**` matches anything, `*` matches within a segment, `?` matches a
+ * single non-separator character, and every other character is escaped.
+ */
+export function globToRegExp(glob: string): RegExp {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
+      } else {
+        out += "[^/]*";
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (REGEXP_SPECIAL.test(c)) {
+      out += "\\" + c;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp("^" + out + "$");
+}
+
+interface WalkFile {
+  abs: string;
+  rel: string;
+  size: number;
+}
+
+/** True when the first 8KB of `p` contain a NUL byte (or `p` cannot be read). */
+function isBinaryFile(p: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, "r");
+    const buf = Buffer.allocUnsafe(GREP_NUL_SCAN_BYTES);
+    const n = readSync(fd, buf, 0, GREP_NUL_SCAN_BYTES, 0);
+    for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
+    return false;
+  } catch {
+    return true;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+function relPath(root: string, abs: string): string {
+  return relative(root, abs).split(sep).join("/");
+}
+
+function includeFile(root: string, abs: string, size: number): WalkFile | null {
+  if (size > GREP_MAX_FILE_BYTES) return null;
+  if (isBinaryFile(abs)) return null;
+  return { abs, rel: relPath(root, abs), size };
+}
+
+/**
+ * Collect candidate files under `startAbs` (a directory or a single file),
+ * skipping `.git` segments, symlinks, files larger than 1MB, and files whose
+ * first 8KB contain a NUL byte. Paths are reported relative to `root` with
+ * forward slashes.
+ */
+function walkFiles(root: string, startAbs: string): WalkFile[] {
+  let startStat;
+  try {
+    startStat = statSync(startAbs);
+  } catch {
+    return [];
+  }
+
+  if (startStat.isFile()) {
+    const f = includeFile(root, startAbs, startStat.size);
+    return f ? [f] : [];
+  }
+  if (!startStat.isDirectory()) return [];
+
+  const files: WalkFile[] = [];
+  const stack: string[] = [startAbs];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let dirents;
+    try {
+      dirents = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirents) {
+      if (d.name.toLowerCase() === ".git") continue;
+      if (d.isSymbolicLink()) continue;
+      const childAbs = join(dir, d.name);
+      if (d.isDirectory()) {
+        stack.push(childAbs);
+      } else if (d.isFile()) {
+        let size: number;
+        try {
+          size = statSync(childAbs).size;
+        } catch {
+          continue;
+        }
+        const f = includeFile(root, childAbs, size);
+        if (f) files.push(f);
+      }
+    }
+  }
+  return files;
+}
+
+interface GrepMatch {
+  file: string;
+  line: number;
+  text: string;
+}
+
+// CONSTANT worker source. The model-authored pattern and the file list travel
+// via workerData; the pattern is NEVER interpolated into this string (that
+// would be remote code execution).
+const GREP_WORKER_SRC = [
+  'const { parentPort, workerData } = require("node:worker_threads");',
+  'const { readFileSync } = require("node:fs");',
+  "const { pattern, files, limit } = workerData;",
+  "const re = new RegExp(pattern);",
+  "const matches = [];",
+  "let filesScanned = 0;",
+  "let hitLimit = false;",
+  "for (const f of files) {",
+  "  filesScanned++;",
+  "  let content;",
+  '  try { content = readFileSync(f.abs, "utf8"); } catch { continue; }',
+  '  const lines = content.split("\\n");',
+  "  for (let i = 0; i < lines.length; i++) {",
+  "    if (re.test(lines[i])) {",
+  "      if (matches.length >= limit) { hitLimit = true; break; }",
+  "      const t = lines[i].trim();",
+  "      matches.push({ file: f.rel, line: i + 1, text: t.length > 200 ? t.slice(0, 200) : t });",
+  "    }",
+  "  }",
+  "  if (hitLimit) break;",
+  "}",
+  "parentPort.postMessage({ matches, filesScanned, hitLimit });",
+].join("\n");
+
+type GrepWorkerResult =
+  | { isError: true; output: string }
+  | { isError: false; matches: GrepMatch[]; filesScanned: number; hitLimit: boolean };
+
+function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeoutMs: number): Promise<GrepWorkerResult> {
+  return new Promise((resolvePromise) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(GREP_WORKER_SRC, {
+        eval: true,
+        workerData: { pattern, files: files.map((f) => ({ abs: f.abs, rel: f.rel })), limit },
+      });
+    } catch (e) {
+      resolvePromise({ isError: true, output: errorResult(e instanceof Error ? e.message : String(e)).output });
+      return;
+    }
+
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (result: GrepWorkerResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      resolvePromise(result);
+    };
+    timer = setTimeout(() => finish({ isError: true, output: errorResult("grep timed out").output }), timeoutMs);
+
+    worker.on("message", (msg: { matches: GrepMatch[]; filesScanned: number; hitLimit: boolean }) => {
+      finish({ isError: false, matches: msg.matches, filesScanned: msg.filesScanned, hitLimit: msg.hitLimit });
+    });
+    worker.on("error", (err: unknown) => {
+      finish({ isError: true, output: errorResult(err instanceof Error ? err.message : String(err)).output });
+    });
+  });
+}
+
+/**
+ * Search `root` (or the directory/file `args.path` resolves to within it) for
+ * `args.pattern`, returning matching lines. The match itself runs in a
+ * worker thread with a hard timeout so a catastrophic model-authored regex is
+ * terminated instead of hanging the job.
+ */
+export async function grepInRoot(
+  root: string,
+  args: { pattern: string; path?: string; glob?: string; max_results?: number },
+  timeoutMs: number = GREP_TIMEOUT_MS,
+): Promise<{ output: string; isError: boolean }> {
+  const pattern = typeof args.pattern === "string" ? args.pattern : "";
+  try {
+    new RegExp(pattern);
+  } catch {
+    return errorResult(`invalid regex: ${pattern}`);
+  }
+
+  const rel = args.path && args.path !== "" ? args.path : ".";
+  const startAbs = resolveWithinRoot(root, rel);
+  if (!startAbs) return errorResult(`path not accessible: ${rel}`);
+
+  const globRe = args.glob ? globToRegExp(args.glob) : null;
+  let files = walkFiles(root, startAbs);
+  if (globRe) files = files.filter((f) => globRe.test(f.rel));
+
+  const requested = args.max_results === undefined ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
+  const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
+
+  const outcome = await runGrepWorker(pattern, files, limit, timeoutMs);
+  if (outcome.isError) return { output: outcome.output, isError: true };
+
+  const { matches, filesScanned, hitLimit } = outcome;
+  const serialize = (list: GrepMatch[], truncated: boolean): string =>
+    JSON.stringify({ matches: list, truncated, files_scanned: filesScanned });
+
+  let lo = 0;
+  let hi = matches.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(serialize(matches.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  const truncated = hitLimit || lo < matches.length;
+  return okResult(JSON.parse(serialize(matches.slice(0, lo), truncated)));
+}
+
+async function grep(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx);
+  if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
+  return grepInRoot(resolvedRoot.root, {
+    pattern: typeof args.pattern === "string" ? args.pattern : "",
+    path: typeof args.path === "string" ? args.path : undefined,
+    glob: typeof args.glob === "string" ? args.glob : undefined,
+    max_results: args.max_results === undefined ? undefined : Number(args.max_results),
+  });
+}
+
+async function glob(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx);
+  if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
+
+  const pattern = typeof args.pattern === "string" ? args.pattern : "";
+  const re = globToRegExp(pattern);
+  const paths = walkFiles(resolvedRoot.root, resolvedRoot.root)
+    .map((f) => f.rel)
+    .filter((p) => re.test(p))
+    .sort();
+
+  const truncated = paths.length > GLOB_MAX_PATHS;
+  return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
+}
+
 export const TOOL_DEFS: readonly ToolDef[] = [
   {
     name: "read_file",
@@ -279,8 +552,9 @@ export async function executeTool(
       case "list_dir":
         return await listDir(a, ctx);
       case "grep":
+        return await grep(a, ctx);
       case "glob":
-        return errorResult("not implemented");
+        return await glob(a, ctx);
       default:
         return errorResult(`unknown tool: ${name}`);
     }
