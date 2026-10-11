@@ -25785,7 +25785,7 @@ function writeMarker(dir, marker) {
     const path = join4(dir, MARKER_NAME);
     try {
       const st = lstatSync(path);
-      if (st.isSymbolicLink() || st.isDirectory() || st.isFile()) {
+      if (st.isSymbolicLink() || st.isDirectory() || st.isFile() || st.isFIFO() || st.isSocket()) {
         rmSync(path, { recursive: true, force: true });
       }
     } catch {

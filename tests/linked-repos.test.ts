@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureLinkedRepo, parseLinkedRepos } from "../src/linked-repos.js";
@@ -239,6 +240,46 @@ describe("ensureLinkedRepo", () => {
     const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
     expect(res).toEqual({ dir, sha: "" });
     expect(readFileSync(sentinel, "utf8")).toBe("untouched");
+    // The marker itself is a regular file with the fresh-clone payload.
+    expect(statSync(join(dir, ".lupa-clone.json")).isFile()).toBe(true);
+    expect(JSON.parse(readFileSync(join(dir, ".lupa-clone.json"), "utf8"))).toEqual({
+      repo: "a/b",
+      branch: "",
+      sha: "",
+    });
+  });
+
+  it("writes the marker even when the clone ships a fifo at the marker path", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    let fifoPlanted = false;
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        if (args[0] === "clone") {
+          const dest = args[args.length - 1]!;
+          mkdirSync(dest, { recursive: true });
+          // Hostile content: the marker path arrives as a fifo, whose
+          // open(O_WRONLY) would block instead of failing.
+          try {
+            execFileSync("mkfifo", [join(dest, ".lupa-clone.json")]);
+            fifoPlanted = true;
+          } catch {
+            fifoPlanted = false;
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
+    if (!fifoPlanted) return; // mkfifo unavailable: nothing hostile to defend against.
+    expect(res).toEqual({ dir, sha: "" });
+    expect(statSync(join(dir, ".lupa-clone.json")).isFile()).toBe(true);
+    expect(JSON.parse(readFileSync(join(dir, ".lupa-clone.json"), "utf8"))).toEqual({
+      repo: "a/b",
+      branch: "",
+      sha: "",
+    });
   });
 
   it("reuses a valid cache with zero git-mutating calls and returns its sha", async () => {
