@@ -20,11 +20,21 @@ export class ReadonlyTokenError extends Error {
   }
 }
 
+export class StaleHeadError extends Error {
+  readonly analyzedSha: string;
+  readonly liveSha: string;
+
+  constructor(analyzedSha: string, liveSha: string) {
+    super(`review post skipped: PR head moved (analyzed ${analyzedSha}, live ${liveSha})`);
+    this.name = "StaleHeadError";
+    this.analyzedSha = analyzedSha;
+    this.liveSha = liveSha;
+  }
+}
+
 export interface PostReviewResult {
   /** True when inline comments were folded into the review body after an off-diff 422. */
   degraded: boolean;
-  /** True when a stale commit_id 422 triggered a head_sha re-resolve and retry. */
-  retriedWithNewSha: boolean;
 }
 
 export interface PostReviewOptions {
@@ -121,9 +131,10 @@ function foldComments(body: string, comments: InlineComment[]): string {
 /**
  * Posts one consolidated review to `pulls/{pr}/reviews`.
  * - `canWrite: false` (caller-computed): throws ReadonlyTokenError before any POST.
- * - 422 stale commit_id: head_sha is re-resolved and the POST is retried once.
+ * - 422 stale commit_id: throws StaleHeadError with the analyzed and live SHAs; the caller
+ *   skips the review for the stale head (never relabels or retries the POST).
  * - 422 line off-diff: inline comments are folded into the body and the POST is retried once.
- *   At most three POSTs in total (stale, then off-diff, then the final attempt).
+ *   At most two POSTs in total (the initial attempt, then the off-diff retry).
  * - 403 (read-only token): throws ReadonlyTokenError with status and the API message.
  * - Any other failure throws a sanitized Error; the upstream message is never copied,
  *   so tokens or keys echoed by the API cannot leak into logs.
@@ -138,11 +149,10 @@ export async function postReview(
     throw new ReadonlyTokenError("review post skipped: token cannot write reviews (fork PR)");
   }
   const { owner, repo } = repoOf();
-  let commitId = payload.commit_id;
+  const commitId = payload.commit_id;
   let body = payload.body;
   let comments = payload.comments;
   let degraded = false;
-  let retriedWithNewSha = false;
 
   for (;;) {
     try {
@@ -155,7 +165,7 @@ export async function postReview(
         event: payload.event,
         comments,
       });
-      return { degraded, retriedWithNewSha };
+      return { degraded };
     } catch (e) {
       const status = statusOf(e);
       if (status === 403 && !/rate limit/i.test(detailOf(e))) {
@@ -169,7 +179,7 @@ export async function postReview(
         throw new Error(`review post failed${status === undefined ? "" : ` (HTTP ${status})`}`);
       }
       const detail = detailOf(e);
-      if (!retriedWithNewSha && STALE_SHA.test(detail)) {
+      if (STALE_SHA.test(detail)) {
         let head: string;
         try {
           const pull = await octokit.rest.pulls.get({ owner, repo, pull_number: pr });
@@ -178,9 +188,7 @@ export async function postReview(
           const s = statusOf(getErr);
           throw new Error(`head sha re-resolve failed${s === undefined ? "" : ` (HTTP ${s})`}`);
         }
-        commitId = head;
-        retriedWithNewSha = true;
-        continue;
+        throw new StaleHeadError(commitId, head);
       }
       if (!degraded && comments.length > 0 && OFF_DIFF.test(detail)) {
         body = foldComments(body, comments);

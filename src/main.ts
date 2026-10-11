@@ -26,6 +26,7 @@ import {
   ReadonlyTokenError,
   resolvePrNumber,
   shouldTrigger,
+  StaleHeadError,
 } from "./github.js";
 import { getInputs, type ActionInputs } from "./inputs.js";
 import { ensureLinkedRepo, parseLinkedRepos } from "./linked-repos.js";
@@ -129,6 +130,7 @@ export interface Outcome {
   findingsFrom: "llm" | "fastpath";
   slowPathSkipped: boolean;
   issueBodyFetched?: number;
+  staleSkipped?: boolean;
 }
 
 interface EventFields {
@@ -676,6 +678,16 @@ async function publishReview(a: PublishArgs): Promise<void> {
     await a.deps.gh.createReview(a.pr, payload, { canWrite: true });
     a.out.posted = true;
   } catch (e) {
+    if (e instanceof StaleHeadError) {
+      note(
+        a.env,
+        a.out,
+        `pr-reviewer: PR head moved during posting; analyzed ${e.analyzedSha}, live ${e.liveSha}; skipping review for the stale head — a fresh run will cover the new head.`,
+      );
+      a.out.staleSkipped = true;
+      a.out.exitCode = 0;
+      return;
+    }
     if (!(e instanceof ReadonlyTokenError)) throw e;
     core.error(`review post refused by GitHub: ${e.detail !== "" ? e.detail : e.message}`);
     // issuesWrite is derived from the environment: the template grants issues: write explicitly.
@@ -815,7 +827,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
 
   await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
-  out.exitCode = exitFor(env.inputs.failLevel, all);
+  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, all);
 }
 
 /**
@@ -868,7 +880,7 @@ async function runFlowB(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   const findings = readFindings(env.artifactDir).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
   await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha });
-  out.exitCode = exitFor(env.inputs.failLevel, findings);
+  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, findings);
 }
 
 /** Runs one review. Returns the outcome; main() maps exitCode to the process. */

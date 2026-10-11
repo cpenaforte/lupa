@@ -12,7 +12,7 @@ import { cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPath, type Deps,
 import { readPrMeta } from "../src/diff.js";
 import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
-import { ReadonlyTokenError } from "../src/github.js";
+import { ReadonlyTokenError, StaleHeadError } from "../src/github.js";
 import type { ReviewPayload } from "../src/review.js";
 import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
@@ -103,6 +103,7 @@ function newRec(): Rec {
 interface GwOpts {
   prsByHead?: number[];
   write403?: boolean;
+  staleDuringPost?: boolean;
   issue403?: boolean;
   body?: string;
   /** Size in KB reported by the getRepoSize fake (default 1024). */
@@ -143,6 +144,9 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
       rec.reviewAttempts += 1;
       if (o.write403) {
         throw new ReadonlyTokenError("review post refused", 403, "Resource not accessible by integration");
+      }
+      if (o.staleDuringPost) {
+        throw new StaleHeadError(SHA_HEAD, SHA_OTHER);
       }
       rec.reviews.push(payload);
     },
@@ -189,6 +193,7 @@ interface MockOpts {
   prNumber?: number | null;
   validateModel?: boolean | "reject";
   write403?: boolean;
+  staleDuringPost?: boolean;
   issueFallback?: boolean;
   issue403?: boolean;
   failLevel?: "none" | "warning" | "high";
@@ -252,6 +257,7 @@ async function runWithMocks(o: MockOpts = {}) {
   const deps: Deps = {
     gh: gatewayFor(rec, {
       write403: o.write403,
+      staleDuringPost: o.staleDuringPost,
       issue403: o.issue403,
       headMoves: o.headMoves,
       failGetPrAfter: o.failGetPrAfter,
@@ -361,6 +367,7 @@ interface PrivOpts {
   metaPr?: number;
   prsByHead?: number[];
   findings?: unknown[];
+  staleDuringPost?: boolean;
   metaHead?: string;
   wrHead?: string;
   wrRepo?: string | null;
@@ -388,6 +395,8 @@ async function runPrivileged(o: PrivOpts = {}) {
   );
   writeFileSync(join(artifactDir, "findings.json"), JSON.stringify(o.findings ?? [LLM_FINDING]));
   writeFileSync(join(artifactDir, "diff.patch"), o.diff ?? DIFF);
+  const summaryPath = join(root, "summary.md");
+  writeFileSync(summaryPath, "");
   const env: RunEnv = {
     eventName: "workflow_run",
     payload: {
@@ -407,6 +416,7 @@ async function runPrivileged(o: PrivOpts = {}) {
     headSha: SHA_HEAD,
     tokenIsApp: false,
     issueFallback: false,
+    summaryPath,
   };
   const rec = newRec();
   const spyFail = (name: string) => () => {
@@ -415,6 +425,7 @@ async function runPrivileged(o: PrivOpts = {}) {
   const deps: Deps = {
     gh: gatewayFor(rec, {
       prsByHead: o.prsByHead,
+      staleDuringPost: o.staleDuringPost,
       info: { headRepo: o.liveRepo ?? "o/r", headRef: o.liveRef ?? "feature", headSha: o.liveSha ?? SHA_HEAD },
     }),
     analysis: {
@@ -429,7 +440,7 @@ async function runPrivileged(o: PrivOpts = {}) {
     },
   };
   const out = await run(env, deps);
-  return { ...out, reviews: rec.reviews, payloads: rec.reviews, reviewAttempts: rec.reviewAttempts };
+  return { ...out, reviews: rec.reviews, payloads: rec.reviews, reviewAttempts: rec.reviewAttempts, summaryPath };
 }
 
 describe("run() orchestration", () => {
@@ -562,6 +573,31 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(false);
     expect(r.reviewAttempts).toBe(0);
     expect(r.getPrCalls).toBe(2);
+  });
+
+  it("stale head during posting skips the review with a note and exit 0", async () => {
+    const r = await runWithMocks({ staleDuringPost: true });
+    expect(r.reviews).toHaveLength(0);
+    expect(r.posted).toBe(false);
+    expect(r.staleSkipped).toBe(true);
+    const summary = readFileSync(r.summaryPath, "utf8");
+    expect(summary).toContain("skipping review for the stale head");
+    expect(summary).toContain(
+      `pr-reviewer: PR head moved during posting; analyzed ${SHA_HEAD}, live ${SHA_OTHER}; skipping review for the stale head — a fresh run will cover the new head.`,
+    );
+    expect(r.exitCode).toBe(0);
+  });
+
+  it("stale head on the Flow B path skips with the same note", async () => {
+    const r = await runPrivileged({ staleDuringPost: true });
+    expect(r.reviews).toHaveLength(0);
+    expect(r.posted).toBe(false);
+    expect(r.staleSkipped).toBe(true);
+    const summary = readFileSync(r.summaryPath, "utf8");
+    expect(summary).toContain(
+      `pr-reviewer: PR head moved during posting; analyzed ${SHA_HEAD}, live ${SHA_OTHER}; skipping review for the stale head — a fresh run will cover the new head.`,
+    );
+    expect(r.exitCode).toBe(0);
   });
 
   it("ReadonlyTokenError on a writable token (real 403 path) posts nothing and is not a crash", async () => {

@@ -25354,6 +25354,16 @@ var ReadonlyTokenError = class extends Error {
     this.detail = detail;
   }
 };
+var StaleHeadError = class extends Error {
+  analyzedSha;
+  liveSha;
+  constructor(analyzedSha, liveSha) {
+    super(`review post skipped: PR head moved (analyzed ${analyzedSha}, live ${liveSha})`);
+    this.name = "StaleHeadError";
+    this.analyzedSha = analyzedSha;
+    this.liveSha = liveSha;
+  }
+};
 var OFF_DIFF = /could not be resolved|part of the diff|line.*(diff|resolve)/i;
 var STALE_SHA = /commit[ _-]id|head[- ]commit|not a valid commit/i;
 function statusOf(e) {
@@ -25416,11 +25426,10 @@ async function postReview(octokit, pr, payload, opts) {
     throw new ReadonlyTokenError("review post skipped: token cannot write reviews (fork PR)");
   }
   const { owner, repo } = repoOf();
-  let commitId = payload.commit_id;
+  const commitId = payload.commit_id;
   let body = payload.body;
   let comments = payload.comments;
   let degraded = false;
-  let retriedWithNewSha = false;
   for (; ; ) {
     try {
       await octokit.rest.pulls.createReview({
@@ -25432,7 +25441,7 @@ async function postReview(octokit, pr, payload, opts) {
         event: payload.event,
         comments
       });
-      return { degraded, retriedWithNewSha };
+      return { degraded };
     } catch (e) {
       const status = statusOf(e);
       if (status === 403 && !/rate limit/i.test(detailOf(e))) {
@@ -25442,7 +25451,7 @@ async function postReview(octokit, pr, payload, opts) {
         throw new Error(`review post failed${status === void 0 ? "" : ` (HTTP ${status})`}`);
       }
       const detail = detailOf(e);
-      if (!retriedWithNewSha && STALE_SHA.test(detail)) {
+      if (STALE_SHA.test(detail)) {
         let head;
         try {
           const pull = await octokit.rest.pulls.get({ owner, repo, pull_number: pr });
@@ -25451,9 +25460,7 @@ async function postReview(octokit, pr, payload, opts) {
           const s = statusOf(getErr);
           throw new Error(`head sha re-resolve failed${s === void 0 ? "" : ` (HTTP ${s})`}`);
         }
-        commitId = head;
-        retriedWithNewSha = true;
-        continue;
+        throw new StaleHeadError(commitId, head);
       }
       if (!degraded && comments.length > 0 && OFF_DIFF.test(detail)) {
         body = foldComments(body, comments);
@@ -28155,6 +28162,12 @@ async function publishReview(a) {
     await a.deps.gh.createReview(a.pr, payload, { canWrite: true });
     a.out.posted = true;
   } catch (e) {
+    if (e instanceof StaleHeadError) {
+      note(a.env, a.out, `pr-reviewer: PR head moved during posting; analyzed ${e.analyzedSha}, live ${e.liveSha}; skipping review for the stale head \u2014 a fresh run will cover the new head.`);
+      a.out.staleSkipped = true;
+      a.out.exitCode = 0;
+      return;
+    }
     if (!(e instanceof ReadonlyTokenError))
       throw e;
     error(`review post refused by GitHub: ${e.detail !== "" ? e.detail : e.message}`);
@@ -28270,7 +28283,8 @@ async function runFlowA(env, deps, out) {
   writeFindings(env.artifactDir, redacted);
   writeFileSync2(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
   await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
-  out.exitCode = exitFor(env.inputs.failLevel, all);
+  if (!out.staleSkipped)
+    out.exitCode = exitFor(env.inputs.failLevel, all);
 }
 async function runFlowB(env, deps, out) {
   out.slowPathSkipped = true;
@@ -28309,7 +28323,8 @@ async function runFlowB(env, deps, out) {
   const findings = readFindings(env.artifactDir).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
   await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha });
-  out.exitCode = exitFor(env.inputs.failLevel, findings);
+  if (!out.staleSkipped)
+    out.exitCode = exitFor(env.inputs.failLevel, findings);
 }
 async function run(env, deps) {
   const out = newOutcome();

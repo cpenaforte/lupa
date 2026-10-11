@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ReadonlyTokenError,
+  StaleHeadError,
   getRepoSize,
   postIssueFallback,
   postReview,
@@ -67,13 +68,14 @@ async function postReviewWithMock(calls: string[]) {
   return r;
 }
 
-/** First POST rejects 422 stale commit_id; head_sha is re-resolved and the retry succeeds. */
+/** First POST rejects 422 stale commit_id; the stale head is reported, not retried. */
 async function postReviewStaleMock() {
   const f = fakeOctokit([httpError(422, STALE_MSG), "ok"]);
-  const r = await postReview(f.octokit, 1, payload);
-  expect(f.calls).toEqual(["post", "get", "post"]);
-  expect(f.reviewArgs[1].commit_id).toBe("sha-new");
-  return r;
+  const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(StaleHeadError);
+  expect(f.calls).toEqual(["post", "get"]);
+  expect(f.createReview).toHaveBeenCalledTimes(1);
+  return err as StaleHeadError;
 }
 
 /** A 500 that carries the key in its message; postReview must not leak it. */
@@ -172,13 +174,26 @@ describe("shouldTrigger", () => {
 });
 
 describe("postReview", () => {
-  it("422 off-diff degrades to general and retries once; stale sha re-resolves", async () => {
+  it("422 off-diff degrades to general and retries once; stale sha throws StaleHeadError", async () => {
     const calls: string[] = [];
     const r = await postReviewWithMock(calls);
     expect(calls.filter((c) => c === "post").length).toBe(2);
     expect(r.degraded).toBe(true);
     const s = await postReviewStaleMock();
-    expect(s.retriedWithNewSha).toBe(true);
+    expect(s).toBeInstanceOf(StaleHeadError);
+    expect(s.analyzedSha).toBe("sha-old");
+    expect(s.liveSha).toBe("sha-new");
+  });
+
+  it("stale commit_id 422 throws StaleHeadError with both SHAs and makes no second POST", async () => {
+    const f = fakeOctokit([httpError(422, STALE_MSG), "ok"], { headSha: "sha-new" });
+    const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StaleHeadError);
+    const stale = err as StaleHeadError;
+    expect(stale.analyzedSha).toBe("sha-old");
+    expect(stale.liveSha).toBe("sha-new");
+    expect(f.createReview).toHaveBeenCalledTimes(1);
+    expect(f.calls).toEqual(["post", "get"]);
   });
 
   it("off-diff retry posts with no inline comments and the comments folded into the body", async () => {
@@ -242,16 +257,14 @@ describe("postReview", () => {
     }
   });
 
-  it("stale then off-diff: three POSTs, ends as a general-only COMMENT with empty comments", async () => {
+  it("stale then off-diff: stale throws StaleHeadError with a single POST, never degrading", async () => {
     const f = fakeOctokit([httpError(422, STALE_MSG), httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
-    const r = await postReview(f.octokit, 1, payload);
-    expect(f.calls).toEqual(["post", "get", "post", "post"]);
-    expect(f.createReview).toHaveBeenCalledTimes(3);
-    const last = f.reviewArgs[2];
-    expect(last.event).toBe("COMMENT");
-    expect(last.comments).toEqual([]);
-    expect(last.commit_id).toBe("sha-new");
-    expect(r).toEqual({ degraded: true, retriedWithNewSha: true });
+    const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StaleHeadError);
+    expect(f.calls).toEqual(["post", "get"]);
+    expect(f.createReview).toHaveBeenCalledTimes(1);
+    expect((err as StaleHeadError).analyzedSha).toBe("sha-old");
+    expect((err as StaleHeadError).liveSha).toBe("sha-new");
   });
 
   it("degrades at most once: a second off-diff 422 throws", async () => {
@@ -269,41 +282,44 @@ describe("postReview", () => {
     expect(f.createReview).toHaveBeenCalledTimes(1);
   });
 
-  it("plain success reports no degradation and no re-resolve", async () => {
+  it("plain success reports no degradation", async () => {
     const f = fakeOctokit(["ok"]);
     const r = await postReview(f.octokit, 1, payload);
-    expect(r).toEqual({ degraded: false, retriedWithNewSha: false });
+    expect(r).toEqual({ degraded: false });
     expect(f.calls).toEqual(["post"]);
   });
 
-  it("stale sha retries once only", async () => {
+  it("stale sha throws on the first stale 422 without a second POST", async () => {
     const f = fakeOctokit([httpError(422, STALE_MSG), httpError(422, STALE_MSG)]);
-    await expect(postReview(f.octokit, 1, payload)).rejects.toThrow();
-    expect(f.createReview).toHaveBeenCalledTimes(2);
-    expect(f.calls).toEqual(["post", "get", "post"]);
+    const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StaleHeadError);
+    expect(f.createReview).toHaveBeenCalledTimes(1);
+    expect(f.calls).toEqual(["post", "get"]);
   });
 
   it("a 422 whose message says 'Commit ID' (with a space) takes the stale path", async () => {
     const f = fakeOctokit([httpError(422, "Unprocessable Entity: Commit ID is out of date"), "ok"]);
-    const r = await postReview(f.octokit, 1, payload);
-    expect(f.calls).toEqual(["post", "get", "post"]);
-    expect(r.retriedWithNewSha).toBe(true);
+    const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StaleHeadError);
+    expect(f.calls).toEqual(["post", "get"]);
+    expect((err as StaleHeadError).liveSha).toBe("sha-new");
   });
 
   it("a 422 whose message says 'commit-id' (hyphen) takes the stale path", async () => {
     const f = fakeOctokit([httpError(422, "Unprocessable Entity: commit-id is out of date"), "ok"]);
-    const r = await postReview(f.octokit, 1, payload);
-    expect(f.calls).toEqual(["post", "get", "post"]);
-    expect(r.retriedWithNewSha).toBe(true);
+    const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StaleHeadError);
+    expect(f.calls).toEqual(["post", "get"]);
+    expect((err as StaleHeadError).liveSha).toBe("sha-new");
   });
 
   it("a single 422 matching both off-diff and stale patterns takes the stale path first", async () => {
     const both = "Unprocessable Entity: commit_id is not the head commit; Line could not be resolved";
     const f = fakeOctokit([httpError(422, both, OFF_DIFF_ERRORS), "ok"]);
-    const r = await postReview(f.octokit, 1, payload);
-    expect(f.calls).toEqual(["post", "get", "post"]);
-    expect(f.reviewArgs[1].comments).toEqual(payload.comments);
-    expect(r).toEqual({ degraded: false, retriedWithNewSha: true });
+    const err = await postReview(f.octokit, 1, payload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StaleHeadError);
+    expect(f.calls).toEqual(["post", "get"]);
+    expect(f.createReview).toHaveBeenCalledTimes(1);
   });
 
   it("a 422 mentioning sha256 does not take the stale path", async () => {
