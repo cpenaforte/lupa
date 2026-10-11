@@ -134,13 +134,17 @@ jobs:
         env:
           GITHUB_EVENT_NAME: push
           GITHUB_EVENT_PATH: ${{ github.workspace }}/tests/fixtures/push-event.json
+          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/action-summary.md
         with:
           post_comment: "false"
           fail_level: none
           llm_api_key: ""
 
       - name: Assert the summary was written
-        run: test -s "$GITHUB_STEP_SUMMARY"
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/action-summary.md"
+          cat "$RUNNER_TEMP/action-summary.md" >> "$GITHUB_STEP_SUMMARY"
 
   sarif:
     name: SARIF upload plumbing (same-repo PRs only)
