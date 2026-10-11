@@ -201,13 +201,10 @@ describe("callResponsesTurn", () => {
 
   it("turn mode sends flat tools and no text.format", async () => {
     await callResponsesTurn(fakeResponsesEp(), conv(), turnOpts(), toolFlags);
-    const body: any = lastBody();
-    expect(body.tools[0]).toEqual({
-      type: "function",
-      name: "read_file",
-      description: "Read a file",
-      parameters: toolDef.parameters,
-    });
+    const body = lastBody();
+    expect(body.tools).toEqual([
+      { type: "function", name: "read_file", description: "Read a file", parameters: toolDef.parameters },
+    ]);
     expect("text" in body).toBe(false);
   });
 
@@ -226,14 +223,13 @@ describe("callResponsesTurn", () => {
       tools: [toolDef],
     };
     await callResponsesTurn(fakeResponsesEp(), c, turnOpts(), toolFlags);
-    const body: any = lastBody();
-    expect(body.input[2]).toEqual({
-      type: "function_call",
-      call_id: "c1",
-      name: "read_file",
-      arguments: '{"path":"a.ts"}',
-    });
-    expect(body.input[3]).toEqual({ type: "function_call_output", call_id: "c1", output: "ok" });
+    const body = lastBody();
+    expect(body.input).toEqual([
+      { role: "system", content: "s" },
+      { role: "user", content: "u" },
+      { type: "function_call", call_id: "c1", name: "read_file", arguments: '{"path":"a.ts"}' },
+      { type: "function_call_output", call_id: "c1", output: "ok" },
+    ]);
   });
 
   it("parses output function_call items with call_id", async () => {
@@ -291,9 +287,14 @@ describe("callResponsesTurn", () => {
       tools: [toolDef],
     };
     await callResponsesTurn(fakeResponsesEp(), next, turnOpts(), toolFlags);
-    const body: any = lastBody();
-    expect(body.input[2]).toEqual(reasoning);
-    expect(body.input[3]).toEqual(fc);
-    expect(body.input[4]).toEqual({ type: "function_call_output", call_id: "c1", output: "ok" });
+    const body = lastBody();
+    // Docs pattern: the next turn echoes response.output verbatim (id/status included).
+    expect(body.input).toEqual([
+      { role: "system", content: "s" },
+      { role: "user", content: "u" },
+      reasoning,
+      fc,
+      { type: "function_call_output", call_id: "c1", output: "ok" },
+    ]);
   });
 });
