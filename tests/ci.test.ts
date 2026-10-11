@@ -104,7 +104,7 @@ describe("ci workflow", () => {
     const evalStep = job.slice(evals, evalStepEnd === -1 ? undefined : evalStepEnd);
     expect(evalStep).toContain("run: npm run evals");
     expect(evalStep).not.toMatch(/\bsecrets\./);
-    expect(evalStep).not.toMatch(/^\s+env:\s*$/m);
+    expect(evalStep).not.toMatch(/^\s+env:/m);
     expect(evalStep).not.toMatch(/INPUT_(?:LLM|OPENAI|ANTHROPIC|GEMINI|OLLAMA)/i);
   });
 

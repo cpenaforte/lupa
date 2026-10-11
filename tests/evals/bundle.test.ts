@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -45,10 +46,16 @@ function promptDiff(result: EvalRun): string {
 describe("synthetic bundle regression cases", () => {
   it("has unique case IDs and every required category", () => {
     const ids = evalCases.map(({ id }) => id);
-    expect(new Set(ids).size, "duplicate case IDs in synthetic evaluation corpus").toBe(ids.length);
+    const seen = new Set<string>();
+    const duplicateIds = ids.filter((id) => {
+      if (seen.has(id)) return true;
+      seen.add(id);
+      return false;
+    });
     const categories = new Set(evalCases.flatMap(({ categories }) => categories));
-    const missing = requiredCategories.filter((category) => !categories.has(category));
-    expect(missing, `missing required categories: ${missing.join(", ")}`).toEqual([]);
+    const missingCategories = requiredCategories.filter((category) => !categories.has(category));
+    const diagnostics = `duplicate case IDs: ${duplicateIds.join(", ") || "none"}; missing required categories: ${missingCategories.join(", ") || "none"}`;
+    expect({ duplicateIds, missingCategories }, diagnostics).toEqual({ duplicateIds: [], missingCategories: [] });
   });
 
   it.each(evalCases.map((testCase) => [testCase.id, testCase] as const))("%s", async (_id, testCase) => {
@@ -134,7 +141,7 @@ describe("synthetic bundle regression cases", () => {
     const outputPath = join(root, "output.txt");
     writeFileSync(eventPath, JSON.stringify({ ref: "refs/heads/synthetic", after: "a".repeat(40) }));
     const probeUrl = new URL("./import-bundle-probe.mjs", import.meta.url);
-    execFileSync(process.execPath, [probeUrl.pathname, new URL("../../dist/index.js", import.meta.url).href], {
+    execFileSync(process.execPath, [fileURLToPath(probeUrl), new URL("../../dist/index.js", import.meta.url).href], {
       env: {
         ...process.env,
         GITHUB_EVENT_NAME: "push",
