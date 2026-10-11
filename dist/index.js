@@ -28058,14 +28058,20 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped) {
   if (i.llmAgent) {
     const selfRepo = String(env.payload.repository?.full_name ?? "");
     const linked = parseLinkedRepos((await deps.gh.getPr(pr)).body, selfRepo);
+    if (linked.length > 0)
+      info(`agent linked repositories: ${linked.join(", ")}`);
     const toolCtx = {
       roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
       ensureLinked: async (alias) => {
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join6(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
+          maxBytes: AGENT_LIMITS.cloneMaxBytes,
           sizeKb: async (a) => {
-            const [o, n] = a.split("/");
+            const parts = a.split("/");
+            if (parts.length !== 2)
+              return void 0;
+            const [o, n] = parts;
             return deps.gh.getRepoSize(o, n);
           }
         });

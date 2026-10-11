@@ -88,10 +88,11 @@ interface Rec {
   agentMaxSeconds?: number;
   toolOutput?: string;
   toolError?: boolean;
+  repoSizeCalls: Array<[string, string]>;
 }
 
 function newRec(): Rec {
-  return { reviews: [], reviewAttempts: 0, issueComments: [], getPrCalls: 0, llmCalled: 0, ollamaCalled: 0, agentCalled: 0 };
+  return { reviews: [], reviewAttempts: 0, issueComments: [], getPrCalls: 0, llmCalled: 0, ollamaCalled: 0, agentCalled: 0, repoSizeCalls: [] };
 }
 
 interface GwOpts {
@@ -99,6 +100,8 @@ interface GwOpts {
   write403?: boolean;
   issue403?: boolean;
   body?: string;
+  /** Size in KB reported by the getRepoSize fake (default 1024). */
+  repoSizeKb?: number;
   /** Second and later getPr calls report a moved head. */
   headMoves?: boolean;
   info?: Partial<PrInfo>;
@@ -124,7 +127,10 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
       rec.issueBodyFetched = n;
       return "issue text";
     },
-    getRepoSize: async () => 1024,
+    getRepoSize: async (owner, repo) => {
+      rec.repoSizeCalls.push([owner, repo]);
+      return o.repoSizeKb ?? 1024;
+    },
     createReview: async (_pr, payload) => {
       rec.reviewAttempts += 1;
       if (o.write403) {
@@ -165,6 +171,8 @@ interface MockOpts {
   llmAgent?: boolean;
   /** Drive one linked-repo tool call through the agent ToolContext (clone is expected to fail). */
   agentToolProbe?: boolean;
+  /** Size in KB reported by the getRepoSize fake (default 1024). */
+  repoSizeKb?: number;
   llmApiKey?: string;
   prBody?: string;
   forkReadonly?: boolean;
@@ -235,6 +243,7 @@ async function runWithMocks(o: MockOpts = {}) {
       issue403: o.issue403,
       headMoves: o.headMoves,
       body: o.prBody,
+      repoSizeKb: o.repoSizeKb,
       info: { isFork: o.forkReadonly === true, headRepo: o.forkReadonly ? "fork/r" : "o/r" },
     }),
     analysis: {
@@ -311,6 +320,7 @@ async function runWithMocks(o: MockOpts = {}) {
     agentMaxSeconds: rec.agentMaxSeconds,
     toolOutput: rec.toolOutput,
     toolError: rec.toolError,
+    repoSizeCalls: rec.repoSizeCalls,
     scanEnv: rec.scanEnv,
     l2Env: rec.l2Env,
     artifactDir,
@@ -661,6 +671,25 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
     expect(r.toolError).toBe(true);
     expect(r.toolOutput).toContain("repository not accessible");
+  });
+
+  it("oversized linked repo is short-circuited by the size guard (no clone) and the review still posts", async () => {
+    const info = vi.mocked(core.info);
+    info.mockClear();
+    const r = await runWithMocks({
+      llmAgent: true,
+      agentToolProbe: true,
+      prBody: "See https://github.com/someone/else for context",
+      repoSizeKb: 300000000,
+    });
+    expect(r.posted).toBe(true);
+    expect(r.toolError).toBe(true);
+    // The size guard short-circuits before any clone: the tool surfaces the
+    // not-accessible error while getRepoSize proves the pre-check ran.
+    expect(r.toolOutput).toContain("repository not accessible: someone/else");
+    expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
+    const lines = info.mock.calls.map((c) => String(c[0]));
+    expect(lines).toContain("agent linked repositories: someone/else");
   });
 
   // Task 19 wiring: with plain `auto` the slow path probes (error-driven, spec §9.5) —

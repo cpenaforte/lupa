@@ -18,6 +18,7 @@ import {
 import { runL0, type Finding } from "./fastpath.js";
 import { runL2 } from "./l2.js";
 import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
+import { AGENT_LIMITS } from "./agent-types.js";
 import {
   getRepoSize as fetchRepoSize,
   postIssueFallback,
@@ -550,13 +551,20 @@ async function slowPath(
   if (i.llmAgent) {
     const selfRepo = String((env.payload.repository as { full_name?: unknown } | undefined)?.full_name ?? "");
     const linked = parseLinkedRepos((await deps.gh.getPr(pr)).body, selfRepo);
+    if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
     const toolCtx: ToolContext = {
       roots: { self: env.workDir, linked: new Map() },
       ensureLinked: async (alias) => {
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
-          sizeKb: async (a) => { const [o, n] = a.split("/"); return deps.gh.getRepoSize(o!, n!); },
+          maxBytes: AGENT_LIMITS.cloneMaxBytes,
+          sizeKb: async (a) => {
+            const parts = a.split("/");
+            if (parts.length !== 2) return undefined;
+            const [o, n] = parts;
+            return deps.gh.getRepoSize(o!, n!);
+          },
         });
         if ("dir" in r) toolCtx.roots.linked!.set(alias, r.dir);
         return r;
