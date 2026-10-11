@@ -64,7 +64,7 @@ jobs:
       - name: Post review
         # Reporting only: it does not gate merges (the PR run's gate does).
         continue-on-error: true
-        uses: OWNER/lupa@0000000000000000000000000000000000000000 # replace with a released SHA
+        uses: cpenaforte/lupa@67a2d86d2789ad25e2593762d06f9400b4ccbd29
         env:
           PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-priv-out
           PR_REVIEWER_TOKEN_TYPE: ${{ steps.app.outcome == 'success' && 'app' || 'github-token' }}

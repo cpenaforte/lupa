@@ -121,7 +121,7 @@ jobs:
         id: review
         # Exit 2 (warning) must never block the merge; the gate step below decides.
         continue-on-error: true
-        uses: OWNER/lupa@0000000000000000000000000000000000000000 # replace with a released SHA
+        uses: cpenaforte/lupa@67a2d86d2789ad25e2593762d06f9400b4ccbd29
         env:
           PR_REVIEWER_BASE_SHA: ${{ steps.shas.outputs.base_sha }}
           PR_REVIEWER_HEAD_SHA: ${{ steps.shas.outputs.head_sha }}
