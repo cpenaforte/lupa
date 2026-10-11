@@ -12,8 +12,9 @@ Goal: report `gofmt -l` formatting drift as findings instead of silently discard
   pattern for future per-tool interpreters.
 - Severity: `warning` (consistent with every other L2 finding; exit 2 is non-blocking
   by template design, so no merge is held up).
-- Scope of files: PR-changed files only (pre-existing drift stays out of the review;
-  changed-file findings can land inline). The changed set flows into `runL2`.
+- Scope of files: PR-changed files only (pre-existing drift stays out of the review).
+  The changed set flows into `runL2`. (Note: gofmt findings carry no `line`, so
+  `mapToComments` always places them in the general body — never inline.)
 - Ship with the whole-plan release — no tag for F09 alone (standing instruction:
   release after the conclusion of the whole roadmap plan).
 
@@ -84,9 +85,11 @@ export async function runL2(
 `Analysis.runL2` (`src/main.ts:88`) gains the same optional parameter;
 `realAnalysis` passes it through; the `runFlowA` call site (`:791`) passes
 `new Set(files.map((f) => f.file))` from the already-parsed diff (repo-relative
-paths, matching `gofmt -l .` output relative to `workDir`). An empty set means
-"no filtering context" only when the caller omits it; `gofmt` output intersected
-with an empty set yields no findings. Existing `runL2(dir)` fakes keep compiling.
+paths, matching `gofmt -l .` output relative to `workDir`). An empty or omitted
+`changedFiles` yields no gofmt findings (the intersection is empty). Existing
+`runL2(dir)` fakes keep compiling, but the recording fake at
+`tests/main.test.ts:274` must capture the second argument (new `Rec` field beside
+`l2Env` at `:84`) for the test below.
 
 ### Path contract
 
@@ -103,9 +106,11 @@ with an empty set yields no findings. Existing `runL2(dir)` fakes keep compiling
   `sub/b.go` twin, messages `gofmt: <path> is not formatted (run gofmt -w <path>)`.
 - exit 0 with stdout listing only unchanged files → no findings.
 - exit 0 with empty stdout → no findings.
+- nonzero exit WITH filenames on stdout → per-file findings (pins the
+  regardless-of-exit-code behavior).
 - exit 3 with `main.go is not gofmt-clean` on stderr and empty stdout → the existing
-  generic warning (existing test at `:102-109` keeps passing, updated to the new
-  spawner shape).
+  generic warning (existing test at `:102-109` keeps passing as-is; it drives the real
+  `execTool` against a shell stub, not a fake spawner).
 - `./`-prefixed entries (`./a.go`) normalize and match.
 - `tests/main.test.ts`: one test asserting the parsed-diff changed set reaches
   `analysis.runL2` as its second argument.
