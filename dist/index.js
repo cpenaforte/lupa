@@ -28119,8 +28119,11 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prB
   }
   return res.findings;
 }
+function runtimeSecrets(env) {
+  return [env.inputs.githubToken, env.inputs.llmApiKey].filter((s) => s !== "");
+}
 async function publishReview(a) {
-  const findings = redactFindings(a.findings, [a.env.inputs.githubToken, a.env.inputs.llmApiKey].filter((s) => s !== ""));
+  const findings = redactFindings(a.findings, runtimeSecrets(a.env));
   const { inline, general } = mapToComments(findings, parseHunks(a.hunks));
   const body = buildBody(general, summaryFor(findings));
   const payload = {
@@ -28247,7 +28250,7 @@ async function runFlowA(env, deps, out) {
     }
   }
   const fast = [...l0, ...scan.findings, ...l2];
-  writeFindings(env.artifactDir, fast);
+  writeFindings(env.artifactDir, redactFindings(fast, runtimeSecrets(env)));
   const prompt = truncateDiff(filterForPrompt(files), env.inputs.maxDiffChars, PER_FILE_CAP);
   let issueBody;
   const issueNo = linkedIssueNumber(pull.body);
@@ -28263,8 +28266,9 @@ async function runFlowA(env, deps, out) {
   out.slowPathSkipped = llm === void 0;
   out.findingsFrom = llm === void 0 ? "fastpath" : "llm";
   const all = [...fast, ...llm ?? []].map(sanitizeFinding);
-  writeFindings(env.artifactDir, all);
-  writeFileSync2(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(all), null, 2) + "\n", "utf8");
+  const redacted = redactFindings(all, runtimeSecrets(env));
+  writeFindings(env.artifactDir, redacted);
+  writeFileSync2(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
   await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
   out.exitCode = exitFor(env.inputs.failLevel, all);
 }

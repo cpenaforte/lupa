@@ -86,4 +86,10 @@ describe("README", () => {
       "In agent mode, whole files from the repository (and from linked repositories mentioned in the PR body) may be sent to your LLM provider — not just the diff.",
     );
   });
+
+  it("documents runtime-key masking scope", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    expect(r).toContain("runtime-key masking only");
+    expect(r).toContain("separate scanner concern");
+  });
 });

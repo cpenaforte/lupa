@@ -617,6 +617,13 @@ async function slowPath(
   return res.findings;
 }
 
+// Artifact redaction is runtime-key masking only: the run's own github_token and
+// llm_api_key values are masked from findings.json and sarif.json. Secrets
+// committed in the diff are a separate scanner concern and are not covered.
+function runtimeSecrets(env: RunEnv): string[] {
+  return [env.inputs.githubToken, env.inputs.llmApiKey].filter(s => s !== "");
+}
+
 interface PublishArgs {
   env: RunEnv;
   deps: Deps;
@@ -634,7 +641,7 @@ interface PublishArgs {
  * A failed issue fallback is a warning; it never changes the exit code.
  */
 async function publishReview(a: PublishArgs): Promise<void> {
-  const findings = redactFindings(a.findings, [a.env.inputs.githubToken, a.env.inputs.llmApiKey].filter(s => s !== ""));
+  const findings = redactFindings(a.findings, runtimeSecrets(a.env));
   const { inline, general } = mapToComments(findings, parseHunks(a.hunks));
   const body = buildBody(general, summaryFor(findings));
   const payload: ReviewPayload = {
@@ -785,7 +792,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   }
   const fast = [...l0, ...scan.findings, ...l2];
   // Written before the LLM call so a later failure still leaves the fast results uploadable.
-  writeFindings(env.artifactDir, fast);
+  writeFindings(env.artifactDir, redactFindings(fast, runtimeSecrets(env)));
 
   const prompt = truncateDiff(filterForPrompt(files), env.inputs.maxDiffChars, PER_FILE_CAP);
   let issueBody: string | undefined;
@@ -803,8 +810,9 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   out.slowPathSkipped = llm === undefined;
   out.findingsFrom = llm === undefined ? "fastpath" : "llm";
   const all = [...fast, ...(llm ?? [])].map(sanitizeFinding);
-  writeFindings(env.artifactDir, all);
-  writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(all), null, 2) + "\n", "utf8");
+  const redacted = redactFindings(all, runtimeSecrets(env));
+  writeFindings(env.artifactDir, redacted);
+  writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
 
   await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
   out.exitCode = exitFor(env.inputs.failLevel, all);

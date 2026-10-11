@@ -201,6 +201,8 @@ interface MockOpts {
   comment?: boolean;
   /** Files created under the work dir (real on-disk sizes for L0's large-file rule). */
   workFiles?: Record<string, number>;
+  /** Findings returned by the runScanners fake (default []). */
+  scan?: Finding[];
   tokenIsApp?: boolean;
   llmProvider?: LlmProvider;
   llmModel?: string;
@@ -258,7 +260,7 @@ async function runWithMocks(o: MockOpts = {}) {
     analysis: {
       runScanners: async () => {
         rec.scanEnv = { ...process.env };
-        return o.sbomMissing ? { findings: [], sbomPath: join(sbomDir, "sbom.cdx.json") } : { findings: [] };
+        return o.sbomMissing ? { findings: [], sbomPath: join(sbomDir, "sbom.cdx.json") } : { findings: o.scan ?? [] };
       },
       runL2: async () => {
         rec.l2Env = { ...process.env };
@@ -679,6 +681,38 @@ describe("run() orchestration", () => {
     expect(dumped).not.toContain("gh-secret-token-123");
     expect(dumped).not.toContain("sk-secret-key-456");
     expect(dumped).toContain("[REDACTED]");
+  });
+
+  it("fast findings echoing the token are masked in the early findings.json", async () => {
+    const fast: Finding = {
+      severity: "warning",
+      file: "src/a.ts",
+      line: 2,
+      rule: "tok-rule",
+      message: "saw tok-live-123 in scanner output",
+    };
+    const r = await runWithMocks({ githubToken: "tok-live-123", llmApiKey: "", scan: [fast] });
+    expect(r.findingsFrom).toBe("fastpath");
+    const raw = readFileSync(join(r.artifactDir, "findings.json"), "utf8");
+    expect(raw).not.toContain("tok-live-123");
+    expect(raw).toContain("[REDACTED]");
+  });
+
+  it("merged findings and sarif.json are masked and sarif stays valid", async () => {
+    const leaked: Finding = {
+      severity: "warning",
+      file: "src/a.ts",
+      line: 2,
+      rule: "llm-rule",
+      message: "key key-live-456 echoed by the model",
+    };
+    const r = await runWithMocks({ llmApiKey: "key-live-456", llm: [leaked] });
+    const merged = readFileSync(join(r.artifactDir, "findings.json"), "utf8");
+    expect(merged).not.toContain("key-live-456");
+    expect(merged).toContain("[REDACTED]");
+    const sarif = JSON.parse(readFileSync(join(r.artifactDir, "sarif.json"), "utf8"));
+    expect(sarif.version).toBe("2.1.0");
+    expect(JSON.stringify(sarif)).not.toContain("key-live-456");
   });
 
   it("linked alias clone failure still posts the review (tool error only)", async () => {

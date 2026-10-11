@@ -175,6 +175,7 @@ The segregation matters: the privileged job reads only the artifact, so PR code 
 - Pin the action and every third-party action to a commit SHA.
 - Never interpolate PR titles or bodies into `run:` steps. `pull_request_target` is not used.
 - `llm_api_key` is never written to logs. Prompt-injection defences are structural (delimited diff, no tools for the model, output validation, an auditable log of each call). They are not a guarantee.
+- Artifact redaction is runtime-key masking only: `findings.json` and `sarif.json` mask the run's own `github_token` and `llm_api_key` values. Secrets committed in the diff are a separate scanner concern and are not covered.
 - The model can be wrong. Treat findings as suggestions and keep human review for security-critical changes.
 
 ## Why the technical identifiers still say pr-reviewer
