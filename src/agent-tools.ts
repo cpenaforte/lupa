@@ -25,6 +25,19 @@ function hasGitSegment(p: string): boolean {
 }
 
 /**
+ * Cut `s` to at most `n` UTF-16 code units without splitting a surrogate
+ * pair. If the cut index falls on a low surrogate, the preceding high
+ * surrogate would be left unpaired, so drop the whole pair.
+ */
+function codePointSafeCut(s: string, n: number): string {
+  if (n <= 0) return "";
+  if (n >= s.length) return s;
+  const code = s.charCodeAt(n);
+  const cut = code >= 0xdc00 && code <= 0xdfff ? n - 1 : n;
+  return s.slice(0, cut);
+}
+
+/**
  * Realpath of `p` when it exists, otherwise of its nearest existing ancestor.
  * Catches an escaping symlinked directory even when the requested leaf does
  * not exist yet.
@@ -143,11 +156,11 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promis
   let hi = fullContent.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    const candidate = serialize(fullContent.slice(0, mid) + TRUNCATION_MARKER, true);
+    const candidate = serialize(codePointSafeCut(fullContent, mid) + TRUNCATION_MARKER, true);
     if (Buffer.byteLength(candidate, "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
     else hi = mid - 1;
   }
-  return okResult(JSON.parse(serialize(fullContent.slice(0, lo) + TRUNCATION_MARKER, true)));
+  return okResult(JSON.parse(serialize(codePointSafeCut(fullContent, lo) + TRUNCATION_MARKER, true)));
 }
 
 interface DirEntry {

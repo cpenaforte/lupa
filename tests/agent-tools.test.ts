@@ -74,6 +74,20 @@ describe("read_file", () => {
     expect(parsed.content).toContain("[truncated]");
   });
 
+  it("read_file truncation never splits a surrogate pair", async () => {
+    const root = tempRoot();
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (const n of [16320, 16321, 16330, 16331, 16332, 16340, 20000]) {
+      writeFileSync(join(root, "emoji.txt"), "😀".repeat(n));
+      const r = await executeTool("read_file", { path: "emoji.txt" }, ctxFor(root));
+      expect(r.isError, `n=${n}`).toBe(false);
+      expect(Buffer.byteLength(r.output, "utf8"), `n=${n}`).toBeLessThanOrEqual(AGENT_LIMITS.resultBytes);
+      const parsed = JSON.parse(r.output);
+      expect(parsed.truncated, `n=${n}`).toBe(true);
+      expect(lone.test(parsed.content), `n=${n} produced a lone surrogate`).toBe(false);
+    }
+  });
+
   it("read_file rejects an invalid range and .git paths with isError", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "line1\nline2\nline3\n");
