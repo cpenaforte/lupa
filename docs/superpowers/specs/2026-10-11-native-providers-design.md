@@ -148,7 +148,8 @@ Extend the existing `rawItems` seam to the other native adapters:
 ### Change sites
 
 - `src/adapters/google.ts` (`parseGoogleReply`, `buildGoogleBody`, `callGoogleTurn`);
-  `src/adapters/messages.ts` (parse/build).
+  `src/adapters/messages.ts` (`parseMessagesReply`, `buildMessagesBody`, `callMessagesTurn` —
+  the turn call is where `AgentReply` is assembled, so it must surface `rawItems`).
 - Tests: `tests/adapters-google.test.ts:307` (the `role:"function"` functionResponse
   assertion — must move to the chosen role) and `:363` (the exact `toEqual` reply shape —
   must include `rawItems`); `tests/adapters-messages.test.ts` is unaffected.
