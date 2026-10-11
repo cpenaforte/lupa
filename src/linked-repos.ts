@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface CloneRunResult {
@@ -222,8 +222,7 @@ export async function ensureLinkedRepo(
   }
 
   const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, MARKER_NAME), JSON.stringify({ repo: alias, branch: head.branch, sha: head.sha }), "utf8");
+  writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });
   return { dir, sha: head.sha };
 }
 
@@ -234,6 +233,33 @@ interface CloneMarker {
   repo: string;
   branch: string;
   sha: string;
+}
+
+/**
+ * Records the fresh-clone marker. The marker path is untrusted clone content:
+ * it may arrive as a directory (which would make `writeFileSync` throw) or as
+ * a symlink (which would redirect the write outside the clone dir). `lstatSync`
+ * detects either without following links; removing the path first guarantees
+ * the write creates a fresh regular file. The whole write is best-effort: a
+ * missing marker simply fails closed on the next validation (re-clone), so a
+ * hostile marker path can never throw on the success path.
+ */
+function writeMarker(dir: string, marker: CloneMarker): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, MARKER_NAME);
+    try {
+      const st = lstatSync(path);
+      if (st.isSymbolicLink() || st.isDirectory() || st.isFile()) {
+        rmSync(path, { recursive: true, force: true });
+      }
+    } catch {
+      // No pre-existing marker path: nothing to clear.
+    }
+    writeFileSync(path, JSON.stringify(marker), "utf8");
+  } catch {
+    // Degrade to "no marker": the next call re-validates and re-clones.
+  }
 }
 
 function readMarker(dir: string): CloneMarker | null {
@@ -300,7 +326,8 @@ async function validateCache(
     const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs });
     if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`) return null;
     const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
-    if (branch.code !== 0 || branch.stdout.trim() !== marker.branch) return null;
+    const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
+    if (resolvedBranch === "" || resolvedBranch !== marker.branch) return null;
     if (o.maxBytes !== undefined) {
       let total: number;
       try {

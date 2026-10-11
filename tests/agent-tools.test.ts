@@ -197,7 +197,7 @@ describe("executeTool", () => {
     writeFileSync(join(lazy, "b.txt"), "lazy");
     const viaEnsure = await executeTool("read_file", { path: "b.txt", repo: "o/lazy" }, {
       roots: { self },
-      ensureLinked: async (alias) => (alias === "o/lazy" ? { dir: lazy } : { error: "nope" }),
+      ensureLinked: async (alias) => (alias === "o/lazy" ? { dir: lazy, sha: "a".repeat(40) } : { error: "nope" }),
     });
     expect(viaEnsure.isError).toBe(false);
     expect(JSON.parse(viaEnsure.output).content).toContain("lazy");

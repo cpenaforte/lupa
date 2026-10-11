@@ -11,7 +11,7 @@ export interface ToolRoots {
 
 export interface ToolContext {
   roots: ToolRoots;
-  ensureLinked?: (alias: string) => Promise<{ dir: string } | { error: string }>;
+  ensureLinked?: (alias: string) => Promise<{ dir: string; sha: string } | { error: string }>;
 }
 
 const DRIVE_LETTER = /^[a-zA-Z]:/;

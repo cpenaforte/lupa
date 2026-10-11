@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureLinkedRepo, parseLinkedRepos } from "../src/linked-repos.js";
@@ -109,26 +109,38 @@ describe("ensureLinkedRepo", () => {
     });
     expect(emptyEnv.GIT_CONFIG_COUNT).toBeUndefined();
     expect(emptyEnv.GIT_CONFIG_VALUE_0).toBeUndefined();
+  });
 
-    // An existing dir without git metadata is never trusted: wipe and re-clone.
-    mkdirSync(join(baseDir, "cached__repo"));
-    const recloneArgv: string[][] = [];
-    const cached = await ensureLinkedRepo("cached/repo", {
-      token,
-      baseDir,
-      deps: {
-        run: async (_cmd, args) => {
-          recloneArgv.push(args);
-          if (args[0] === "clone") {
-            mkdirSync(args[args.length - 1]!, { recursive: true });
-            return { code: 0, stdout: "", stderr: "" };
-          }
+  it("re-clones when the cached dir is not a git repo", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "cached__repo");
+    // A plain dir (no .git, no marker): stale content must be wiped, then a
+    // fresh clone runs against the untouched destination.
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "stale.txt"), "stale");
+    const argv: string[][] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        argv.push(args);
+        if (args[0] === "clone") {
+          mkdirSync(args[args.length - 1]!, { recursive: true });
           return { code: 0, stdout: "", stderr: "" };
-        },
+        }
+        return { code: 0, stdout: "", stderr: "" };
       },
-    });
-    expect(recloneArgv.some((a) => a[0] === "clone")).toBe(true);
-    expect(cached).toEqual({ dir: join(baseDir, "cached__repo"), sha: "" });
+    };
+    const res = await ensureLinkedRepo("cached/repo", { token: "t", baseDir, deps });
+    const cloneArgv = argv.find((a) => a[0] === "clone");
+    expect(cloneArgv).toEqual([
+      "clone",
+      "--depth",
+      "1",
+      "--single-branch",
+      "https://github.com/cached/repo.git",
+      dir,
+    ]);
+    expect(res).toEqual({ dir, sha: "" });
+    expect(existsSync(join(dir, "stale.txt"))).toBe(false);
   });
 
   it("re-clones on origin mismatch", async () => {
@@ -180,6 +192,53 @@ describe("ensureLinkedRepo", () => {
     const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
     expect(argv.some((a) => a[0] === "clone")).toBe(true);
     expect(res).toEqual({ dir, sha: "" });
+  });
+
+  it("writes the marker even when the clone ships a marker directory", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        if (args[0] === "clone") {
+          const dest = args[args.length - 1]!;
+          mkdirSync(dest, { recursive: true });
+          // Hostile content: the marker path arrives as a directory.
+          mkdirSync(join(dest, ".lupa-clone.json"), { recursive: true });
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
+    expect(res).toEqual({ dir, sha: "" });
+    // The marker is a regular file with the fresh-clone payload, not a directory.
+    expect(JSON.parse(readFileSync(join(dir, ".lupa-clone.json"), "utf8"))).toEqual({
+      repo: "a/b",
+      branch: "",
+      sha: "",
+    });
+  });
+
+  it("never writes through a marker symlink outside the clone dir", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    const sentinel = join(baseDir, "sentinel.txt");
+    writeFileSync(sentinel, "untouched");
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        if (args[0] === "clone") {
+          const dest = args[args.length - 1]!;
+          mkdirSync(dest, { recursive: true });
+          // Hostile content: the marker path arrives as a symlink pointing outside.
+          symlinkSync(sentinel, join(dest, ".lupa-clone.json"));
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps });
+    expect(res).toEqual({ dir, sha: "" });
+    expect(readFileSync(sentinel, "utf8")).toBe("untouched");
   });
 
   it("reuses a valid cache with zero git-mutating calls and returns its sha", async () => {

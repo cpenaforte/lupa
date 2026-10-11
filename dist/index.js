@@ -25624,7 +25624,7 @@ function readOptionalInt(name, min) {
 
 // lib/src/linked-repos.js
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync4, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 var CLONE_TIMEOUT_MS = 6e4;
 function defaultRun(cmd, args, o) {
@@ -25775,11 +25775,25 @@ async function ensureLinkedRepo(alias, o) {
     }
   }
   const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync2(join4(dir, MARKER_NAME), JSON.stringify({ repo: alias, branch: head.branch, sha: head.sha }), "utf8");
+  writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });
   return { dir, sha: head.sha };
 }
 var MARKER_NAME = ".lupa-clone.json";
+function writeMarker(dir, marker) {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const path = join4(dir, MARKER_NAME);
+    try {
+      const st = lstatSync(path);
+      if (st.isSymbolicLink() || st.isDirectory() || st.isFile()) {
+        rmSync(path, { recursive: true, force: true });
+      }
+    } catch {
+    }
+    writeFileSync2(path, JSON.stringify(marker), "utf8");
+  } catch {
+  }
+}
 function readMarker(dir) {
   let raw;
   try {
@@ -25825,7 +25839,8 @@ async function validateCache(deps, alias, dir, o) {
     if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`)
       return null;
     const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
-    if (branch.code !== 0 || branch.stdout.trim() !== marker.branch)
+    const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
+    if (resolvedBranch === "" || resolvedBranch !== marker.branch)
       return null;
     if (o.maxBytes !== void 0) {
       let total;
