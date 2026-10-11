@@ -60,9 +60,28 @@ function tryParseFinal(text: string): LlmResult {
   return { ok: true, findings };
 }
 
+/**
+ * Cut `output` to at most `maxResultBytes` UTF-8 bytes without splitting a
+ * code point: binary-search the longest string prefix whose UTF-8 byte
+ * length fits, then step back if the cut lands inside a surrogate pair
+ * (mirrors `codePointSafeCut` in agent-tools.ts). A raw byte cut could
+ * split a multibyte sequence and decode to U+FFFD.
+ */
 function capOutput(output: string, maxResultBytes: number): string {
   if (Buffer.byteLength(output, "utf8") <= maxResultBytes) return output;
-  return Buffer.from(output, "utf8").subarray(0, maxResultBytes).toString("utf8") + "[truncated]";
+  let lo = 0;
+  let hi = output.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(output.slice(0, mid), "utf8") <= maxResultBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  let cut = lo;
+  if (cut > 0 && cut < output.length) {
+    const code = output.charCodeAt(cut);
+    if (code >= 0xdc00 && code <= 0xdfff) cut -= 1;
+  }
+  return output.slice(0, cut) + "[truncated]";
 }
 
 export async function runAgent(
@@ -157,7 +176,7 @@ export async function runAgent(
           if (p2.ok) return finish(p2, "fallback", false);
           return finish(p2, "error", false);
         }
-        if (status === 404) return finish(reply.result, "fallback", true);
+        if (status === 404) return finish(reply.result, "error", true);
         return finish(reply.result, "error", false);
       }
       return finish(reply.result, "error", false);

@@ -253,6 +253,36 @@ describe("runAgent", () => {
     ]);
   });
 
+  it("turn-0 404 returns stop=error with probeAdvance=true", async () => {
+    const root = tempRoot();
+    const h = harness(root, [fail(404)]);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result.ok).toBe(false);
+    expect(out.stop).toBe("error");
+    expect(out.probeAdvance).toBe(true);
+    expect(out.toolsUnsupported).toBe(false);
+    expect(h.ncalls()).toBe(1);
+  });
+
+  it("truncates an over-cap multibyte tool result with no U+FFFD or lone surrogates", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "emoji.txt"), "😀".repeat(50) + "\n");
+    const h = harness(root, [okText("", [tc("1", "read_file", { path: "emoji.txt" })]), okText(FINDINGS)], {
+      // Byte 96 of the read_file JSON is the first emoji (4-byte
+      // sequence), so a 102-byte cap cuts mid-sequence under a raw byte cut.
+      maxResultBytes: 102,
+    });
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: true, findings: [] });
+    expect(out.stop).toBe("final");
+    const toolTurn = h.conv.turns!.find((t) => t.role === "tool") as { output: string };
+    expect(toolTurn.output.endsWith("[truncated]")).toBe(true);
+    expect(toolTurn.output).not.toContain("�");
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(toolTurn.output)).toBe(false);
+    const prefix = toolTurn.output.slice(0, toolTurn.output.length - "[truncated]".length);
+    expect(Buffer.byteLength(prefix, "utf8")).toBeLessThanOrEqual(102);
+  });
+
   it("logs the exact turn and done lines", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "hello\n");
