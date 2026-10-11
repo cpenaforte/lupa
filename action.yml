@@ -1,4 +1,4 @@
-name: "Lupa"
+name: "Lupa PR Reviewer"
 description: "Reviews pull requests with an LLM and posts findings as a review comment"
 inputs:
   github_token:
