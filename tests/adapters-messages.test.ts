@@ -267,6 +267,40 @@ describe("callMessagesTurn", () => {
     });
   });
 
+  it("argless tool_use parses (rawArgs {}) and echoes with input {}", async () => {
+    stubFetch(() =>
+      json(200, {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "read_file" }],
+        stop_reason: "tool_use",
+      }),
+    );
+    const r = await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.toolCalls).toEqual([{ id: "t1", name: "read_file", args: undefined, rawArgs: "{}" }]);
+    }
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "",
+          toolCalls: [{ id: "t1", name: "read_file", args: undefined, rawArgs: "{}" }],
+        },
+      ],
+      tools: [toolDef],
+    };
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    const body = lastBody();
+    expect(body.messages).toEqual([
+      { role: "user", content: "u" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read_file", input: {} }] },
+    ]);
+  });
+
   it("text plus tool_use in one message parses both", async () => {
     stubFetch(() =>
       json(200, {

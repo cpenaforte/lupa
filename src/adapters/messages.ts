@@ -69,7 +69,7 @@ function buildMessagesBody(
       const content: Array<Record<string, unknown>> = [];
       if (turn.text) content.push({ type: "text", text: turn.text });
       for (const tc of turn.toolCalls) {
-        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args });
+        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args ?? {} });
       }
       messages.push({ role: "assistant", content });
     } else if (turn.role === "tool") {
@@ -133,11 +133,12 @@ function parseMessagesReply(json: unknown, flags: MessagesFlags): MessagesReply 
       if (typeof part !== "object" || part === null) continue;
       const p = part as { type?: unknown; id?: unknown; name?: unknown; input?: unknown };
       if (p.type !== "tool_use") continue;
+      const input = p.input;
       toolCalls.push({
         id: typeof p.id === "string" ? p.id : "",
         name: typeof p.name === "string" ? p.name : "",
-        args: p.input,
-        rawArgs: JSON.stringify(p.input),
+        args: input,
+        rawArgs: JSON.stringify(input ?? {}),
       });
     }
   }

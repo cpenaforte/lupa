@@ -15,6 +15,7 @@ import { callWithProbe } from "../src/llm.js";
 import { ReadonlyTokenError } from "../src/github.js";
 import type { ReviewPayload } from "../src/review.js";
 import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
+import type { ToolContext } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
 
 const SHA_HEAD = "a".repeat(40);
@@ -86,6 +87,8 @@ interface Rec {
   agentTools?: unknown;
   agentMaxTurns?: number;
   agentMaxSeconds?: number;
+  agentConv?: unknown;
+  agentToolCtx?: ToolContext;
   toolOutput?: string;
   toolError?: boolean;
   repoSizeCalls: Array<[string, string]>;
@@ -104,6 +107,8 @@ interface GwOpts {
   repoSizeKb?: number;
   /** Second and later getPr calls report a moved head. */
   headMoves?: boolean;
+  /** getPr throws once the call count exceeds this number. */
+  failGetPrAfter?: number;
   info?: Partial<PrInfo>;
 }
 
@@ -120,6 +125,7 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
     findPrsByHead: async () => o.prsByHead ?? [7],
     getPr: async () => {
       rec.getPrCalls += 1;
+      if (o.failGetPrAfter !== undefined && rec.getPrCalls > o.failGetPrAfter) throw new Error("getPr boom");
       if (o.headMoves && rec.getPrCalls > 1) return { ...base, headSha: SHA_OTHER };
       return base;
     },
@@ -186,6 +192,8 @@ interface MockOpts {
   failLevel?: "none" | "warning" | "high";
   llm?: Finding[];
   headMoves?: boolean;
+  /** getPr throws once the call count exceeds this number. */
+  failGetPrAfter?: number;
   diff?: string;
   action?: string;
   sbomMissing?: boolean;
@@ -242,6 +250,7 @@ async function runWithMocks(o: MockOpts = {}) {
       write403: o.write403,
       issue403: o.issue403,
       headMoves: o.headMoves,
+      failGetPrAfter: o.failGetPrAfter,
       body: o.prBody,
       repoSizeKb: o.repoSizeKb,
       info: { isFork: o.forkReadonly === true, headRepo: o.forkReadonly ? "fork/r" : "o/r" },
@@ -277,10 +286,12 @@ async function runWithMocks(o: MockOpts = {}) {
               rec.llmVia = "probe";
               return { ok: true, findings: o.llm ?? [LLM_FINDING] };
             },
-      callByStyleAgent: async (_ep, conv, opts) => {
+      callByStyleAgent: async (_ep, conv, opts, toolCtx) => {
         rec.agentCalled += 1;
         rec.agentVia = "style";
         rec.agentTools = (conv as { tools?: unknown }).tools;
+        rec.agentConv = conv;
+        rec.agentToolCtx = toolCtx as ToolContext | undefined;
         rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
         rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
         return { ok: true, findings: o.llm ?? [LLM_FINDING] };
@@ -289,6 +300,8 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.agentCalled += 1;
         rec.agentVia = "probe";
         rec.agentTools = (conv as { tools?: unknown }).tools;
+        rec.agentConv = conv;
+        rec.agentToolCtx = toolCtx as ToolContext | undefined;
         rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
         rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
         if (o.agentToolProbe === true) {
@@ -318,6 +331,8 @@ async function runWithMocks(o: MockOpts = {}) {
     agentTools: rec.agentTools,
     agentMaxTurns: rec.agentMaxTurns,
     agentMaxSeconds: rec.agentMaxSeconds,
+    agentConv: rec.agentConv,
+    agentToolCtx: rec.agentToolCtx,
     toolOutput: rec.toolOutput,
     toolError: rec.toolError,
     repoSizeCalls: rec.repoSizeCalls,
@@ -690,6 +705,35 @@ describe("run() orchestration", () => {
     expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
     const lines = info.mock.calls.map((c) => String(c[0]));
     expect(lines).toContain("agent linked repositories: someone/else");
+  });
+
+  it("agent slow path makes no second getPr fetch (body is threaded through)", async () => {
+    const r = await runWithMocks({ llmAgent: true });
+    expect(r.posted).toBe(true);
+    expect(r.agentCalled).toBe(1);
+    // runFlowA fetch + publishReview head check; the slow path must not fetch again.
+    expect(r.getPrCalls).toBe(2);
+  });
+
+  it("agent slow path still posts when a late getPr call fails", async () => {
+    const r = await runWithMocks({ llmAgent: true, failGetPrAfter: 2 });
+    expect(r.posted).toBe(true);
+    expect(r.getPrCalls).toBe(2);
+  });
+
+  it("agent mode refuses unlinked aliases and tells the model the linked aliases", async () => {
+    const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/someone/else for context" });
+    expect(r.posted).toBe(true);
+    expect(r.agentToolCtx?.ensureLinked).toBeDefined();
+    const refused = await r.agentToolCtx!.ensureLinked!("evil/x");
+    expect(JSON.stringify(refused)).toContain("not linked");
+    const turns =
+      (r.agentConv as { turns?: Array<{ role?: string; text?: string }> } | undefined)?.turns ?? [];
+    expect(
+      turns.some(
+        (t) => t.role === "user" && (t.text ?? "").includes("Linked repositories mentioned in this pull request: someone/else"),
+      ),
+    ).toBe(true);
   });
 
   // Task 19 wiring: with plain `auto` the slow path probes (error-driven, spec §9.5) —

@@ -18,7 +18,7 @@ import {
 import { runL0, type Finding } from "./fastpath.js";
 import { runL2 } from "./l2.js";
 import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
-import { AGENT_LIMITS } from "./agent-types.js";
+import { AGENT_LIMITS, type Conversation } from "./agent-types.js";
 import {
   getRepoSize as fetchRepoSize,
   postIssueFallback,
@@ -477,6 +477,7 @@ async function slowPath(
   promptText: string,
   issueBody: string | undefined,
   skipped: string[],
+  prBody: string,
 ): Promise<Finding[] | undefined> {
   const i = env.inputs;
   if (i.llmApiKey === "") {
@@ -550,11 +551,13 @@ async function slowPath(
   // honored as-is through the resolved endpoint, with no probing.
   if (i.llmAgent) {
     const selfRepo = String((env.payload.repository as { full_name?: unknown } | undefined)?.full_name ?? "");
-    const linked = parseLinkedRepos((await deps.gh.getPr(pr)).body, selfRepo);
+    const linked = parseLinkedRepos(prBody, selfRepo);
     if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
     const toolCtx: ToolContext = {
       roots: { self: env.workDir, linked: new Map() },
       ensureLinked: async (alias) => {
+        if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
+          return { error: "repository not linked in this pull request: " + alias };
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
@@ -570,7 +573,20 @@ async function slowPath(
         return r;
       },
     };
-    const conv = { ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }), tools: [...TOOL_DEFS] };
+    const conv: Conversation = {
+      ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }),
+      tools: [...TOOL_DEFS],
+    };
+    if (linked.length > 0)
+      conv.turns = [
+        {
+          role: "user",
+          text:
+            "Linked repositories mentioned in this pull request: " +
+            linked.join(", ") +
+            ". You may inspect them with the repo parameter of the read-only tools.",
+        },
+      ];
     const agentOpts = { ...llmOpts, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
     const res: LlmResult =
       i.llmApiStyle === "auto" && i.llmPath === ""
@@ -783,7 +799,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
     }
   }
 
-  const llm = await slowPath(env, deps, pr, fast, prompt.text, issueBody, prompt.skipped);
+  const llm = await slowPath(env, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
   out.slowPathSkipped = llm === undefined;
   out.findingsFrom = llm === undefined ? "fastpath" : "llm";
   const all = [...fast, ...(llm ?? [])].map(sanitizeFinding);

@@ -88,6 +88,24 @@ describe("read_file", () => {
     }
   });
 
+  it("read_file refuses files over 1 MiB with a size error", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "huge.bin"), Buffer.alloc(1048576 + 1, 0x78));
+    const r = await executeTool("read_file", { path: "huge.bin" }, ctxFor(root));
+    expect(r.isError).toBe(true);
+    expect(JSON.parse(r.output).error).toBe(
+      "file too large: huge.bin (1048577 bytes > 1048576 byte limit; use grep or glob to narrow it down)",
+    );
+  });
+
+  it("read_file still reads a file of exactly 1 MiB (truncated output, no size error)", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "edge.bin"), Buffer.alloc(1048576, 0x78));
+    const r = await executeTool("read_file", { path: "edge.bin" }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    expect(JSON.parse(r.output).truncated).toBe(true);
+  });
+
   it("read_file rejects an invalid range and .git paths with isError", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "line1\nline2\nline3\n");

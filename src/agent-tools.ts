@@ -16,6 +16,8 @@ export interface ToolContext {
 
 const DRIVE_LETTER = /^[a-zA-Z]:/;
 const TRUNCATION_MARKER = "\n[truncated]";
+/** read_file refuses files larger than this (mirrors the grep 1 MiB skip). */
+export const READ_MAX_BYTES = 1024 * 1024;
 
 function splitSegments(p: string): string[] {
   return p.split(/[\\/]/);
@@ -122,6 +124,18 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promis
   const rel = typeof args.path === "string" ? args.path : "";
   const target = resolveWithinRoot(resolvedRoot.root, rel);
   if (!target) return errorResult(`path not accessible: ${rel}`);
+
+  let size: number;
+  try {
+    size = statSync(target).size;
+  } catch {
+    return errorResult(`cannot read file: ${rel}`);
+  }
+  if (size > READ_MAX_BYTES) {
+    return errorResult(
+      `file too large: ${rel} (${size} bytes > ${READ_MAX_BYTES} byte limit; use grep or glob to narrow it down)`,
+    );
+  }
 
   let raw: string;
   try {

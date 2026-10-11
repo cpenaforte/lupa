@@ -24854,6 +24854,7 @@ var AGENT_LIMITS = {
 // lib/src/agent-tools.js
 var DRIVE_LETTER = /^[a-zA-Z]:/;
 var TRUNCATION_MARKER = "\n[truncated]";
+var READ_MAX_BYTES = 1024 * 1024;
 function splitSegments(p) {
   return p.split(/[\\/]/);
 }
@@ -24943,6 +24944,15 @@ async function readFile(args, ctx) {
   const target = resolveWithinRoot(resolvedRoot.root, rel);
   if (!target)
     return errorResult(`path not accessible: ${rel}`);
+  let size;
+  try {
+    size = statSync2(target).size;
+  } catch {
+    return errorResult(`cannot read file: ${rel}`);
+  }
+  if (size > READ_MAX_BYTES) {
+    return errorResult(`file too large: ${rel} (${size} bytes > ${READ_MAX_BYTES} byte limit; use grep or glob to narrow it down)`);
+  }
   let raw;
   try {
     raw = readFileSync4(target, "utf8");
@@ -26304,7 +26314,7 @@ function buildMessagesBody(conv, o, flags) {
       if (turn.text)
         content.push({ type: "text", text: turn.text });
       for (const tc of turn.toolCalls) {
-        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args });
+        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args ?? {} });
       }
       messages.push({ role: "assistant", content });
     } else if (turn.role === "tool") {
@@ -26360,11 +26370,12 @@ function parseMessagesReply(json, flags) {
       const p = part;
       if (p.type !== "tool_use")
         continue;
+      const input = p.input;
       toolCalls.push({
         id: typeof p.id === "string" ? p.id : "",
         name: typeof p.name === "string" ? p.name : "",
-        args: p.input,
-        rawArgs: JSON.stringify(p.input)
+        args: input,
+        rawArgs: JSON.stringify(input ?? {})
       });
     }
   }
@@ -26734,7 +26745,7 @@ function capOutput(output, maxResultBytes) {
     if (code >= 56320 && code <= 57343)
       cut -= 1;
   }
-  return output.slice(0, cut) + "[truncated]";
+  return output.slice(0, cut) + "\n[truncated]";
 }
 async function runAgent(conv, toolCtx, budget, hooks) {
   const clock = hooks.clock ?? Date.now;
@@ -27994,7 +28005,7 @@ function note(env, out, text) {
 function summaryFor(findings) {
   return findings.length === 0 ? "pr-reviewer: no findings." : `pr-reviewer: ${findings.length} finding(s).`;
 }
-async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped) {
+async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prBody) {
   const i = env.inputs;
   if (i.llmApiKey === "") {
     info("no llm_api_key: slow path skipped");
@@ -28057,12 +28068,14 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped) {
   };
   if (i.llmAgent) {
     const selfRepo = String(env.payload.repository?.full_name ?? "");
-    const linked = parseLinkedRepos((await deps.gh.getPr(pr)).body, selfRepo);
+    const linked = parseLinkedRepos(prBody, selfRepo);
     if (linked.length > 0)
       info(`agent linked repositories: ${linked.join(", ")}`);
     const toolCtx = {
       roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
       ensureLinked: async (alias) => {
+        if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
+          return { error: "repository not linked in this pull request: " + alias };
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join6(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
@@ -28080,7 +28093,17 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped) {
         return r;
       }
     };
-    const conv = { ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }), tools: [...TOOL_DEFS] };
+    const conv = {
+      ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }),
+      tools: [...TOOL_DEFS]
+    };
+    if (linked.length > 0)
+      conv.turns = [
+        {
+          role: "user",
+          text: "Linked repositories mentioned in this pull request: " + linked.join(", ") + ". You may inspect them with the repo parameter of the read-only tools."
+        }
+      ];
     const agentOpts = { ...llmOpts, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
     const res2 = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbeAgent(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, conv, agentOpts, toolCtx) : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
     if (!res2.ok) {
@@ -28236,7 +28259,7 @@ async function runFlowA(env, deps, out) {
       warning(`linked issue #${issueNo} not fetched: ${e.message}`);
     }
   }
-  const llm = await slowPath(env, deps, pr, fast, prompt.text, issueBody, prompt.skipped);
+  const llm = await slowPath(env, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
   out.slowPathSkipped = llm === void 0;
   out.findingsFrom = llm === void 0 ? "fastpath" : "llm";
   const all = [...fast, ...llm ?? []].map(sanitizeFinding);

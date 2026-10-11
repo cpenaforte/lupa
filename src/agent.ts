@@ -81,7 +81,7 @@ function capOutput(output: string, maxResultBytes: number): string {
     const code = output.charCodeAt(cut);
     if (code >= 0xdc00 && code <= 0xdfff) cut -= 1;
   }
-  return output.slice(0, cut) + "[truncated]";
+  return output.slice(0, cut) + "\n[truncated]";
 }
 
 export async function runAgent(

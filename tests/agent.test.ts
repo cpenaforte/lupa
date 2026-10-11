@@ -277,9 +277,10 @@ describe("runAgent", () => {
     expect(out.stop).toBe("final");
     const toolTurn = h.conv.turns!.find((t) => t.role === "tool") as { output: string };
     expect(toolTurn.output.endsWith("[truncated]")).toBe(true);
+    expect(toolTurn.output.endsWith("\n[truncated]")).toBe(true);
     expect(toolTurn.output).not.toContain("�");
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(toolTurn.output)).toBe(false);
-    const prefix = toolTurn.output.slice(0, toolTurn.output.length - "[truncated]".length);
+    const prefix = toolTurn.output.slice(0, toolTurn.output.length - "\n[truncated]".length);
     expect(Buffer.byteLength(prefix, "utf8")).toBeLessThanOrEqual(102);
   });
 
