@@ -557,7 +557,7 @@ async function slowPath(
       roots: { self: env.workDir, linked: new Map() },
       ensureLinked: async (alias) => {
         if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
-          return { error: "repository not linked in this pull request: " + alias };
+          return { error: "repository not accessible: " + alias };
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),

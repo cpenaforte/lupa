@@ -682,10 +682,17 @@ describe("run() orchestration", () => {
   });
 
   it("linked alias clone failure still posts the review (tool error only)", async () => {
-    const r = await runWithMocks({ llmAgent: true, agentToolProbe: true });
+    const r = await runWithMocks({
+      llmAgent: true,
+      agentToolProbe: true,
+      prBody: "See https://github.com/someone/else for context",
+    });
     expect(r.posted).toBe(true);
     expect(r.toolError).toBe(true);
-    expect(r.toolOutput).toContain("repository not accessible");
+    // Gating passes (the body links someone/else), so the real clone is attempted and fails;
+    // the size pre-check inside ensureLinkedRepo proves the clone path was reached.
+    expect(r.toolOutput).toContain("repository not accessible: someone/else");
+    expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
   });
 
   it("oversized linked repo is short-circuited by the size guard (no clone) and the review still posts", async () => {
@@ -726,7 +733,7 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
     expect(r.agentToolCtx?.ensureLinked).toBeDefined();
     const refused = await r.agentToolCtx!.ensureLinked!("evil/x");
-    expect(JSON.stringify(refused)).toContain("not linked");
+    expect(refused).toEqual({ error: "repository not accessible: evil/x" });
     const turns =
       (r.agentConv as { turns?: Array<{ role?: string; text?: string }> } | undefined)?.turns ?? [];
     expect(
@@ -734,6 +741,18 @@ describe("run() orchestration", () => {
         (t) => t.role === "user" && (t.text ?? "").includes("Linked repositories mentioned in this pull request: someone/else"),
       ),
     ).toBe(true);
+  });
+
+  it("unlinked alias is refused at the gate while a mixed-case linked alias passes it", async () => {
+    const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/someone/else for context" });
+    expect(r.posted).toBe(true);
+    const gate = r.agentToolCtx!.ensureLinked!;
+    expect(await gate("evil/x")).toEqual({ error: "repository not accessible: evil/x" });
+    // Refusal happened at the gate: ensureLinkedRepo (and its getRepoSize pre-check) never ran.
+    expect(r.repoSizeCalls).not.toContainEqual(["evil", "x"]);
+    // Mixed-case linked alias passes the gate: the size pre-check sees the alias as passed through.
+    await gate("Someone/Else");
+    expect(r.repoSizeCalls).toContainEqual(["Someone", "Else"]);
   });
 
   // Task 19 wiring: with plain `auto` the slow path probes (error-driven, spec §9.5) —
