@@ -370,6 +370,26 @@ describe("callGoogleTurn", () => {
     });
   });
 
+  it("honors the rawArgs string contract for an argless functionCall", async () => {
+    // Gemini's FunctionCall.args is optional; rawArgs is typed string, so an
+    // argless call must serialize to "{}" (never undefined).
+    stubFetch(() =>
+      json(200, {
+        candidates: [
+          { content: { parts: [{ functionCall: { name: "read_file" } }] }, finishReason: "STOP" },
+        ],
+      }),
+    );
+    const r = await callGoogleTurn(fakeGoogleEp(), MODEL, conv(), opts(), turnFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.toolCalls).toHaveLength(1);
+      expect(r.toolCalls[0]!.name).toBe("read_file");
+      expect(r.toolCalls[0]!.rawArgs).toBe("{}");
+      expect(r.toolCalls[0]!.args).toBeUndefined();
+    }
+  });
+
   it("text and functionCall parts together parse both", async () => {
     stubFetch(() =>
       json(200, {

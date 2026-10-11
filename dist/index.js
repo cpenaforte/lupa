@@ -25487,7 +25487,9 @@ function parseGoogleReply(json, flags) {
           id: `fc_${toolCalls.length}`,
           name: typeof call.name === "string" ? call.name : "",
           args,
-          rawArgs: JSON.stringify(args)
+          // Gemini's FunctionCall.args is optional; rawArgs is typed string, so
+          // an argless call serializes to "{}" rather than undefined.
+          rawArgs: JSON.stringify(args ?? {})
         });
       }
     }
