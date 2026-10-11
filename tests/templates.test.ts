@@ -2,6 +2,17 @@ import * as fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("workflow templates", () => {
+  it("both templates pin the v0.5.0 release SHA", () => {
+    for (const file of [
+      "docs/workflow-template.yml",
+      "docs/workflow-template-privileged.yml",
+    ]) {
+      expect(fs.readFileSync(file, "utf8")).toContain(
+        "uses: cpenaforte/lupa@658ab55ae32d6e9e53193a5d6be75c3794de71d8",
+      );
+    }
+  });
+
   it("templates pin SHA, least privilege, guards, concurrency", () => {
     const t = fs.readFileSync("docs/workflow-template.yml", "utf8");
     expect(t).toContain("fetch-depth: 0");
