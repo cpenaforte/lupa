@@ -632,7 +632,7 @@ describe("failed scanner invocations (F08)", () => {
     });
   });
 
-  it("exit-1 with clean successful SARIF stays quiet (findings codes keep meaning)", () => {
+  it("exit-1 with no invocation info stays quiet via the findings-exit-code table (semgrep findings exit is 1)", () => {
     const stdout = sarifWith({ results: [mkResult()] });
     const findings = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout, timedOut: false });
     expect(findings).toHaveLength(1);
@@ -654,5 +654,27 @@ describe("failed scanner invocations (F08)", () => {
     const findings = fromStdout("semgrep", "semgrep", { missing: false, code: 2, stdout, timedOut: false });
     expect(findings).toHaveLength(2);
     expect(findings[findings.length - 1]).toMatchObject({ rule: "scanner-failed" });
+  });
+
+  it("osv-scanner exit-1 with parseable SARIF stays quiet (label prefix matches the findings-exit-code table)", () => {
+    const stdout = sarifWith({ results: [mkResult()] });
+    const findings = fromStdout("docker", "osv-scanner (package-lock.json)", {
+      missing: false,
+      code: 1,
+      stdout,
+      timedOut: false,
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings.some((f) => f.rule === "scanner-failed")).toBe(false);
+  });
+
+  it("explicit invocation success wins over a contradictory exit code", () => {
+    const stdout = sarifWith({
+      results: [mkResult()],
+      invocations: [{ executionSuccessful: true }],
+    });
+    const findings = fromStdout("semgrep", "semgrep", { missing: false, code: 2, stdout, timedOut: false });
+    expect(findings).toHaveLength(1);
+    expect(findings.some((f) => f.rule === "scanner-failed")).toBe(false);
   });
 });
