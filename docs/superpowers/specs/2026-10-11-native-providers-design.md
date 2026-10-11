@@ -68,9 +68,12 @@ checkModelListed(baseUrl, model, apiKey, protocol: "openai" | "anthropic" | "goo
 
 - `listed`: 2xx, expected array present, model found (case-sensitive `id` equality;
   Google compares `name` after stripping the `models/` prefix).
-- `absent`: 2xx, expected array present, model not found after bounded pagination (≤ 5 pages).
-- `unknown`: 404, any other non-2xx, invalid JSON, missing/!array shape, timeout, or
-  network error. **Never throws.**
+- `absent`: 2xx, expected array present **and non-empty**, model not found after bounded
+  pagination (≤ 5 pages). An empty catalog (`data: []` / `models: []`) is not a
+  definitive miss — it is `unknown`, so a proxy answering 200 with nothing cannot disable
+  a working adapter.
+- `unknown`: 404, any other non-2xx, invalid JSON, missing/!array shape, empty array,
+  timeout, or network error. **Never throws.**
 
 Caller (`src/main.ts` slow-path preflight, `:520-535`):
 
@@ -91,11 +94,13 @@ honors the existing `VALIDATE_TIMEOUT_MS` per request.
 
 - `src/providers.ts`: add `catalogProtocolFor`; replace `validateModelExists` with
   `checkModelListed`; retire `authHeaderFor`.
-- `src/main.ts`: the `Analysis` interface member (`:90`), the `realAnalysis` wiring
-  (`:948`), and the preflight call (`:526`).
+- `src/main.ts`: the import (`:42`), the `Analysis` interface member (`:90`), the
+  `realAnalysis` wiring (`:948`), and the preflight call (`:526`).
 - Tests: `tests/providers.test.ts` (retire the `authHeaderFor`/`validateModelExists`
-  pins; add the protocol/header/parse matrix), `tests/main.test.ts` (the four `Analysis`
-  fakes at `:281`, `:436`, `:551`, `:1154`).
+  pins; add the protocol/header/parse matrix); `tests/main.test.ts` — the four `Analysis`
+  fakes (`:281`, `:436`, `:551`, `:1154`), the `MockOpts.validateModel` fixture (`:195`),
+  and the throwing-preflight test (`:513`), which must be rewritten for the tri-state
+  contract (`absent` → skip, `unknown` → proceed).
 
 ### Tests
 
@@ -176,10 +181,14 @@ cancellation.
 Scope: `docs/workflow-template.yml` only. The privileged template triggers on
 `workflow_run` and has no comment path.
 
-**Accepted divergence:** the action uses `reviewBody.trim() !== ""`; GitHub expressions
-have no `trim`, so the workflow's review-body check is a plain non-empty test. A
-whitespace-only submitted review body would still join the group — accepted as a
-negligible edge (the primary F06 vector is comments).
+**Accepted divergences:** the action uses `reviewBody.trim() !== ""` and a
+case-sensitive `.includes("/review")`, while GitHub expressions have neither `trim` nor a
+case-sensitive substring operator. The workflow's review-body check is therefore a plain
+non-empty test (a whitespace-only review body would still join the group), and
+`contains(..., '/review')` is case-insensitive (a `/REVIEW` variant passes the gate but
+the action rejects it). Both residuals are negligible versus the primary F06 vector — an
+ordinary comment with no `/review` at all — and the workflow gate is deliberately
+broader.
 
 ### Tests
 
