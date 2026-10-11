@@ -93,8 +93,8 @@ describe("ci workflow", () => {
     const job = jobBlock(c, "no-secret-smoke");
     expect(job).toContain('INPUT_POST_COMMENT: "false"');
     expect(job).toContain("GITHUB_STEP_SUMMARY");
-    expect(job).toContain("GITHUB_STEP_SUMMARY: ${{ runner.temp }}/action-summary.md");
-    expect(job).toContain('test -s "$RUNNER_TEMP/action-summary.md"');
+    expect(job).toContain('test -s "$GITHUB_STEP_SUMMARY"');
+    expect(job).not.toContain("action-summary");
     expect(job).toContain("simulates fork");
     expect(job).toContain("export GITHUB_EVENT_NAME=push");
     expect(job).not.toMatch(/secrets\./);
