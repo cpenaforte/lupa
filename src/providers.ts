@@ -232,7 +232,16 @@ export async function checkModelListed(
     let body: unknown;
     try {
       const res = await fetch(url, { headers, signal: controller.signal });
-      if (!res.ok) return { status: "unknown", detail: `catalog HTTP ${res.status}` };
+      if (!res.ok) {
+        // Start body cleanup, then abort the request. Do not wait on a stalled stream.
+        try {
+          void res.body?.cancel().catch(() => undefined);
+        } catch {
+          // An unavailable body must not turn an advisory check into a failure.
+        }
+        controller.abort();
+        return { status: "unknown", detail: `catalog HTTP ${res.status}` };
+      }
       try {
         body = await res.json();
       } catch {
@@ -255,12 +264,16 @@ export async function checkModelListed(
     });
     if (found) return { status: "listed" };
 
-    if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
-      url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
-    } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
-      url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
-    } else {
-      break;
+    try {
+      if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
+        url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
+      } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
+        url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
+      } else {
+        break;
+      }
+    } catch {
+      return { status: "unknown", detail: "catalog returned an invalid page cursor" };
     }
   }
   return sawModels ? { status: "absent" } : { status: "unknown", detail: "catalog was empty" };

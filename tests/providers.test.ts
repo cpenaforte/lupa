@@ -354,12 +354,54 @@ describe("native model discovery", () => {
     expect(await checkModelListed("https://o/v1", "wanted", "K", "openai")).toEqual({ status: "absent" });
   });
 
+  it("checkModelListed returns absent for a non-empty Google catalog missing the model", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ models: [{ name: "models/other" }] }), { status: 200 })));
+    expect(await checkModelListed("https://g/v1beta", "wanted", "K", "google")).toEqual({ status: "absent" });
+  });
+
+  it("checkModelListed treats an invalid Google page token as unknown without throwing", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ models: [{ name: "models/other" }], nextPageToken: "\uD800" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(checkModelListed("https://g/v1beta", "wanted", "K", "google")).resolves.toMatchObject({ status: "unknown" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("checkModelListed treats an invalid Anthropic cursor as unknown without throwing", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [{ id: "other" }], has_more: true, last_id: "\uD800" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(checkModelListed("https://a/v1", "wanted", "K", "anthropic")).resolves.toMatchObject({ status: "unknown" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("checkModelListed cancels an HTTP-error response without waiting on a stalled body", async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => undefined));
+    const stream = new ReadableStream<Uint8Array>({ cancel });
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Response(stream, { status: 401 });
+    }));
+    await expect(checkModelListed("https://o/v1", "m", "K", "openai")).resolves.toEqual({ status: "unknown", detail: "catalog HTTP 401" });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("checkModelListed treats network rejection as unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    await expect(checkModelListed("https://o/v1", "m", "K", "openai")).resolves.toMatchObject({ status: "unknown" });
+  });
+
   it("checkModelListed returns unknown for HTTP errors, invalid JSON, bad shape, empty catalog, and timeout", async () => {
     const cases: Array<() => Response | Promise<Response>> = [
       () => new Response("nope", { status: 404 }),
+      () => new Response("unauthorized", { status: 401 }),
       () => new Response("boom", { status: 500 }),
       () => new Response("{not json", { status: 200 }),
       () => new Response(JSON.stringify({ nope: [] }), { status: 200 }),
+      () => new Response(JSON.stringify({ data: { id: "m" } }), { status: 200 }),
       () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
     ];
     for (const c of cases) {

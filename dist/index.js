@@ -26067,8 +26067,14 @@ async function checkModelListed(baseUrl2, model, apiKey, protocol) {
     let body;
     try {
       const res = await fetch(url, { headers, signal: controller.signal });
-      if (!res.ok)
+      if (!res.ok) {
+        try {
+          void res.body?.cancel().catch(() => void 0);
+        } catch {
+        }
+        controller.abort();
         return { status: "unknown", detail: `catalog HTTP ${res.status}` };
+      }
       try {
         body = await res.json();
       } catch {
@@ -26092,12 +26098,16 @@ async function checkModelListed(baseUrl2, model, apiKey, protocol) {
     });
     if (found)
       return { status: "listed" };
-    if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
-      url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
-    } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
-      url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
-    } else {
-      break;
+    try {
+      if (protocol === "google" && typeof catalog?.nextPageToken === "string" && catalog.nextPageToken !== "") {
+        url = `${root}?pageToken=${encodeURIComponent(catalog.nextPageToken)}&pageSize=1000`;
+      } else if (protocol === "anthropic" && catalog?.has_more === true && typeof catalog.last_id === "string" && catalog.last_id !== "") {
+        url = `${root}?after_id=${encodeURIComponent(catalog.last_id)}&limit=1000`;
+      } else {
+        break;
+      }
+    } catch {
+      return { status: "unknown", detail: "catalog returned an invalid page cursor" };
     }
   }
   return sawModels ? { status: "absent" } : { status: "unknown", detail: "catalog was empty" };
