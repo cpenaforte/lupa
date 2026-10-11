@@ -150,7 +150,6 @@ jobs:
 
       - name: Run the bundle as a fork PR would (summary only)
         env:
-          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/action-summary.md
           INPUT_POST_COMMENT: "false"
           INPUT_FAIL_LEVEL: none
           INPUT_LLM_API_KEY: ""
@@ -158,15 +157,13 @@ jobs:
         run: |
           set -euo pipefail
           # NOTE: same as build step 8 — event context via shell exports (see above).
+          # The summary is asserted in this same step through $GITHUB_STEP_SUMMARY:
+          # cross-step file passing via GITHUB_* overrides proved unreliable, while
+          # same-variable write+assert is self-consistent under every behavior.
           export GITHUB_EVENT_NAME=push
           export GITHUB_EVENT_PATH="${{ github.workspace }}/tests/fixtures/push-event.json"
           node ./dist/index.js
-
-      - name: Assert the summary was written
-        run: |
-          set -euo pipefail
-          test -s "$RUNNER_TEMP/action-summary.md"
-          cat "$RUNNER_TEMP/action-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          test -s "$GITHUB_STEP_SUMMARY"
 
   sarif:
     name: SARIF upload plumbing (same-repo PRs only)
