@@ -25598,6 +25598,91 @@ function joinOutputText(json) {
   const texts = outputParts(json).filter((p) => (p.type === "output_text" || p.type === "text") && typeof p.text === "string").map((p) => p.text);
   return texts.length > 0 ? texts.join("") : void 0;
 }
+function buildResponsesBody(conv, o, flags) {
+  const input = [
+    { role: "system", content: conv.system },
+    { role: "user", content: conv.user }
+  ];
+  for (const turn of conv.turns ?? []) {
+    if (turn.role === "assistant") {
+      if (turn.rawItems !== void 0) {
+        input.push(...turn.rawItems);
+      } else {
+        if (turn.text !== "")
+          input.push({ role: "assistant", content: turn.text });
+        for (const tc of turn.toolCalls) {
+          input.push({ type: "function_call", call_id: tc.id, name: tc.name, arguments: tc.rawArgs });
+        }
+      }
+    } else if (turn.role === "tool") {
+      input.push({ type: "function_call_output", call_id: turn.id, output: turn.output });
+    } else {
+      input.push({ role: "user", content: turn.text });
+    }
+  }
+  const body = {
+    model: o.model,
+    input,
+    // The Responses API always budgets output via max_output_tokens,
+    // including reasoning models (no max_completion_tokens here).
+    max_output_tokens: o.maxTokens
+  };
+  if (flags.allowTools && conv.tools !== void 0) {
+    body.tools = conv.tools.map((t) => ({
+      type: "function",
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters
+    }));
+  }
+  if (flags.allowFormat) {
+    body.text = {
+      format: {
+        type: "json_schema",
+        name: PR_REVIEW_SCHEMA.name,
+        schema: PR_REVIEW_SCHEMA.schema,
+        strict: PR_REVIEW_SCHEMA.strict
+      }
+    };
+  }
+  if (o.temperature !== void 0)
+    body.temperature = o.temperature;
+  if (o.topP !== void 0)
+    body.top_p = o.topP;
+  return body;
+}
+function parseResponsesReply(json, flags) {
+  if (hasRefusal(json)) {
+    return { ok: false, result: { ok: false, reason: "content-filter", detail: "model refused the request" } };
+  }
+  if (json?.status === "incomplete") {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response truncated (status=incomplete)" } };
+  }
+  const output = json?.output;
+  const rawItems = Array.isArray(output) ? output : [];
+  const toolCalls = [];
+  if (flags.allowTools && Array.isArray(output)) {
+    for (const raw of output) {
+      const item = raw ?? {};
+      if (item.type !== "function_call")
+        continue;
+      const rawArgs = typeof item.arguments === "string" ? item.arguments : "";
+      let args;
+      try {
+        args = JSON.parse(rawArgs);
+      } catch {
+        args = void 0;
+      }
+      toolCalls.push({
+        id: typeof item.call_id === "string" ? item.call_id : "",
+        name: typeof item.name === "string" ? item.name : "",
+        args,
+        rawArgs
+      });
+    }
+  }
+  return { ok: true, text: joinOutputText(json), toolCalls, rawItems };
+}
 async function callResponses(ep, messages, o) {
   const key = o.apiKey;
   if (key === "")
@@ -25607,39 +25692,15 @@ async function callResponses(ep, messages, o) {
   } catch (e) {
     return { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) };
   }
-  const buildBody2 = (withFormat) => {
-    const body = {
-      model: o.model,
-      input: [
-        { role: "system", content: messages.system },
-        { role: "user", content: messages.user }
-      ],
-      // The Responses API always budgets output via max_output_tokens,
-      // including reasoning models (no max_completion_tokens here).
-      max_output_tokens: o.maxTokens
-    };
-    if (withFormat) {
-      body.text = {
-        format: {
-          type: "json_schema",
-          name: PR_REVIEW_SCHEMA.name,
-          schema: PR_REVIEW_SCHEMA.schema,
-          strict: PR_REVIEW_SCHEMA.strict
-        }
-      };
-    }
-    if (o.temperature !== void 0)
-      body.temperature = o.temperature;
-    if (o.topP !== void 0)
-      body.top_p = o.topP;
-    return body;
-  };
-  let payload = JSON.stringify(buildBody2(true));
+  const conv = { system: messages.system, user: messages.user };
+  const onFlags = { allowTools: false, allowFormat: true };
+  const offFlags = { allowTools: false, allowFormat: false };
+  let payload = JSON.stringify(buildResponsesBody(conv, o, onFlags));
   let a = await attempt(ep, payload, o);
   if (a.kind === "fail")
     return a.result;
   if (!a.ok && a.status === 400) {
-    payload = JSON.stringify(buildBody2(false));
+    payload = JSON.stringify(buildResponsesBody(conv, o, offFlags));
     a = await attempt(ep, payload, o);
     if (a.kind === "fail")
       return a.result;
@@ -25660,13 +25721,10 @@ async function callResponses(ep, messages, o) {
   } catch {
     return { ok: false, reason: "invalid-json", detail: "response body is not JSON" };
   }
-  if (hasRefusal(json)) {
-    return { ok: false, reason: "content-filter", detail: "model refused the request" };
-  }
-  if (json?.status === "incomplete") {
-    return { ok: false, reason: "invalid-json", detail: "response truncated (status=incomplete)" };
-  }
-  const text = joinOutputText(json);
+  const reply = parseResponsesReply(json, onFlags);
+  if (!reply.ok)
+    return reply.result;
+  const text = reply.text;
   if (text === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response has no content" };
   }

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { callResponses } from "../src/adapters/responses.js";
+import { callResponses, callResponsesTurn } from "../src/adapters/responses.js";
 import { PR_REVIEW_SCHEMA } from "../src/prompt.js";
 import type { ResolvedEndpoint } from "../src/providers.js";
+import type { Conversation } from "../src/agent-types.js";
 
 // ---------- helpers ----------
 
@@ -184,5 +185,115 @@ describe("callResponses", () => {
     expect(body2.max_output_tokens).toBe(50);
     expect(body2.max_completion_tokens).toBeUndefined();
     expect(body2.max_tokens).toBeUndefined();
+  });
+});
+
+describe("callResponsesTurn", () => {
+  const toolDef = {
+    name: "read_file",
+    description: "Read a file",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  };
+
+  const conv = (): Conversation => ({ system: "s", user: "u", tools: [toolDef] });
+  const turnOpts = () => ({ model: "gpt-6-luna", apiKey: "k", maxTokens: 50, timeoutSeconds: 5 });
+  const toolFlags = { allowTools: true, allowFormat: false };
+
+  it("turn mode sends flat tools and no text.format", async () => {
+    await callResponsesTurn(fakeResponsesEp(), conv(), turnOpts(), toolFlags);
+    const body: any = lastBody();
+    expect(body.tools[0]).toEqual({
+      type: "function",
+      name: "read_file",
+      description: "Read a file",
+      parameters: toolDef.parameters,
+    });
+    expect("text" in body).toBe(false);
+  });
+
+  it("translates function_call echo and function_call_output", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "",
+          toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+        },
+        { role: "tool", id: "c1", name: "read_file", output: "ok" },
+      ],
+      tools: [toolDef],
+    };
+    await callResponsesTurn(fakeResponsesEp(), c, turnOpts(), toolFlags);
+    const body: any = lastBody();
+    expect(body.input[2]).toEqual({
+      type: "function_call",
+      call_id: "c1",
+      name: "read_file",
+      arguments: '{"path":"a.ts"}',
+    });
+    expect(body.input[3]).toEqual({ type: "function_call_output", call_id: "c1", output: "ok" });
+  });
+
+  it("parses output function_call items with call_id", async () => {
+    stubFetch(() =>
+      json(200, {
+        status: "completed",
+        output: [{ type: "function_call", call_id: "c1", name: "read_file", arguments: '{"path":"a.ts"}' }],
+      }),
+    );
+    const r = await callResponsesTurn(fakeResponsesEp(), conv(), turnOpts(), toolFlags);
+    expect(r).toEqual({
+      ok: true,
+      text: "",
+      toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+      rawItems: [{ type: "function_call", call_id: "c1", name: "read_file", arguments: '{"path":"a.ts"}' }],
+    });
+  });
+
+  it("text plus function_call in one output parses both", async () => {
+    stubFetch(() =>
+      json(200, {
+        status: "completed",
+        output: [
+          { type: "message", content: [{ type: "output_text", text: "thinking" }] },
+          { type: "function_call", call_id: "c1", name: "read_file", arguments: '{"path":"a.ts"}' },
+        ],
+      }),
+    );
+    const r = await callResponsesTurn(fakeResponsesEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.text).toBe("thinking");
+      expect(r.toolCalls).toHaveLength(1);
+      expect(r.toolCalls[0]!.id).toBe("c1");
+    }
+  });
+
+  it("echoes raw output items verbatim so reasoning items survive the next turn", async () => {
+    const reasoning = { type: "reasoning", id: "rs_1", status: "completed", summary: [] };
+    const fc = { type: "function_call", call_id: "c1", name: "read_file", arguments: '{"path":"a.ts"}' };
+    stubFetch(() => json(200, { status: "completed", output: [reasoning, fc] }));
+
+    const first = await callResponsesTurn(fakeResponsesEp(), conv(), turnOpts(), toolFlags);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // Docs pattern: the next turn echoes response.output verbatim (id/status included).
+    const next: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        { role: "assistant", text: first.text, toolCalls: first.toolCalls, rawItems: first.rawItems },
+        { role: "tool", id: "c1", name: "read_file", output: "ok" },
+      ],
+      tools: [toolDef],
+    };
+    await callResponsesTurn(fakeResponsesEp(), next, turnOpts(), toolFlags);
+    const body: any = lastBody();
+    expect(body.input[2]).toEqual(reasoning);
+    expect(body.input[3]).toEqual(fc);
+    expect(body.input[4]).toEqual({ type: "function_call_output", call_id: "c1", output: "ok" });
   });
 });
