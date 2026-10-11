@@ -10,9 +10,10 @@ and stop an ordinary trusted comment from cancelling an active review.
 ## Decisions (approved)
 
 - Scope: F04 + F05 + F06 in one sub-project (all remaining P1 findings).
-- F04 discovery-failure policy: **advisory fail-open**. Only a successfully parsed
-  catalog that lacks the model skips the LLM path; "can't tell" failures (404, other
-  non-2xx, bad shape, timeout, network) warn and proceed to inference.
+- F04 discovery-failure policy: **advisory fail-open**. Only a successfully parsed,
+  non-empty catalog that lacks the model skips the LLM path; "can't tell" failures
+  (404, other non-2xx, bad shape, empty catalog, timeout, network) warn and proceed to
+  inference.
 - No new action inputs. The discovery policy is not configurable; advisory is the default.
 - Ship as `v0.5.0` (new behavior bundle): branch → PR → owner merge → tag `v0.5.0` →
   canary on tag → templates re-pin PR → move `v1`.
@@ -108,8 +109,8 @@ Fixtures only (no live provider calls): Google-native `models[].name` match and 
 Anthropic `data[].id` with `x-api-key`/`anthropic-version` and a multi-page `has_more`
 walk that **asserts the exact `?after_id=` cursor** (not a server-agnostic fake that
 echoes whatever the client sends); OpenAI `data[].id` unchanged; every `unknown` path
-(404, 401, 500, invalid JSON, missing array, timeout) warns-and-proceeds; `absent`
-skips; the header matrix (Bearer vs `x-goog-api-key` vs `x-api-key`+`anthropic-version`)
+(404, 401, 500, invalid JSON, missing array, empty array, timeout) warns-and-proceeds;
+`absent` skips; the header matrix (Bearer vs `x-goog-api-key` vs `x-api-key`+`anthropic-version`)
 across `google`/`custom`/`anthropic`/`opencode-go` providers.
 
 ## 2. F05 — native assistant history replay
@@ -144,12 +145,20 @@ Extend the existing `rawItems` seam to the other native adapters:
   primary defect.
 - Single-shot `callGoogle` (no turns) is unaffected.
 
+### Change sites
+
+- `src/adapters/google.ts` (`parseGoogleReply`, `buildGoogleBody`, `callGoogleTurn`);
+  `src/adapters/messages.ts` (parse/build).
+- Tests: `tests/adapters-google.test.ts:307` (the `role:"function"` functionResponse
+  assertion — must move to the chosen role) and `:363` (the exact `toEqual` reply shape —
+  must include `rawItems`); `tests/adapters-messages.test.ts` is unaffected.
+
 ### Tests
 
 Multi-turn replay fixtures asserting `thoughtSignature` and native call ids survive a
 round trip (assistant turn → next request body) for Google and Messages; a Google
-function-response role fixture pinning the chosen shape; existing single-shot tests
-unchanged.
+function-response role fixture pinning the chosen shape; the two existing Google turn
+tests above updated (not deleted); existing single-shot tests unchanged.
 
 ## 3. F06 — ordinary comments must not cancel an active review
 
