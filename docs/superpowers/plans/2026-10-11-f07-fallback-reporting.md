@@ -66,7 +66,7 @@ The heading uses `lupa: no findings.` for an empty list. Each input finding appe
 
 If `maxBytes` is absent, return the full report. If present, it must be a non-negative safe integer and the complete UTF-8 output, including heading and marker, must not exceed it. Return the full report when it fits; otherwise retain the longest input-order prefix of complete records that fits with the exact omitted-count marker. If even the heading plus marker cannot fit (or the empty-list heading cannot fit), throw `RangeError`. Never truncate a record or a field.
 
-- [ ] **Step 1: Add failing renderer tests in `tests/review.test.ts`.** Import `buildFallbackReport` and add tests under `describe("buildFallbackReport", ...)`:
+- [x] **Step 1: Add failing renderer tests in `tests/review.test.ts`.** Import `buildFallbackReport` and add tests under `describe("buildFallbackReport", ...)`:
   - `renders every finding once in input order with all report fields`: pass one inline-eligible finding and one general finding; assert the exact header, severity, `src/a.ts:2` location, rule, full message, suggestion, and ordering; assert each message appears once.
   - `renders the no-findings heading`: assert an empty list returns exactly `lupa: no findings.`.
   - `renders file-only and repository locations and explicit missing remediation`: pass one file finding without a line and one `file: ""` finding with no suggestion; assert `b.ts`, `(repository)`, and `No remediation supplied`.
@@ -147,13 +147,13 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
     expect(() => buildFallbackReport([first], { maxBytes })).toThrow(RangeError);
   }
   ~~~
-- [ ] **Step 2: Run the named tests and confirm they fail for the missing renderer or unmet assertions.**
+- [x] **Step 2: Run the named tests and confirm they fail for the missing renderer or unmet assertions.**
 
   Run: `npx vitest run tests/review.test.ts -t "buildFallbackReport"`
 
   Expected: FAIL because the renderer is not implemented; do not proceed until this is a test failure rather than a setup error.
-- [ ] **Step 3: Implement `buildFallbackReport(findings, options)` in `src/review.ts`.** Reuse `locate` and `fenceFor`; keep input findings immutable. Use `Buffer.byteLength(text, "utf8")` for the cap. Precompute rendered records and their UTF-8 byte lengths, then select the largest fitting prefix while reserving space for the marker with the correct omitted count. Throw `RangeError` for invalid limits or a budget below the required minimum.
-- [ ] **Step 4: Run the renderer tests and the owning test file.**
+- [x] **Step 3: Implement `buildFallbackReport(findings, options)` in `src/review.ts`.** Reuse `locate` and `fenceFor`; keep input findings immutable. Use `Buffer.byteLength(text, "utf8")` for the cap. Precompute rendered records and their UTF-8 byte lengths, then select the largest fitting prefix while reserving space for the marker with the correct omitted count. Throw `RangeError` for invalid limits or a budget below the required minimum.
+- [x] **Step 4: Run the renderer tests and the owning test file.**
 
   Run: `npx vitest run tests/review.test.ts -t "buildFallbackReport"`
 
@@ -162,7 +162,7 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
   Run: `npx vitest run tests/review.test.ts`
 
   Expected: PASS for the entire review test file, including existing `buildBody` behavior.
-- [ ] **Step 5: Build and syntax-check the generated bundle.**
+- [x] **Step 5: Build and syntax-check the generated bundle.**
 
   Run: `npm run build`
 
@@ -171,7 +171,7 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
   Run: `node --check dist/index.js`
 
   Expected: exit 0 with no syntax diagnostics.
-- [ ] **Step 6: Commit the renderer task.**
+- [x] **Step 6: Commit the renderer task.**
 
   ```bash
   git add src/review.ts tests/review.test.ts dist/index.js
@@ -191,7 +191,7 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
 - Consumes: Task 1's `buildFallbackReport(findings: readonly Finding[], options?: { maxBytes?: number }): string`.
 - Produces: `ReviewPayload.body` continues to be constructed with `buildBody(general, summaryFor(findings))`; the complete report is written to `summaryPath` when present and passed to `createIssueComment` only on the existing enabled/refused-review fallback path.
 
-- [ ] **Step 1: Add failing `publishReview` channel tests in `tests/main.test.ts`.** Use the existing `runWithMocks`, `LLM_FINDING`, and `DIFF` fixtures; `LLM_FINDING` at `src/a.ts:2` is inline-eligible.
+- [x] **Step 1: Add failing `publishReview` channel tests in `tests/main.test.ts`.** Use the existing `runWithMocks`, `LLM_FINDING`, and `DIFF` fixtures; `LLM_FINDING` at `src/a.ts:2` is inline-eligible.
   - `Step Summary includes an inline-only finding and its remediation`: use a non-empty suggestion; assert severity, location, rule, message, the `Suggested remediation (advice only)` label, and exact suggestion text.
   - `dry-run Step Summary includes an inline-only finding and its remediation`: use `postComment: false` with a distinct non-empty suggestion; assert no review was posted and the Step Summary contains all finding details and the suggestion.
   - `issue fallback publishes the complete report for an inline-only finding`: use `write403: true`, `issueFallback: true`, and a non-empty suggestion; assert severity, location, rule, message, and suggestion in the comment; after trimming the summary file's final newline, assert it equals the issue comment and `posted` is true.
@@ -253,13 +253,13 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
     expect(output).toContain("replace [REDACTED] [REDACTED]");
   }
   ~~~
-- [ ] **Step 2: Run the new `publishReview` tests and confirm the missing behavior fails.**
+- [x] **Step 2: Run the new `publishReview` tests and confirm the missing behavior fails.**
 
   Run: `npx vitest run tests/main.test.ts -t "inline-only finding|compact review body|Step Summary redacts|issue fallback redacts"`
 
   Expected: FAIL because the Step Summary and fallback still use the compact body; do not proceed until this is a test failure rather than a setup error.
-- [ ] **Step 3: Wire the renderer into `publishReview` in `src/main.ts`.** After `redactFindings` and `mapToComments`, build `const report = buildFallbackReport(findings)`. Keep `body = buildBody(general, summaryFor(findings))` for `ReviewPayload.body`; append `report + "\n"` to `summaryPath` when available; pass `report` to `createIssueComment`. Leave dry-run, permission, stale-head, redaction, fallback, error, and exit branches otherwise unchanged.
-- [ ] **Step 4: Run the focused publication tests and the entire main test file.**
+- [x] **Step 3: Wire the renderer into `publishReview` in `src/main.ts`.** After `redactFindings` and `mapToComments`, build `const report = buildFallbackReport(findings)`. Keep `body = buildBody(general, summaryFor(findings))` for `ReviewPayload.body`; append `report + "\n"` to `summaryPath` when available; pass `report` to `createIssueComment`. Leave dry-run, permission, stale-head, redaction, fallback, error, and exit branches otherwise unchanged.
+- [x] **Step 4: Run the focused publication tests and the entire main test file.**
 
   Run: `npx vitest run tests/main.test.ts -t "inline-only finding|compact review body|Step Summary redacts|issue fallback redacts"`
 
@@ -268,7 +268,7 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
   Run: `npx vitest run tests/main.test.ts`
 
   Expected: PASS for all main-flow tests, including existing fallback, stale-head, and blocking behavior.
-- [ ] **Step 5: Run the full F07 verification gates.**
+- [x] **Step 5: Run the full F07 verification gates.**
 
   Run: `npx vitest run`
 
@@ -285,7 +285,7 @@ If `maxBytes` is absent, return the full report. If present, it must be a non-ne
   Run: `git diff --check`
 
   Expected: no whitespace errors.
-- [ ] **Step 6: Commit the publication wiring.**
+- [x] **Step 6: Commit the publication wiring.**
 
   ```bash
   git add src/main.ts tests/main.test.ts dist/index.js
