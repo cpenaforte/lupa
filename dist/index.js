@@ -26483,6 +26483,10 @@ function buildMessagesBody(conv, o, flags) {
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
       flushResults();
+      if (turn.rawItems !== void 0) {
+        messages.push({ role: "assistant", content: turn.rawItems });
+        continue;
+      }
       const content = [];
       if (turn.text)
         content.push({ type: "text", text: turn.text });
@@ -26552,7 +26556,7 @@ function parseMessagesReply(json, flags) {
       });
     }
   }
-  return { ok: true, text: joinContentText(json), toolCalls };
+  return { ok: true, text: joinContentText(json), toolCalls, rawItems: Array.isArray(content) ? content : [] };
 }
 async function callMessages(ep, messages, o) {
   const key = o.apiKey;
@@ -26659,7 +26663,7 @@ async function callMessagesTurn(ep, conv, o, flags) {
   const reply = parseMessagesReply(json, mFlags);
   if (!reply.ok)
     return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls, rawItems: reply.rawItems };
 }
 
 // lib/src/adapters/responses.js

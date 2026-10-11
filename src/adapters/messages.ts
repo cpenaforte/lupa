@@ -40,7 +40,7 @@ interface MessagesFlags {
 /** A parsed messages reply: the failure union, or the extracted text + tool calls. */
 type MessagesReply =
   | { ok: false; result: LlmResult }
-  | { ok: true; text: string | undefined; toolCalls: ToolCall[] };
+  | { ok: true; text: string | undefined; toolCalls: ToolCall[]; rawItems: unknown[] };
 
 /**
  * Builds the Anthropic Messages request body from a neutral conversation. Shared
@@ -66,6 +66,10 @@ function buildMessagesBody(
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
       flushResults();
+      if (turn.rawItems !== undefined) {
+        messages.push({ role: "assistant", content: turn.rawItems });
+        continue;
+      }
       const content: Array<Record<string, unknown>> = [];
       if (turn.text) content.push({ type: "text", text: turn.text });
       for (const tc of turn.toolCalls) {
@@ -143,7 +147,7 @@ function parseMessagesReply(json: unknown, flags: MessagesFlags): MessagesReply 
     }
   }
 
-  return { ok: true, text: joinContentText(json), toolCalls };
+  return { ok: true, text: joinContentText(json), toolCalls, rawItems: Array.isArray(content) ? content : [] };
 }
 
 /**
@@ -306,5 +310,5 @@ export async function callMessagesTurn(
   }
   const reply = parseMessagesReply(json, mFlags);
   if (!reply.ok) return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls, rawItems: reply.rawItems };
 }

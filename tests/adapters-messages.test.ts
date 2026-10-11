@@ -264,7 +264,25 @@ describe("callMessagesTurn", () => {
       ok: true,
       text: "",
       toolCalls: [{ id: "t1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+      rawItems: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } }],
     });
+  });
+
+  it("replays assistant rawItems (thinking block with signature) verbatim", async () => {
+    const c: Conversation = {
+      system: "s", user: "u",
+      turns: [{
+        role: "assistant", text: "t",
+        toolCalls: [{ id: "t1", name: "read_file", args: {}, rawArgs: "{}" }],
+        rawItems: [{ type: "thinking", thinking: "hmm", signature: "sig-123" }, { type: "tool_use", id: "t1", name: "read_file", input: {} }],
+      }],
+      tools: [toolDef],
+    };
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    expect(lastBody().messages).toEqual([
+      { role: "user", content: "u" },
+      { role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: "sig-123" }, { type: "tool_use", id: "t1", name: "read_file", input: {} }] },
+    ]);
   });
 
   it("argless tool_use parses (rawArgs {}) and echoes with input {}", async () => {
