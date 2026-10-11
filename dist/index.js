@@ -25389,6 +25389,111 @@ function googleSchema(schema) {
   }
   return out;
 }
+function buildGoogleBody(conv, modelId, o, flags) {
+  const contents = [
+    { role: "user", parts: [{ text: conv.user }] }
+  ];
+  let pendingResults = [];
+  const flushResults = () => {
+    if (pendingResults.length > 0) {
+      contents.push({ role: "function", parts: pendingResults });
+      pendingResults = [];
+    }
+  };
+  for (const turn of conv.turns ?? []) {
+    if (turn.role === "assistant") {
+      flushResults();
+      const parts = [];
+      if (turn.text)
+        parts.push({ text: turn.text });
+      for (const tc of turn.toolCalls) {
+        parts.push({ functionCall: { name: tc.name, args: tc.args } });
+      }
+      contents.push({ role: "model", parts });
+    } else if (turn.role === "tool") {
+      pendingResults.push({
+        functionResponse: {
+          name: turn.name,
+          response: turn.isError ? { error: turn.output } : { output: turn.output }
+        }
+      });
+    } else {
+      flushResults();
+      contents.push({ role: "user", parts: [{ text: turn.text }] });
+    }
+  }
+  flushResults();
+  const generationConfig = { maxOutputTokens: o.maxTokens };
+  if (flags.allowFormat) {
+    generationConfig.responseMimeType = "application/json";
+    generationConfig.responseSchema = googleSchema(PR_REVIEW_SCHEMA.schema);
+  }
+  if (o.temperature !== void 0)
+    generationConfig.temperature = o.temperature;
+  if (o.topP !== void 0)
+    generationConfig.topP = o.topP;
+  const body = {
+    contents,
+    systemInstruction: { parts: [{ text: conv.system }] },
+    generationConfig
+  };
+  if (flags.allowTools && conv.tools !== void 0) {
+    body.tools = conv.tools.map((t) => ({
+      functionDeclarations: [{ name: t.name, description: t.description, parameters: googleSchema(t.parameters) }]
+    }));
+  }
+  return body;
+}
+function parseGoogleReply(json, flags) {
+  const blockReason = promptBlockReason(json);
+  if (blockReason !== void 0) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        reason: "content-filter",
+        detail: `provider blocked the prompt (blockReason=${blockReason})`
+      }
+    };
+  }
+  const finishReason = firstCandidate(json)?.finishReason;
+  if (finishReason === "MAX_TOKENS") {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response truncated (finishReason=MAX_TOKENS)" } };
+  }
+  if (finishReason !== void 0 && finishReason !== "STOP") {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        reason: "content-filter",
+        detail: `provider stopped the response (finishReason=${String(finishReason)})`
+      }
+    };
+  }
+  const toolCalls = [];
+  const content = firstCandidate(json)?.content;
+  if (flags.allowTools && typeof content === "object" && content !== null) {
+    const parts = content.parts;
+    if (Array.isArray(parts)) {
+      for (const part of parts) {
+        if (typeof part !== "object" || part === null)
+          continue;
+        const fc = part.functionCall;
+        if (typeof fc !== "object" || fc === null)
+          continue;
+        const call = fc;
+        const args = call.args;
+        toolCalls.push({
+          id: `fc_${toolCalls.length}`,
+          name: typeof call.name === "string" ? call.name : "",
+          args,
+          rawArgs: JSON.stringify(args)
+        });
+      }
+    }
+  }
+  return { ok: true, text: joinCandidateText(json), toolCalls };
+}
 async function callGoogle(ep, modelId, messages, o) {
   const key = o.apiKey;
   if (key === "")
@@ -25398,23 +25503,10 @@ async function callGoogle(ep, modelId, messages, o) {
   } catch (e) {
     return { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) };
   }
-  const buildBody2 = (withSchema) => {
-    const generationConfig = { maxOutputTokens: o.maxTokens };
-    if (withSchema) {
-      generationConfig.responseMimeType = "application/json";
-      generationConfig.responseSchema = googleSchema(PR_REVIEW_SCHEMA.schema);
-    }
-    if (o.temperature !== void 0)
-      generationConfig.temperature = o.temperature;
-    if (o.topP !== void 0)
-      generationConfig.topP = o.topP;
-    return {
-      contents: [{ role: "user", parts: [{ text: messages.user }] }],
-      systemInstruction: { parts: [{ text: messages.system }] },
-      generationConfig
-    };
-  };
-  let payload = JSON.stringify(buildBody2(true));
+  const conv = { system: messages.system, user: messages.user };
+  const onFlags = { allowTools: false, allowFormat: true };
+  const offFlags = { allowTools: false, allowFormat: false };
+  let payload = JSON.stringify(buildGoogleBody(conv, modelId, o, onFlags));
   const headers = {
     ...ep.headers,
     "x-goog-api-key": key
@@ -25428,7 +25520,7 @@ async function callGoogle(ep, modelId, messages, o) {
   if (a.kind === "fail")
     return a.result;
   if (!a.ok && a.status === 400) {
-    payload = JSON.stringify(buildBody2(false));
+    payload = JSON.stringify(buildGoogleBody(conv, modelId, o, offFlags));
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail")
       return a.result;
@@ -25449,26 +25541,10 @@ async function callGoogle(ep, modelId, messages, o) {
   } catch {
     return { ok: false, reason: "invalid-json", detail: "response body is not JSON" };
   }
-  const blockReason = promptBlockReason(json);
-  if (blockReason !== void 0) {
-    return {
-      ok: false,
-      reason: "content-filter",
-      detail: `provider blocked the prompt (blockReason=${blockReason})`
-    };
-  }
-  const finishReason = firstCandidate(json)?.finishReason;
-  if (finishReason === "MAX_TOKENS") {
-    return { ok: false, reason: "invalid-json", detail: "response truncated (finishReason=MAX_TOKENS)" };
-  }
-  if (finishReason !== void 0 && finishReason !== "STOP") {
-    return {
-      ok: false,
-      reason: "content-filter",
-      detail: `provider stopped the response (finishReason=${String(finishReason)})`
-    };
-  }
-  const text = joinCandidateText(json);
+  const reply = parseGoogleReply(json, onFlags);
+  if (!reply.ok)
+    return reply.result;
+  const text = reply.text;
   if (text === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response has no content" };
   }

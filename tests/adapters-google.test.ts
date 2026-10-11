@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { callGoogle, googleSchema } from "../src/adapters/google.js";
+import { callGoogle, callGoogleTurn, googleSchema } from "../src/adapters/google.js";
 import { PR_REVIEW_SCHEMA } from "../src/prompt.js";
 import type { ResolvedEndpoint } from "../src/providers.js";
+import type { Conversation } from "../src/agent-types.js";
 
 // ---------- helpers ----------
 
@@ -270,6 +271,130 @@ describe("callGoogle", () => {
     expect((r as { detail: string }).detail).not.toContain(key);
     // 5xx → exactly one retry, then the plain http-error path (no schema fallback for 5xx).
     expect(calls.length).toBe(2);
+  });
+});
+
+// ---------- callGoogleTurn ----------
+
+describe("callGoogleTurn", () => {
+  const toolDef = {
+    name: "read_file",
+    description: "Read a file",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  };
+
+  const conv = (): Conversation => ({ system: "s", user: "u", tools: [toolDef] });
+  const turnFlags = { allowTools: true, allowFormat: false };
+
+  it("turn mode sends functionDeclarations with googleSchema parameters and no responseSchema", async () => {
+    const c = conv();
+    await callGoogleTurn(fakeGoogleEp(), MODEL, c, opts(), turnFlags);
+    const body = lastBody();
+    expect(body.tools).toEqual([
+      {
+        functionDeclarations: [
+          { name: "read_file", description: "Read a file", parameters: googleSchema(toolDef.parameters) },
+        ],
+      },
+    ]);
+    expect(body.generationConfig as Record<string, unknown>).not.toHaveProperty("responseSchema");
+    expect(body.generationConfig as Record<string, unknown>).not.toHaveProperty("responseMimeType");
+    // The system instruction (with the agent addendum) must ride in BOTH modes.
+    expect(body.systemInstruction).toEqual({ parts: [{ text: "s" }] });
+    expect((body.systemInstruction as { parts: Array<{ text: string }> }).parts[0]!.text).toBe(c.system);
+  });
+
+  it("echoes model functionCall parts and role=function functionResponse parts", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "thinking",
+          toolCalls: [
+            { id: "fc_0", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' },
+            { id: "fc_1", name: "read_file", args: { path: "b.ts" }, rawArgs: '{"path":"b.ts"}' },
+          ],
+        },
+        { role: "tool", id: "fc_0", name: "read_file", output: "ok" },
+        { role: "tool", id: "fc_1", name: "read_file", output: "boom", isError: true },
+      ],
+      tools: [toolDef],
+    };
+    await callGoogleTurn(fakeGoogleEp(), MODEL, c, opts(), turnFlags);
+    expect(lastBody().contents).toEqual([
+      { role: "user", parts: [{ text: "u" }] },
+      {
+        role: "model",
+        parts: [
+          { text: "thinking" },
+          { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+          { functionCall: { name: "read_file", args: { path: "b.ts" } } },
+        ],
+      },
+      {
+        role: "function",
+        parts: [
+          { functionResponse: { name: "read_file", response: { output: "ok" } } },
+          { functionResponse: { name: "read_file", response: { error: "boom" } } },
+        ],
+      },
+    ]);
+  });
+
+  it("parses functionCall parts with synthesized fc_ ids", async () => {
+    stubFetch(() =>
+      json(200, {
+        candidates: [
+          {
+            content: {
+              parts: [
+                { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+                { functionCall: { name: "read_file", args: { path: "b.ts" } } },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+      }),
+    );
+    const r = await callGoogleTurn(fakeGoogleEp(), MODEL, conv(), opts(), turnFlags);
+    expect(r).toEqual({
+      ok: true,
+      text: "",
+      toolCalls: [
+        { id: "fc_0", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' },
+        { id: "fc_1", name: "read_file", args: { path: "b.ts" }, rawArgs: '{"path":"b.ts"}' },
+      ],
+    });
+  });
+
+  it("text and functionCall parts together parse both", async () => {
+    stubFetch(() =>
+      json(200, {
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: "thinking" },
+                { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+      }),
+    );
+    const r = await callGoogleTurn(fakeGoogleEp(), MODEL, conv(), opts(), turnFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.text).toBe("thinking");
+      expect(r.toolCalls).toHaveLength(1);
+      expect(r.toolCalls[0]!.id).toBe("fc_0");
+      expect(r.toolCalls[0]!.name).toBe("read_file");
+      expect(r.toolCalls[0]!.args).toEqual({ path: "a.ts" });
+    }
   });
 });
 

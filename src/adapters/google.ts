@@ -1,5 +1,6 @@
 import { PR_REVIEW_SCHEMA } from "../prompt.js";
 import type { ResolvedEndpoint } from "../providers.js";
+import type { Conversation, ToolCall } from "../agent-types.js";
 import {
   attempt,
   errMessage,
@@ -10,6 +11,7 @@ import {
   toFindings,
   validateSampling,
   SNIPPET_CHARS,
+  type AgentReply,
   type LlmResult,
 } from "../llm.js";
 
@@ -95,6 +97,160 @@ export function googleSchema(schema: Record<string, unknown>): Record<string, un
 }
 
 /**
+ * Shared google flags. `allowTools` gates `tools` (as `functionDeclarations`);
+ * `allowFormat` gates `responseMimeType`+`responseSchema` (the single-shot
+ * `callGoogle` sets it true, a tool turn may set it false).
+ */
+interface GoogleFlags {
+  allowTools: boolean;
+  allowFormat: boolean;
+}
+
+/** A parsed google reply: the failure union, or the extracted text + tool calls. */
+type GoogleReply =
+  | { ok: false; result: LlmResult }
+  | { ok: true; text: string | undefined; toolCalls: ToolCall[] };
+
+/**
+ * Builds the Google generateContent request body from a neutral conversation.
+ * Shared by the single-shot `callGoogle` (no turns, `allowTools:false`) and the
+ * agent turn variant: `tools` only when `allowTools` (as `functionDeclarations`
+ * with `googleSchema` parameters); `responseMimeType`+`responseSchema` only when
+ * `allowFormat`. `systemInstruction` rides in BOTH modes — the agent addendum
+ * carries the untrusted-tool-output rule, so it must never be dropped. Assistant
+ * turns become `role:"model"` parts (text then `functionCall`); consecutive
+ * tool-result turns collapse into ONE `role:"function"` part set (the API wants
+ * every `functionResponse` for a parallel call set together). `modelId` is part
+ * of the shared signature for parity with the call sites; the model id rides the
+ * endpoint path (`:generateContent`), not the body, so it is not emitted here.
+ */
+function buildGoogleBody(
+  conv: Conversation,
+  modelId: string,
+  o: { temperature?: number; topP?: number; maxTokens: number },
+  flags: GoogleFlags,
+): Record<string, unknown> {
+  const contents: Array<Record<string, unknown>> = [
+    { role: "user", parts: [{ text: conv.user }] },
+  ];
+  let pendingResults: Array<Record<string, unknown>> = [];
+  const flushResults = (): void => {
+    if (pendingResults.length > 0) {
+      contents.push({ role: "function", parts: pendingResults });
+      pendingResults = [];
+    }
+  };
+  for (const turn of conv.turns ?? []) {
+    if (turn.role === "assistant") {
+      flushResults();
+      const parts: Array<Record<string, unknown>> = [];
+      if (turn.text) parts.push({ text: turn.text });
+      for (const tc of turn.toolCalls) {
+        parts.push({ functionCall: { name: tc.name, args: tc.args } });
+      }
+      contents.push({ role: "model", parts });
+    } else if (turn.role === "tool") {
+      pendingResults.push({
+        functionResponse: {
+          name: turn.name,
+          response: turn.isError ? { error: turn.output } : { output: turn.output },
+        },
+      });
+    } else {
+      flushResults();
+      contents.push({ role: "user", parts: [{ text: turn.text }] });
+    }
+  }
+  flushResults();
+
+  const generationConfig: Record<string, unknown> = { maxOutputTokens: o.maxTokens };
+  if (flags.allowFormat) {
+    generationConfig.responseMimeType = "application/json";
+    generationConfig.responseSchema = googleSchema(PR_REVIEW_SCHEMA.schema);
+  }
+  if (o.temperature !== undefined) generationConfig.temperature = o.temperature;
+  if (o.topP !== undefined) generationConfig.topP = o.topP;
+
+  const body: Record<string, unknown> = {
+    contents,
+    systemInstruction: { parts: [{ text: conv.system }] },
+    generationConfig,
+  };
+  if (flags.allowTools && conv.tools !== undefined) {
+    body.tools = conv.tools.map((t) => ({
+      functionDeclarations: [{ name: t.name, description: t.description, parameters: googleSchema(t.parameters) }],
+    }));
+  }
+  return body;
+}
+
+/**
+ * Parses a Google generateContent reply into the shared failure mappings plus the
+ * raw text and tool calls. Prompt-level blocks (`promptFeedback.blockReason`) and
+ * `finishReason` SAFETY/any other non-STOP value map to a content-filter skip
+ * without retry; MAX_TOKENS degrades as "invalid-json". Tool calls
+ * (`content.parts[].functionCall`) are parsed only when `allowTools`; the
+ * provider id is ignored and each call is given a synthesized `fc_<index>` id.
+ */
+function parseGoogleReply(json: unknown, flags: GoogleFlags): GoogleReply {
+  // A prompt-level block (e.g. SAFETY) is a provider-side skip, never retried —
+  // it arrives as promptFeedback.blockReason, usually with no candidates at all.
+  const blockReason = promptBlockReason(json);
+  if (blockReason !== undefined) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        reason: "content-filter",
+        detail: `provider blocked the prompt (blockReason=${blockReason})`,
+      },
+    };
+  }
+
+  const finishReason = firstCandidate(json)?.finishReason;
+  // The fixed set of failure reasons has no "length" entry: truncation degrades
+  // as "invalid-json" (no diff-shrink retry).
+  if (finishReason === "MAX_TOKENS") {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response truncated (finishReason=MAX_TOKENS)" } };
+  }
+  // SAFETY and every other non-STOP finish reason is a provider-side skip, never retried
+  // (reported as content-filter: the fixed set of failure reasons has no refusal entry).
+  if (finishReason !== undefined && finishReason !== "STOP") {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        reason: "content-filter",
+        detail: `provider stopped the response (finishReason=${String(finishReason)})`,
+      },
+    };
+  }
+
+  const toolCalls: ToolCall[] = [];
+  const content = firstCandidate(json)?.content;
+  if (flags.allowTools && typeof content === "object" && content !== null) {
+    const parts = (content as { parts?: unknown }).parts;
+    if (Array.isArray(parts)) {
+      for (const part of parts) {
+        if (typeof part !== "object" || part === null) continue;
+        const fc = (part as { functionCall?: unknown }).functionCall;
+        if (typeof fc !== "object" || fc === null) continue;
+        const call = fc as { name?: unknown; args?: unknown };
+        const args = call.args;
+        toolCalls.push({
+          id: `fc_${toolCalls.length}`,
+          name: typeof call.name === "string" ? call.name : "",
+          args,
+          rawArgs: JSON.stringify(args),
+        });
+      }
+    }
+  }
+
+  return { ok: true, text: joinCandidateText(json), toolCalls };
+}
+
+/**
  * Google generateContent (`POST {base}/models/<id>:generateContent`): the body is
  * `{contents, systemInstruction, generationConfig}` with `maxOutputTokens` for the
  * token budget. Structured output rides as `responseMimeType`+`responseSchema`; a 400
@@ -127,22 +283,10 @@ export async function callGoogle(
     return { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) };
   }
 
-  const buildBody = (withSchema: boolean): Record<string, unknown> => {
-    const generationConfig: Record<string, unknown> = { maxOutputTokens: o.maxTokens };
-    if (withSchema) {
-      generationConfig.responseMimeType = "application/json";
-      generationConfig.responseSchema = googleSchema(PR_REVIEW_SCHEMA.schema);
-    }
-    if (o.temperature !== undefined) generationConfig.temperature = o.temperature;
-    if (o.topP !== undefined) generationConfig.topP = o.topP;
-    return {
-      contents: [{ role: "user", parts: [{ text: messages.user }] }],
-      systemInstruction: { parts: [{ text: messages.system }] },
-      generationConfig,
-    };
-  };
-
-  let payload = JSON.stringify(buildBody(true));
+  const conv: Conversation = { system: messages.system, user: messages.user };
+  const onFlags: GoogleFlags = { allowTools: false, allowFormat: true };
+  const offFlags: GoogleFlags = { allowTools: false, allowFormat: false };
+  let payload = JSON.stringify(buildGoogleBody(conv, modelId, o, onFlags));
 
   // Spec §9.3 auth: prefer the x-goog-api-key header; the endpoint only lends its
   // User-Agent/session headers (Authorization is not part of this protocol, and
@@ -162,7 +306,7 @@ export async function callGoogle(
   // Structured-output fallback: a 400 on responseSchema retries once without it
   // (and without responseMimeType), then the raw text is parsed manually.
   if (!a.ok && a.status === 400) {
-    payload = JSON.stringify(buildBody(false));
+    payload = JSON.stringify(buildGoogleBody(conv, modelId, o, offFlags));
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail") return a.result;
   }
@@ -185,34 +329,9 @@ export async function callGoogle(
     return { ok: false, reason: "invalid-json", detail: "response body is not JSON" };
   }
 
-  // A prompt-level block (e.g. SAFETY) is a provider-side skip, never retried —
-  // it arrives as promptFeedback.blockReason, usually with no candidates at all.
-  const blockReason = promptBlockReason(json);
-  if (blockReason !== undefined) {
-    return {
-      ok: false,
-      reason: "content-filter",
-      detail: `provider blocked the prompt (blockReason=${blockReason})`,
-    };
-  }
-
-  const finishReason = firstCandidate(json)?.finishReason;
-  // The fixed set of failure reasons has no "length" entry: truncation degrades
-  // as "invalid-json" (no diff-shrink retry).
-  if (finishReason === "MAX_TOKENS") {
-    return { ok: false, reason: "invalid-json", detail: "response truncated (finishReason=MAX_TOKENS)" };
-  }
-  // SAFETY and every other non-STOP finish reason is a provider-side skip, never retried
-  // (reported as content-filter: the fixed set of failure reasons has no refusal entry).
-  if (finishReason !== undefined && finishReason !== "STOP") {
-    return {
-      ok: false,
-      reason: "content-filter",
-      detail: `provider stopped the response (finishReason=${String(finishReason)})`,
-    };
-  }
-
-  const text = joinCandidateText(json);
+  const reply = parseGoogleReply(json, onFlags);
+  if (!reply.ok) return reply.result;
+  const text = reply.text;
   if (text === undefined) {
     return { ok: false, reason: "invalid-json", detail: "response has no content" };
   }
@@ -228,4 +347,85 @@ export async function callGoogle(
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
   return { ok: true, findings };
+}
+
+/**
+ * Agent-mode turn call on the Google generateContent protocol. Same transport,
+ * retry and failure mappings as `callGoogle`, but translates a neutral
+ * conversation (tools + prior turns) into `contents`/`tools` and parses
+ * `functionCall` parts back with synthesized `fc_<index>` ids. The `flags` gate
+ * the tool/format fields: `responseSchema` is only sent when `allowFormat`. The
+ * 400 schema-strip retry only applies when a schema was actually sent.
+ */
+export async function callGoogleTurn(
+  ep: ResolvedEndpoint,
+  modelId: string,
+  conv: Conversation,
+  o: {
+    apiKey: string;
+    temperature?: number;
+    topP?: number;
+    maxTokens: number;
+    timeoutSeconds: number;
+  },
+  flags: { allowTools: boolean; allowFormat: boolean },
+): Promise<AgentReply> {
+  const key = o.apiKey;
+  if (key === "") return { ok: false, result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+
+  try {
+    validateSampling({ model: modelId, temperature: o.temperature, topP: o.topP, provider: "google" });
+  } catch (e) {
+    return { ok: false, result: { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) } };
+  }
+
+  const gFlags: GoogleFlags = { allowTools: flags.allowTools, allowFormat: flags.allowFormat };
+  let payload = JSON.stringify(buildGoogleBody(conv, modelId, o, gFlags));
+
+  // Spec §9.3 auth: prefer the x-goog-api-key header; the endpoint only lends its
+  // User-Agent/session headers (Authorization is not part of this protocol, and
+  // the query-string `?key=` fallback is never used by default — never logged).
+  const headers: Record<string, string> = {
+    ...ep.headers,
+    "x-goog-api-key": key,
+  };
+  // Case-insensitive strip: Authorization is not part of this protocol, whatever its casing.
+  for (const k of Object.keys(headers)) {
+    if (/^authorization$/i.test(k)) delete headers[k];
+  }
+  const authEp: ResolvedEndpoint = { baseUrl: ep.baseUrl, path: ep.path, headers, apiStyle: ep.apiStyle };
+
+  let a = await attempt(authEp, payload, o);
+  if (a.kind === "fail") return { ok: false, result: a.result };
+  // Structured-output fallback: a 400 on responseSchema retries once without it
+  // (and without responseMimeType), then the raw text is parsed manually.
+  if (!a.ok && a.status === 400 && gFlags.allowFormat) {
+    payload = JSON.stringify(buildGoogleBody(conv, modelId, o, { ...gFlags, allowFormat: false }));
+    a = await attempt(authEp, payload, o);
+    if (a.kind === "fail") return { ok: false, result: a.result };
+  }
+  // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
+  if (a.status === 429 || a.status >= 500) {
+    await sleep(retryDelayMs(a.retryAfter));
+    a = await attempt(authEp, payload, o);
+    if (a.kind === "fail") return { ok: false, result: a.result };
+  }
+
+  if (!a.ok) {
+    const snippet = redact(a.text, key).slice(0, SNIPPET_CHARS);
+    return {
+      ok: false,
+      result: { ok: false, reason: "http-error", detail: `HTTP ${a.status}${snippet ? `: ${snippet}` : ""}`, status: a.status },
+    };
+  }
+
+  let json: unknown;
+  try {
+    json = JSON.parse(a.text);
+  } catch {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response body is not JSON" } };
+  }
+  const reply = parseGoogleReply(json, gFlags);
+  if (!reply.ok) return { ok: false, result: reply.result };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
 }
