@@ -83,6 +83,21 @@ function repoOf(): { owner: string; repo: string } {
 }
 
 /**
+ * Repository size in KB (Octokit `repos.get` → `data.size`). Any error —
+ * missing repo, no access, network failure — resolves to undefined so the
+ * caller treats the size as unknown instead of failing the run.
+ */
+export async function getRepoSize(octokit: Octokit, owner: string, repo: string): Promise<number | undefined> {
+  try {
+    const r = await octokit.rest.repos.get({ owner, repo });
+    const size = (r.data as { size?: unknown }).size;
+    return typeof size === "number" ? size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Off-diff fallback: inline comments move into the review body as a plain list, so the
  * retry posts a general-only review. Each item is `- path:line`, and every line of the
  * comment body follows indented by two spaces under it, so a multi-line body stays inside

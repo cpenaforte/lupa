@@ -147,12 +147,19 @@ function removeDir(dir: string): void {
  */
 export async function ensureLinkedRepo(
   alias: string,
-  o: { token: string; baseDir: string; timeoutMs?: number; maxBytes?: number; deps?: CloneDeps },
+  o: {
+    token: string;
+    baseDir: string;
+    timeoutMs?: number;
+    maxBytes?: number;
+    deps?: CloneDeps;
+    sizeKb?: (alias: string) => Promise<number | undefined>;
+  },
 ): Promise<{ dir: string } | { error: string }> {
   const dir = join(o.baseDir, alias.split("/").join("__"));
   if (existsSync(dir)) return { dir };
 
-  const deps: CloneDeps = o.deps ?? { run: defaultRun };
+  const deps: CloneDeps = o.deps ?? { run: defaultRun, ...(o.sizeKb !== undefined ? { sizeKb: o.sizeKb } : {}) };
 
   if (o.maxBytes !== undefined && deps.sizeKb) {
     let kb: number | undefined;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, eventFor, exitFor, mapToComments } from "../src/review.js";
+import { buildBody, eventFor, exitFor, mapToComments, redactFindings } from "../src/review.js";
 import { parseHunks } from "../src/diff.js";
 import type { Finding } from "../src/fastpath.js";
 
@@ -186,6 +186,40 @@ describe("buildBody", () => {
     );
     expect(body).toContain("b.ts [r] no line");
     expect(body).toContain("(repository) [r] repo wide");
+  });
+});
+
+describe("redactFindings", () => {
+  it("redactFindings replaces secrets in message, suggestion, file and rule", () => {
+    const out = redactFindings(
+      [
+        {
+          severity: "warning",
+          file: "src/sk-secret-1.ts",
+          line: 1,
+          rule: "rule-sk-secret-1",
+          message: "saw sk-secret-1 in code",
+          suggestion: "rotate sk-secret-1 now",
+        },
+      ],
+      ["sk-secret-1"],
+    );
+    expect(out).toEqual([
+      {
+        severity: "warning",
+        file: "src/[REDACTED].ts",
+        line: 1,
+        rule: "rule-[REDACTED]",
+        message: "saw [REDACTED] in code",
+        suggestion: "rotate [REDACTED] now",
+      },
+    ]);
+  });
+
+  it("redactFindings ignores empty secrets", () => {
+    const findings: Finding[] = [{ severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m" }];
+    expect(redactFindings(findings, [""])).toEqual(findings);
+    expect(redactFindings(findings, [])).toEqual(findings);
   });
 });
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ReadonlyTokenError,
+  getRepoSize,
   postIssueFallback,
   postReview,
   resolvePrNumber,
@@ -359,6 +360,23 @@ describe("postReview", () => {
     expect(JSON.stringify(r)).not.toContain("sk-secret-abc");
     const err = await postReviewThrowing("sk-secret-abc").catch((e) => String(e));
     expect(err).not.toContain("sk-secret-abc");
+  });
+});
+
+describe("getRepoSize", () => {
+  it("getRepoSize returns the Octokit size in KB and undefined on error", async () => {
+    const ok = { rest: { repos: { get: async () => ({ data: { size: 4321 } }) } } } as unknown as Octokit;
+    await expect(getRepoSize(ok, "o", "r")).resolves.toBe(4321);
+    const failing = {
+      rest: {
+        repos: {
+          get: async () => {
+            throw httpError(404, "Not Found");
+          },
+        },
+      },
+    } as unknown as Octokit;
+    await expect(getRepoSize(failing, "o", "r")).resolves.toBeUndefined();
   });
 });
 

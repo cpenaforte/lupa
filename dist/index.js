@@ -2152,9 +2152,9 @@ var require_dispatcher_base = __commonJS({
       }
       close(callback) {
         if (callback === void 0) {
-          return new Promise((resolve, reject) => {
+          return new Promise((resolve2, reject) => {
             this.close((err, data) => {
-              return err ? reject(err) : resolve(data);
+              return err ? reject(err) : resolve2(data);
             });
           });
         }
@@ -2192,12 +2192,12 @@ var require_dispatcher_base = __commonJS({
           err = null;
         }
         if (callback === void 0) {
-          return new Promise((resolve, reject) => {
+          return new Promise((resolve2, reject) => {
             this.destroy(err, (err2, data) => {
               return err2 ? (
                 /* istanbul ignore next: should never error */
                 reject(err2)
-              ) : resolve(data);
+              ) : resolve2(data);
             });
           });
         }
@@ -4464,8 +4464,8 @@ var require_util2 = __commonJS({
     function createDeferredPromise() {
       let res;
       let rej;
-      const promise = new Promise((resolve, reject) => {
-        res = resolve;
+      const promise = new Promise((resolve2, reject) => {
+        res = resolve2;
         rej = reject;
       });
       return { promise, resolve: res, reject: rej };
@@ -6717,12 +6717,12 @@ upgrade: ${upgrade}\r
           cb();
         }
       }
-      const waitForDrain = () => new Promise((resolve, reject) => {
+      const waitForDrain = () => new Promise((resolve2, reject) => {
         assert(callback === null);
         if (socket[kError]) {
           reject(socket[kError]);
         } else {
-          callback = resolve;
+          callback = resolve2;
         }
       });
       socket.on("close", onDrain).on("drain", onDrain);
@@ -7394,12 +7394,12 @@ var require_client_h2 = __commonJS({
           cb();
         }
       }
-      const waitForDrain = () => new Promise((resolve, reject) => {
+      const waitForDrain = () => new Promise((resolve2, reject) => {
         assert(callback === null);
         if (socket[kError]) {
           reject(socket[kError]);
         } else {
-          callback = resolve;
+          callback = resolve2;
         }
       });
       h2stream.on("close", onDrain).on("drain", onDrain);
@@ -7877,16 +7877,16 @@ var require_client = __commonJS({
         return this[kNeedDrain] < 2;
       }
       async [kClose]() {
-        return new Promise((resolve) => {
+        return new Promise((resolve2) => {
           if (this[kSize]) {
-            this[kClosedResolve] = resolve;
+            this[kClosedResolve] = resolve2;
           } else {
-            resolve(null);
+            resolve2(null);
           }
         });
       }
       async [kDestroy](err) {
-        return new Promise((resolve) => {
+        return new Promise((resolve2) => {
           const requests = this[kQueue].splice(this[kPendingIdx]);
           for (let i = 0; i < requests.length; i++) {
             const request2 = requests[i];
@@ -7897,7 +7897,7 @@ var require_client = __commonJS({
               this[kClosedResolve]();
               this[kClosedResolve] = null;
             }
-            resolve(null);
+            resolve2(null);
           };
           if (this[kHTTPContext]) {
             this[kHTTPContext].destroy(err, callback);
@@ -7948,7 +7948,7 @@ var require_client = __commonJS({
         });
       }
       try {
-        const socket = await new Promise((resolve, reject) => {
+        const socket = await new Promise((resolve2, reject) => {
           client[kConnector]({
             host,
             hostname,
@@ -7960,7 +7960,7 @@ var require_client = __commonJS({
             if (err) {
               reject(err);
             } else {
-              resolve(socket2);
+              resolve2(socket2);
             }
           });
         });
@@ -8296,8 +8296,8 @@ var require_pool_base = __commonJS({
         if (this[kQueue].isEmpty()) {
           await Promise.all(this[kClients].map((c) => c.close()));
         } else {
-          await new Promise((resolve) => {
-            this[kClosedResolve] = resolve;
+          await new Promise((resolve2) => {
+            this[kClosedResolve] = resolve2;
           });
         }
       }
@@ -9563,7 +9563,7 @@ var require_readable = __commonJS({
         if (this._readableState.closeEmitted) {
           return null;
         }
-        return await new Promise((resolve, reject) => {
+        return await new Promise((resolve2, reject) => {
           if (this[kContentLength] > limit) {
             this.destroy(new AbortError());
           }
@@ -9576,7 +9576,7 @@ var require_readable = __commonJS({
             if (signal?.aborted) {
               reject(signal.reason ?? new AbortError());
             } else {
-              resolve(null);
+              resolve2(null);
             }
           }).on("error", noop3).on("data", function(chunk) {
             limit -= chunk.length;
@@ -9595,7 +9595,7 @@ var require_readable = __commonJS({
     }
     async function consume(stream, type) {
       assert(!stream[kConsume]);
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve2, reject) => {
         if (isUnusable(stream)) {
           const rState = stream._readableState;
           if (rState.destroyed && rState.closeEmitted === false) {
@@ -9612,7 +9612,7 @@ var require_readable = __commonJS({
             stream[kConsume] = {
               type,
               stream,
-              resolve,
+              resolve: resolve2,
               reject,
               length: 0,
               body: []
@@ -9682,18 +9682,18 @@ var require_readable = __commonJS({
       return buffer;
     }
     function consumeEnd(consume2) {
-      const { type, body, resolve, stream, length } = consume2;
+      const { type, body, resolve: resolve2, stream, length } = consume2;
       try {
         if (type === "text") {
-          resolve(chunksDecode(body, length));
+          resolve2(chunksDecode(body, length));
         } else if (type === "json") {
-          resolve(JSON.parse(chunksDecode(body, length)));
+          resolve2(JSON.parse(chunksDecode(body, length)));
         } else if (type === "arrayBuffer") {
-          resolve(chunksConcat(body, length).buffer);
+          resolve2(chunksConcat(body, length).buffer);
         } else if (type === "blob") {
-          resolve(new Blob(body, { type: stream[kContentType] }));
+          resolve2(new Blob(body, { type: stream[kContentType] }));
         } else if (type === "bytes") {
-          resolve(chunksConcat(body, length));
+          resolve2(chunksConcat(body, length));
         }
         consumeFinish(consume2);
       } catch (err) {
@@ -9950,9 +9950,9 @@ var require_api_request = __commonJS({
     };
     function request2(opts, callback) {
       if (callback === void 0) {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve2, reject) => {
           request2.call(this, opts, (err, data) => {
-            return err ? reject(err) : resolve(data);
+            return err ? reject(err) : resolve2(data);
           });
         });
       }
@@ -10175,9 +10175,9 @@ var require_api_stream = __commonJS({
     };
     function stream(opts, factory, callback) {
       if (callback === void 0) {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve2, reject) => {
           stream.call(this, opts, factory, (err, data) => {
-            return err ? reject(err) : resolve(data);
+            return err ? reject(err) : resolve2(data);
           });
         });
       }
@@ -10462,9 +10462,9 @@ var require_api_upgrade = __commonJS({
     };
     function upgrade(opts, callback) {
       if (callback === void 0) {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve2, reject) => {
           upgrade.call(this, opts, (err, data) => {
-            return err ? reject(err) : resolve(data);
+            return err ? reject(err) : resolve2(data);
           });
         });
       }
@@ -10556,9 +10556,9 @@ var require_api_connect = __commonJS({
     };
     function connect(opts, callback) {
       if (callback === void 0) {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve2, reject) => {
           connect.call(this, opts, (err, data) => {
-            return err ? reject(err) : resolve(data);
+            return err ? reject(err) : resolve2(data);
           });
         });
       }
@@ -14420,7 +14420,7 @@ var require_fetch = __commonJS({
       function dispatch({ body }) {
         const url = requestCurrentURL(request2);
         const agent = fetchParams.controller.dispatcher;
-        return new Promise((resolve, reject) => agent.dispatch(
+        return new Promise((resolve2, reject) => agent.dispatch(
           {
             path: url.pathname + url.search,
             origin: url.origin,
@@ -14496,7 +14496,7 @@ var require_fetch = __commonJS({
                 }
               }
               const onError = this.onError.bind(this);
-              resolve({
+              resolve2({
                 status,
                 statusText,
                 headersList,
@@ -14542,7 +14542,7 @@ var require_fetch = __commonJS({
               for (let i = 0; i < rawHeaders.length; i += 2) {
                 headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString("latin1"), true);
               }
-              resolve({
+              resolve2({
                 status,
                 statusText: STATUS_CODES[status],
                 headersList,
@@ -18273,8 +18273,8 @@ var require_util8 = __commonJS({
       return true;
     }
     function delay(ms) {
-      return new Promise((resolve) => {
-        setTimeout(resolve, ms).unref();
+      return new Promise((resolve2) => {
+        setTimeout(resolve2, ms).unref();
       });
     }
     module.exports = {
@@ -19188,11 +19188,11 @@ var require_lib = __commonJS({
     })();
     var __awaiter3 = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
       function adopt(value) {
-        return value instanceof P ? value : new P(function(resolve) {
-          resolve(value);
+        return value instanceof P ? value : new P(function(resolve2) {
+          resolve2(value);
         });
       }
-      return new (P || (P = Promise))(function(resolve, reject) {
+      return new (P || (P = Promise))(function(resolve2, reject) {
         function fulfilled(value) {
           try {
             step(generator.next(value));
@@ -19208,7 +19208,7 @@ var require_lib = __commonJS({
           }
         }
         function step(result) {
-          result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+          result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
         }
         step((generator = generator.apply(thisArg, _arguments || [])).next());
       });
@@ -19295,26 +19295,26 @@ var require_lib = __commonJS({
       }
       readBody() {
         return __awaiter3(this, void 0, void 0, function* () {
-          return new Promise((resolve) => __awaiter3(this, void 0, void 0, function* () {
+          return new Promise((resolve2) => __awaiter3(this, void 0, void 0, function* () {
             let output = Buffer.alloc(0);
             this.message.on("data", (chunk) => {
               output = Buffer.concat([output, chunk]);
             });
             this.message.on("end", () => {
-              resolve(output.toString());
+              resolve2(output.toString());
             });
           }));
         });
       }
       readBodyBuffer() {
         return __awaiter3(this, void 0, void 0, function* () {
-          return new Promise((resolve) => __awaiter3(this, void 0, void 0, function* () {
+          return new Promise((resolve2) => __awaiter3(this, void 0, void 0, function* () {
             const chunks = [];
             this.message.on("data", (chunk) => {
               chunks.push(chunk);
             });
             this.message.on("end", () => {
-              resolve(Buffer.concat(chunks));
+              resolve2(Buffer.concat(chunks));
             });
           }));
         });
@@ -19522,14 +19522,14 @@ var require_lib = __commonJS({
        */
       requestRaw(info2, data) {
         return __awaiter3(this, void 0, void 0, function* () {
-          return new Promise((resolve, reject) => {
+          return new Promise((resolve2, reject) => {
             function callbackForResult(err, res) {
               if (err) {
                 reject(err);
               } else if (!res) {
                 reject(new Error("Unknown error"));
               } else {
-                resolve(res);
+                resolve2(res);
               }
             }
             this.requestRawWithCallback(info2, data, callbackForResult);
@@ -19773,12 +19773,12 @@ var require_lib = __commonJS({
         return __awaiter3(this, void 0, void 0, function* () {
           retryNumber = Math.min(ExponentialBackoffCeiling, retryNumber);
           const ms = ExponentialBackoffTimeSlice * Math.pow(2, retryNumber);
-          return new Promise((resolve) => setTimeout(() => resolve(), ms));
+          return new Promise((resolve2) => setTimeout(() => resolve2(), ms));
         });
       }
       _processResponse(res, options) {
         return __awaiter3(this, void 0, void 0, function* () {
-          return new Promise((resolve, reject) => __awaiter3(this, void 0, void 0, function* () {
+          return new Promise((resolve2, reject) => __awaiter3(this, void 0, void 0, function* () {
             const statusCode = res.message.statusCode || 0;
             const response = {
               statusCode,
@@ -19786,7 +19786,7 @@ var require_lib = __commonJS({
               headers: {}
             };
             if (statusCode === HttpCodes2.NotFound) {
-              resolve(response);
+              resolve2(response);
             }
             function dateTimeDeserializer(key, value) {
               if (typeof value === "string") {
@@ -19825,7 +19825,7 @@ var require_lib = __commonJS({
               err.result = response.result;
               reject(err);
             } else {
-              resolve(response);
+              resolve2(response);
             }
           }));
         });
@@ -19998,11 +19998,11 @@ import { EOL as EOL3 } from "os";
 import { constants, promises } from "fs";
 var __awaiter = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve) {
-      resolve(value);
+    return value instanceof P ? value : new P(function(resolve2) {
+      resolve2(value);
     });
   }
-  return new (P || (P = Promise))(function(resolve, reject) {
+  return new (P || (P = Promise))(function(resolve2, reject) {
     function fulfilled(value) {
       try {
         step(generator.next(value));
@@ -20018,7 +20018,7 @@ var __awaiter = function(thisArg, _arguments, P, generator) {
       }
     }
     function step(result) {
-      result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+      result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
@@ -20387,11 +20387,11 @@ var httpClient = __toESM(require_lib(), 1);
 var import_undici2 = __toESM(require_undici(), 1);
 var __awaiter2 = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve) {
-      resolve(value);
+    return value instanceof P ? value : new P(function(resolve2) {
+      resolve2(value);
     });
   }
-  return new (P || (P = Promise))(function(resolve, reject) {
+  return new (P || (P = Promise))(function(resolve2, reject) {
     function fulfilled(value) {
       try {
         step(generator.next(value));
@@ -20407,7 +20407,7 @@ var __awaiter2 = function(thisArg, _arguments, P, generator) {
       }
     }
     function step(result) {
-      result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+      result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
@@ -24497,9 +24497,9 @@ function getOctokit(token, options, ...additionalPlugins) {
 }
 
 // lib/src/main.js
-import { appendFileSync as appendFileSync2, copyFileSync, existsSync as existsSync4, readFileSync as readFileSync4, rmSync, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { appendFileSync as appendFileSync2, copyFileSync, existsSync as existsSync5, readFileSync as readFileSync5, rmSync as rmSync2, statSync as statSync4, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename as basename3, dirname, join as join4 } from "node:path";
+import { basename as basename3, dirname as dirname2, join as join6 } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // lib/src/diff.js
@@ -24785,13 +24785,13 @@ function l2Argv(name) {
       throw new Error(`unknown L2 tool: ${name}`);
   }
 }
-var execTool = (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS) => new Promise((resolve) => {
+var execTool = (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS) => new Promise((resolve2) => {
   execFile(cmd, args, { cwd, maxBuffer: MAX_BUFFER, timeout: timeoutMs }, (err, stdout, stderr) => {
     if (!err)
-      return resolve(void 0);
+      return resolve2(void 0);
     const e = err;
     const code = typeof e.code === "string" || typeof e.code === "number" ? e.code : null;
-    resolve({
+    resolve2({
       code,
       signal: e.signal ?? null,
       output: `${String(stdout)}${String(stderr)}`,
@@ -24836,6 +24836,503 @@ async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS) {
   return findings;
 }
 
+// lib/src/agent-tools.js
+import { closeSync, openSync, readFileSync as readFileSync4, readSync, readdirSync as readdirSync2, realpathSync, statSync as statSync2 } from "node:fs";
+import { dirname, isAbsolute, join as join3, relative, resolve, sep as sep2 } from "node:path";
+import { Worker } from "node:worker_threads";
+
+// lib/src/agent-types.js
+var AGENT_LIMITS = {
+  maxCallsPerTurn: 4,
+  resultBytes: 32768,
+  totalBytes: 131072,
+  linkedRepos: 3,
+  cloneMs: 6e4,
+  cloneMaxBytes: 209715200
+};
+
+// lib/src/agent-tools.js
+var DRIVE_LETTER = /^[a-zA-Z]:/;
+var TRUNCATION_MARKER = "\n[truncated]";
+function splitSegments(p) {
+  return p.split(/[\\/]/);
+}
+function hasGitSegment(p) {
+  return splitSegments(p).some((s) => s.toLowerCase() === ".git");
+}
+function codePointSafeCut(s, n) {
+  if (n <= 0)
+    return "";
+  if (n >= s.length)
+    return s;
+  const code = s.charCodeAt(n);
+  const cut = code >= 56320 && code <= 57343 ? n - 1 : n;
+  return s.slice(0, cut);
+}
+function realpathExistingAncestor(p) {
+  let cur = p;
+  for (; ; ) {
+    try {
+      return realpathSync(cur);
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur)
+        return null;
+      cur = parent;
+    }
+  }
+}
+function resolveWithinRoot(root, rel) {
+  if (!rel)
+    return null;
+  if (isAbsolute(rel) || DRIVE_LETTER.test(rel))
+    return null;
+  const segments = splitSegments(rel);
+  if (segments.some((s) => s === ".."))
+    return null;
+  if (segments.some((s) => s.toLowerCase() === ".git"))
+    return null;
+  const rootResolved = resolve(root);
+  const resolved = resolve(rootResolved, rel);
+  if (resolved !== rootResolved && !resolved.startsWith(rootResolved + sep2))
+    return null;
+  try {
+    const realRoot = realpathSync(rootResolved);
+    const realTarget = realpathExistingAncestor(resolved);
+    if (realTarget === null)
+      return null;
+    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep2))
+      return null;
+    if (hasGitSegment(realTarget))
+      return null;
+  } catch {
+  }
+  return resolved;
+}
+function errorResult(message) {
+  return { output: JSON.stringify({ error: message }), isError: true };
+}
+function okResult(payload) {
+  return { output: JSON.stringify(payload), isError: false };
+}
+async function resolveRoot(repo, ctx) {
+  const alias = repo === void 0 || repo === null || repo === "" ? "self" : String(repo);
+  if (alias === "self")
+    return ctx.roots.self;
+  const linked = ctx.roots.linked?.get(alias);
+  if (linked)
+    return linked;
+  if (ctx.ensureLinked) {
+    const res = await ctx.ensureLinked(alias);
+    if ("dir" in res)
+      return res.dir;
+  }
+  return { error: `repository not accessible: ${alias}` };
+}
+async function rootFor(args, ctx) {
+  const root = await resolveRoot(args.repo, ctx);
+  if (typeof root === "string")
+    return { root };
+  return { error: root.error };
+}
+async function readFile(args, ctx) {
+  const resolvedRoot = await rootFor(args, ctx);
+  if ("error" in resolvedRoot)
+    return errorResult(resolvedRoot.error);
+  const rel = typeof args.path === "string" ? args.path : "";
+  const target = resolveWithinRoot(resolvedRoot.root, rel);
+  if (!target)
+    return errorResult(`path not accessible: ${rel}`);
+  let raw;
+  try {
+    raw = readFileSync4(target, "utf8");
+  } catch {
+    return errorResult(`cannot read file: ${rel}`);
+  }
+  const lines = raw.split("\n");
+  if (raw.endsWith("\n") && lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+  const total = lines.length;
+  const start = args.start === void 0 ? 1 : Number(args.start);
+  const end = args.end === void 0 ? total : Number(args.end);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1 || start > end) {
+    return errorResult(`invalid line range: ${String(args.start)}..${String(args.end)}`);
+  }
+  const endLine = Math.min(end, total);
+  const selected = start - 1 < total ? lines.slice(start - 1, endLine) : [];
+  const actualEnd = selected.length ? start + selected.length - 1 : start - 1;
+  const fullContent = selected.map((l, i) => `${start + i}: ${l}`).join("\n");
+  const base = { path: rel, start_line: start, end_line: actualEnd, total_lines: total };
+  const serialize = (content, truncated) => JSON.stringify({ ...base, truncated, content });
+  if (Buffer.byteLength(serialize(fullContent, false), "utf8") <= AGENT_LIMITS.resultBytes) {
+    return okResult(JSON.parse(serialize(fullContent, false)));
+  }
+  let lo = 0;
+  let hi = fullContent.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const candidate = serialize(codePointSafeCut(fullContent, mid) + TRUNCATION_MARKER, true);
+    if (Buffer.byteLength(candidate, "utf8") <= AGENT_LIMITS.resultBytes)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return okResult(JSON.parse(serialize(codePointSafeCut(fullContent, lo) + TRUNCATION_MARKER, true)));
+}
+async function listDir(args, ctx) {
+  const resolvedRoot = await rootFor(args, ctx);
+  if ("error" in resolvedRoot)
+    return errorResult(resolvedRoot.error);
+  const rel = typeof args.path === "string" && args.path !== "" ? args.path : ".";
+  const target = resolveWithinRoot(resolvedRoot.root, rel);
+  if (!target)
+    return errorResult(`path not accessible: ${rel}`);
+  let dirents;
+  try {
+    dirents = readdirSync2(target, { withFileTypes: true });
+  } catch {
+    return errorResult(`cannot list directory: ${rel}`);
+  }
+  const entries = [];
+  for (const d of dirents) {
+    if (d.isDirectory()) {
+      entries.push({ name: d.name, type: "dir" });
+    } else if (d.isFile()) {
+      let size;
+      try {
+        size = statSync2(join3(target, d.name)).size;
+      } catch {
+        size = void 0;
+      }
+      entries.push(size === void 0 ? { name: d.name, type: "file" } : { name: d.name, type: "file", size });
+    }
+  }
+  entries.sort((a, b) => {
+    if (a.type !== b.type)
+      return a.type === "dir" ? -1 : 1;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  const cap = 200;
+  const truncated = entries.length > cap;
+  return okResult({ path: rel, entries: entries.slice(0, cap), truncated });
+}
+var GREP_TIMEOUT_MS = 5e3;
+var GREP_MAX_MATCHES = 100;
+var GREP_MAX_FILE_BYTES = 1024 * 1024;
+var GREP_NUL_SCAN_BYTES = 8192;
+var GREP_LINE_CHARS = 200;
+var GLOB_MAX_PATHS = 200;
+function matchSegment(seg, pat) {
+  const n = seg.length;
+  const m = pat.length;
+  let prev = new Array(m + 1).fill(false);
+  prev[0] = true;
+  for (let j = 1; j <= m; j++)
+    if (pat[j - 1] === "*")
+      prev[j] = prev[j - 1];
+  for (let i = 1; i <= n; i++) {
+    const cur = new Array(m + 1).fill(false);
+    for (let j = 1; j <= m; j++) {
+      const pc = pat[j - 1];
+      if (pc === "*")
+        cur[j] = prev[j] || cur[j - 1];
+      else if (pc === "?")
+        cur[j] = prev[j - 1];
+      else
+        cur[j] = prev[j - 1] && seg[i - 1] === pc;
+    }
+    prev = cur;
+  }
+  return prev[m];
+}
+function matchGlob(path, glob2) {
+  const pathSegs = path.split("/");
+  const globSegs = glob2.split("/");
+  const n = pathSegs.length;
+  const m = globSegs.length;
+  let prev = new Array(m + 1).fill(false);
+  prev[0] = true;
+  for (let j = 1; j <= m; j++)
+    if (globSegs[j - 1] === "**")
+      prev[j] = prev[j - 1];
+  for (let i = 1; i <= n; i++) {
+    const cur = new Array(m + 1).fill(false);
+    for (let j = 1; j <= m; j++) {
+      const g = globSegs[j - 1];
+      if (g === "**")
+        cur[j] = cur[j - 1] || prev[j];
+      else
+        cur[j] = prev[j - 1] && matchSegment(pathSegs[i - 1], g);
+    }
+    prev = cur;
+  }
+  return prev[m];
+}
+function isBinaryFile(p) {
+  let fd;
+  try {
+    fd = openSync(p, "r");
+    const buf = Buffer.allocUnsafe(GREP_NUL_SCAN_BYTES);
+    const n = readSync(fd, buf, 0, GREP_NUL_SCAN_BYTES, 0);
+    for (let i = 0; i < n; i++)
+      if (buf[i] === 0)
+        return true;
+    return false;
+  } catch {
+    return true;
+  } finally {
+    if (fd !== void 0) {
+      try {
+        closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+function relPath(root, abs) {
+  return relative(root, abs).split(sep2).join("/");
+}
+function includeFile(root, abs, size) {
+  if (size > GREP_MAX_FILE_BYTES)
+    return null;
+  if (isBinaryFile(abs))
+    return null;
+  return { abs, rel: relPath(root, abs) };
+}
+function walkFiles(root, startAbs) {
+  let startStat;
+  try {
+    startStat = statSync2(startAbs);
+  } catch {
+    return [];
+  }
+  if (startStat.isFile()) {
+    const f = includeFile(root, startAbs, startStat.size);
+    return f ? [f] : [];
+  }
+  if (!startStat.isDirectory())
+    return [];
+  const files = [];
+  const stack = [startAbs];
+  while (stack.length) {
+    const dir = stack.pop();
+    let dirents;
+    try {
+      dirents = readdirSync2(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirents) {
+      if (d.name.toLowerCase() === ".git")
+        continue;
+      if (d.isSymbolicLink())
+        continue;
+      const childAbs = join3(dir, d.name);
+      if (d.isDirectory()) {
+        stack.push(childAbs);
+      } else if (d.isFile()) {
+        let size;
+        try {
+          size = statSync2(childAbs).size;
+        } catch {
+          continue;
+        }
+        const f = includeFile(root, childAbs, size);
+        if (f)
+          files.push(f);
+      }
+    }
+  }
+  return files;
+}
+var GREP_WORKER_SRC = [
+  'const { parentPort, workerData } = require("node:worker_threads");',
+  'const { readFileSync } = require("node:fs");',
+  "const { pattern, files, limit } = workerData;",
+  "const re = new RegExp(pattern);",
+  "const matches = [];",
+  "let filesScanned = 0;",
+  "let hitLimit = false;",
+  "for (const f of files) {",
+  "  filesScanned++;",
+  "  let content;",
+  '  try { content = readFileSync(f.abs, "utf8"); } catch { continue; }',
+  '  const lines = content.split("\\n");',
+  "  for (let i = 0; i < lines.length; i++) {",
+  "    if (re.test(lines[i])) {",
+  "      if (matches.length >= limit) { hitLimit = true; break; }",
+  "      const t = lines[i].trim();",
+  "      matches.push({ file: f.rel, line: i + 1, text: t });",
+  "    }",
+  "  }",
+  "  if (hitLimit) break;",
+  "}",
+  "parentPort.postMessage({ matches, filesScanned, hitLimit });"
+].join("\n");
+function runGrepWorker(pattern, files, limit, timeoutMs) {
+  return new Promise((resolvePromise) => {
+    let worker;
+    try {
+      worker = new Worker(GREP_WORKER_SRC, {
+        eval: true,
+        workerData: { pattern, files: files.map((f) => ({ abs: f.abs, rel: f.rel })), limit }
+      });
+    } catch (e) {
+      resolvePromise({ isError: true, output: errorResult(e instanceof Error ? e.message : String(e)).output });
+      return;
+    }
+    let settled = false;
+    let timer;
+    const finish = (result) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      resolvePromise(result);
+    };
+    timer = setTimeout(() => finish({ isError: true, output: errorResult("grep timed out").output }), timeoutMs);
+    worker.on("message", (msg) => {
+      finish({ isError: false, matches: msg.matches, filesScanned: msg.filesScanned, hitLimit: msg.hitLimit });
+    });
+    worker.on("error", (err) => {
+      finish({ isError: true, output: errorResult(err instanceof Error ? err.message : String(err)).output });
+    });
+  });
+}
+async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS) {
+  const pattern = typeof args.pattern === "string" ? args.pattern : "";
+  try {
+    new RegExp(pattern);
+  } catch {
+    return errorResult(`invalid regex: ${pattern}`);
+  }
+  const rel = args.path && args.path !== "" ? args.path : ".";
+  const startAbs = resolveWithinRoot(root, rel);
+  if (!startAbs)
+    return errorResult(`path not accessible: ${rel}`);
+  let files = walkFiles(root, startAbs);
+  if (args.glob)
+    files = files.filter((f) => matchGlob(f.rel, args.glob));
+  const requested = args.max_results === void 0 ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
+  const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
+  const outcome = await runGrepWorker(pattern, files, limit, timeoutMs);
+  if (outcome.isError)
+    return { output: outcome.output, isError: true };
+  const { matches, filesScanned, hitLimit } = outcome;
+  const capped = matches.map((m) => ({
+    file: m.file,
+    line: m.line,
+    text: codePointSafeCut(m.text, GREP_LINE_CHARS)
+  }));
+  const serialize = (list, truncated2) => JSON.stringify({ matches: list, truncated: truncated2, files_scanned: filesScanned });
+  let lo = 0;
+  let hi = capped.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  const truncated = hitLimit || lo < capped.length;
+  return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
+}
+async function grep(args, ctx) {
+  const resolvedRoot = await rootFor(args, ctx);
+  if ("error" in resolvedRoot)
+    return errorResult(resolvedRoot.error);
+  return grepInRoot(resolvedRoot.root, {
+    pattern: typeof args.pattern === "string" ? args.pattern : "",
+    path: typeof args.path === "string" ? args.path : void 0,
+    glob: typeof args.glob === "string" ? args.glob : void 0,
+    max_results: args.max_results === void 0 ? void 0 : Number(args.max_results)
+  });
+}
+async function glob(args, ctx) {
+  const resolvedRoot = await rootFor(args, ctx);
+  if ("error" in resolvedRoot)
+    return errorResult(resolvedRoot.error);
+  const pattern = typeof args.pattern === "string" ? args.pattern : "";
+  const paths = walkFiles(resolvedRoot.root, resolvedRoot.root).map((f) => f.rel).filter((p) => matchGlob(p, pattern)).sort();
+  const truncated = paths.length > GLOB_MAX_PATHS;
+  return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
+}
+var TOOL_DEFS = [
+  {
+    name: "read_file",
+    description: "Read a UTF-8 text file from the repository, returning numbered lines (1-based, inclusive range).",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Repository-relative path of the file to read." },
+        start: { type: "integer", description: "First line to include (1-based). Defaults to 1." },
+        end: { type: "integer", description: "Last line to include (1-based, inclusive). Defaults to end of file." },
+        repo: { type: "string", description: 'Repository alias; omit or use "self" for the reviewed repository.' }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "list_dir",
+    description: "List a directory shallowly (name, type, size), directories first then files.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Repository-relative directory path. Defaults to the repository root." },
+        repo: { type: "string", description: 'Repository alias; omit or use "self" for the reviewed repository.' }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "grep",
+    description: "Search file contents with a JavaScript regular expression, returning matching lines.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "JavaScript regular expression (no flags)." },
+        path: { type: "string", description: "Repository-relative path to search under. Defaults to the repository root." },
+        glob: { type: "string", description: 'Glob filter for file paths, e.g. "src/**/*.ts".' },
+        max_results: { type: "integer", description: "Maximum number of matches to return (capped at 100)." },
+        repo: { type: "string", description: 'Repository alias; omit or use "self" for the reviewed repository.' }
+      },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "glob",
+    description: "List repository-relative paths matching a glob pattern.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: 'Glob pattern, e.g. "src/**/*.ts".' },
+        repo: { type: "string", description: 'Repository alias; omit or use "self" for the reviewed repository.' }
+      },
+      required: ["pattern"]
+    }
+  }
+];
+async function executeTool(name, args, ctx) {
+  const a = args && typeof args === "object" ? args : {};
+  try {
+    switch (name) {
+      case "read_file":
+        return await readFile(a, ctx);
+      case "list_dir":
+        return await listDir(a, ctx);
+      case "grep":
+        return await grep(a, ctx);
+      case "glob":
+        return await glob(a, ctx);
+      default:
+        return errorResult(`unknown tool: ${name}`);
+    }
+  } catch (e) {
+    return errorResult(e instanceof Error ? e.message : String(e));
+  }
+}
+
 // lib/src/github.js
 var ReadonlyTokenError = class extends Error {
   status;
@@ -24878,6 +25375,15 @@ function positiveInt(v) {
 }
 function repoOf() {
   return context2.repo;
+}
+async function getRepoSize(octokit, owner, repo) {
+  try {
+    const r = await octokit.rest.repos.get({ owner, repo });
+    const size = r.data.size;
+    return typeof size === "number" ? size : void 0;
+  } catch {
+    return void 0;
+  }
 }
 function foldComments(body, comments) {
   if (comments.length === 0)
@@ -25097,6 +25603,157 @@ function readOptionalInt(name, min) {
   if (raw === "")
     return null;
   return parseIntValue(name, raw, min);
+}
+
+// lib/src/linked-repos.js
+import { execFile as execFile2 } from "node:child_process";
+import { existsSync as existsSync4, mkdirSync, readdirSync as readdirSync3, renameSync, rmSync, statSync as statSync3 } from "node:fs";
+import { join as join4 } from "node:path";
+var CLONE_TIMEOUT_MS = 6e4;
+function defaultRun(cmd, args, o) {
+  return new Promise((resolve2) => {
+    execFile2(cmd, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs }, (err, stdout, stderr) => {
+      if (!err) {
+        resolve2({ code: 0, stdout, stderr });
+        return;
+      }
+      const e = err;
+      resolve2({
+        code: typeof e.code === "number" ? e.code : null,
+        stdout: typeof e.stdout === "string" ? e.stdout : String(e.stdout ?? ""),
+        stderr: typeof e.stderr === "string" ? e.stderr : String(e.stderr ?? "")
+      });
+    });
+  });
+}
+function cleanAlias(owner, repo) {
+  const trimmedRepo = repo.replace(/[.,;:!?)\]'"]+$/, "").replace(/\.git$/i, "").replace(/[.,;:!?)\]'"]+$/, "");
+  if (!/[A-Za-z0-9]/.test(owner) || !/[A-Za-z0-9]/.test(trimmedRepo))
+    return null;
+  if (trimmedRepo.length === 0)
+    return null;
+  return `${owner}/${trimmedRepo}`;
+}
+function parseLinkedRepos(prBody, selfFullName, cap = 3) {
+  const urlRe = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
+  const bareRe = /(?<![/.\w])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:#\d+)?(?![/.\w])/g;
+  const text = prBody.replace(/```[\s\S]*?```/g, "");
+  const self = selfFullName.toLowerCase();
+  const seen = /* @__PURE__ */ new Set();
+  const urls = [];
+  const bares = [];
+  const push = (list, alias) => {
+    const key = alias.toLowerCase();
+    if (key === self || seen.has(key))
+      return;
+    seen.add(key);
+    list.push(alias);
+  };
+  let m;
+  while ((m = urlRe.exec(text)) !== null) {
+    const alias = cleanAlias(m[1], m[2]);
+    if (alias)
+      push(urls, alias);
+  }
+  while ((m = bareRe.exec(text)) !== null) {
+    const alias = cleanAlias(m[1], m[2]);
+    if (alias)
+      push(bares, alias);
+  }
+  return [...urls, ...bares].slice(0, cap);
+}
+function redactToken(s, token) {
+  if (token === "")
+    return s;
+  const b64 = Buffer.from("x-access-token:" + token, "utf8").toString("base64");
+  return s.split(token).join("[redacted]").split(b64).join("[redacted]");
+}
+function dirBytes(root) {
+  let total = 0;
+  const stack = [root];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync3(cur, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of entries) {
+      if (d.isSymbolicLink())
+        continue;
+      const p = join4(cur, d.name);
+      if (d.isDirectory()) {
+        stack.push(p);
+      } else if (d.isFile()) {
+        try {
+          total += statSync3(p).size;
+        } catch {
+        }
+      }
+    }
+  }
+  return total;
+}
+function removeDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    try {
+      renameSync(dir, `${dir}.broken-${Date.now()}`);
+    } catch {
+    }
+  }
+}
+async function ensureLinkedRepo(alias, o) {
+  const dir = join4(o.baseDir, alias.split("/").join("__"));
+  if (existsSync4(dir))
+    return { dir };
+  const deps = o.deps ?? { run: defaultRun, ...o.sizeKb !== void 0 ? { sizeKb: o.sizeKb } : {} };
+  if (o.maxBytes !== void 0 && deps.sizeKb) {
+    let kb;
+    try {
+      kb = await deps.sizeKb(alias);
+    } catch {
+      kb = void 0;
+    }
+    if (kb !== void 0 && kb > o.maxBytes / 1024) {
+      return { error: "repository too large" };
+    }
+  }
+  mkdirSync(o.baseDir, { recursive: true });
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  if (o.token !== "") {
+    env.GIT_CONFIG_COUNT = "1";
+    env.GIT_CONFIG_KEY_0 = "http.extraHeader";
+    env.GIT_CONFIG_VALUE_0 = "Authorization: Basic " + Buffer.from("x-access-token:" + o.token, "utf8").toString("base64");
+  }
+  const args = ["clone", "--depth", "1", "--single-branch", `https://github.com/${alias}.git`, dir];
+  let result;
+  try {
+    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: o.timeoutMs ?? CLONE_TIMEOUT_MS });
+  } catch (e) {
+    result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+  }
+  if (result.code !== 0) {
+    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
+    removeDir(dir);
+    return { error: `repository not accessible: ${alias}: ${detail}` };
+  }
+  if (o.maxBytes !== void 0) {
+    let total;
+    try {
+      total = dirBytes(dir);
+    } catch {
+      removeDir(dir);
+      return { error: `repository not accessible: ${alias}: could not measure checkout size` };
+    }
+    if (total > o.maxBytes) {
+      removeDir(dir);
+      return { error: "repository too large" };
+    }
+  }
+  return { dir };
 }
 
 // lib/src/prompt.js
@@ -25562,6 +26219,59 @@ async function callGoogle(ep, modelId, messages, o) {
   }
   return { ok: true, findings };
 }
+async function callGoogleTurn(ep, modelId, conv, o, flags) {
+  const key = o.apiKey;
+  if (key === "")
+    return { ok: false, result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+  try {
+    validateSampling({ model: modelId, temperature: o.temperature, topP: o.topP, provider: "google" });
+  } catch (e) {
+    return { ok: false, result: { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) } };
+  }
+  const gFlags = { allowTools: flags.allowTools, allowFormat: flags.allowFormat };
+  let payload = JSON.stringify(buildGoogleBody(conv, modelId, o, gFlags));
+  const headers = {
+    ...ep.headers,
+    "x-goog-api-key": key
+  };
+  for (const k of Object.keys(headers)) {
+    if (/^authorization$/i.test(k))
+      delete headers[k];
+  }
+  const authEp = { baseUrl: ep.baseUrl, path: ep.path, headers, apiStyle: ep.apiStyle };
+  let a = await attempt(authEp, payload, o);
+  if (a.kind === "fail")
+    return { ok: false, result: a.result };
+  if (!a.ok && a.status === 400 && gFlags.allowFormat) {
+    payload = JSON.stringify(buildGoogleBody(conv, modelId, o, { ...gFlags, allowFormat: false }));
+    a = await attempt(authEp, payload, o);
+    if (a.kind === "fail")
+      return { ok: false, result: a.result };
+  }
+  if (a.status === 429 || a.status >= 500) {
+    await sleep(retryDelayMs(a.retryAfter));
+    a = await attempt(authEp, payload, o);
+    if (a.kind === "fail")
+      return { ok: false, result: a.result };
+  }
+  if (!a.ok) {
+    const snippet = redact(a.text, key).slice(0, SNIPPET_CHARS);
+    return {
+      ok: false,
+      result: { ok: false, reason: "http-error", detail: `HTTP ${a.status}${snippet ? `: ${snippet}` : ""}`, status: a.status }
+    };
+  }
+  let json;
+  try {
+    json = JSON.parse(a.text);
+  } catch {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response body is not JSON" } };
+  }
+  const reply = parseGoogleReply(json, gFlags);
+  if (!reply.ok)
+    return { ok: false, result: reply.result };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+}
 
 // lib/src/adapters/messages.js
 function joinContentText(json) {
@@ -25718,6 +26428,54 @@ async function callMessages(ep, messages, o) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
   return { ok: true, findings };
+}
+async function callMessagesTurn(ep, conv, o, flags) {
+  const key = o.apiKey;
+  if (key === "")
+    return { ok: false, result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+  try {
+    validateSampling({ model: o.model, temperature: o.temperature, topP: o.topP, provider: "anthropic" });
+  } catch (e) {
+    return { ok: false, result: { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) } };
+  }
+  const mFlags = { allowTools: flags.allowTools, allowFormat: flags.allowFormat };
+  const payload = JSON.stringify(buildMessagesBody(conv, o, mFlags));
+  const headers = {
+    ...ep.headers,
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01"
+  };
+  for (const k of Object.keys(headers)) {
+    if (/^authorization$/i.test(k))
+      delete headers[k];
+  }
+  const authEp = { baseUrl: ep.baseUrl, path: ep.path, headers, apiStyle: ep.apiStyle };
+  let a = await attempt(authEp, payload, o);
+  if (a.kind === "fail")
+    return { ok: false, result: a.result };
+  if (a.status === 429 || a.status >= 500) {
+    await sleep(retryDelayMs(a.retryAfter));
+    a = await attempt(authEp, payload, o);
+    if (a.kind === "fail")
+      return { ok: false, result: a.result };
+  }
+  if (!a.ok) {
+    const snippet = redact(a.text, key).slice(0, SNIPPET_CHARS);
+    return {
+      ok: false,
+      result: { ok: false, reason: "http-error", detail: `HTTP ${a.status}${snippet ? `: ${snippet}` : ""}`, status: a.status }
+    };
+  }
+  let json;
+  try {
+    json = JSON.parse(a.text);
+  } catch {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response body is not JSON" } };
+  }
+  const reply = parseMessagesReply(json, mFlags);
+  if (!reply.ok)
+    return { ok: false, result: reply.result };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
 }
 
 // lib/src/adapters/responses.js
@@ -25886,33 +26644,245 @@ async function callResponses(ep, messages, o) {
   }
   return { ok: true, findings };
 }
+async function callResponsesTurn(ep, conv, o, flags) {
+  const key = o.apiKey;
+  if (key === "")
+    return { ok: false, result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+  try {
+    validateSampling({ model: o.model, temperature: o.temperature, topP: o.topP, provider: "openai" });
+  } catch (e) {
+    return { ok: false, result: { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) } };
+  }
+  const rFlags = { allowTools: flags.allowTools, allowFormat: flags.allowFormat };
+  let payload = JSON.stringify(buildResponsesBody(conv, o, rFlags));
+  let a = await attempt(ep, payload, o);
+  if (a.kind === "fail")
+    return { ok: false, result: a.result };
+  if (!a.ok && a.status === 400 && rFlags.allowFormat) {
+    payload = JSON.stringify(buildResponsesBody(conv, o, { ...rFlags, allowFormat: false }));
+    a = await attempt(ep, payload, o);
+    if (a.kind === "fail")
+      return { ok: false, result: a.result };
+  }
+  if (a.status === 429 || a.status >= 500) {
+    await sleep(retryDelayMs(a.retryAfter));
+    a = await attempt(ep, payload, o);
+    if (a.kind === "fail")
+      return { ok: false, result: a.result };
+  }
+  if (!a.ok) {
+    const snippet = redact(a.text, key).slice(0, SNIPPET_CHARS);
+    return {
+      ok: false,
+      result: { ok: false, reason: "http-error", detail: `HTTP ${a.status}${snippet ? `: ${snippet}` : ""}`, status: a.status }
+    };
+  }
+  let json;
+  try {
+    json = JSON.parse(a.text);
+  } catch {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response body is not JSON" } };
+  }
+  const reply = parseResponsesReply(json, rFlags);
+  if (!reply.ok)
+    return { ok: false, result: reply.result };
+  return {
+    ok: true,
+    text: reply.text ?? "",
+    toolCalls: reply.toolCalls,
+    ...reply.rawItems.length > 0 ? { rawItems: reply.rawItems } : {}
+  };
+}
 
-// lib/src/agent-tools.js
-var GREP_MAX_FILE_BYTES = 1024 * 1024;
-var GREP_WORKER_SRC = [
-  'const { parentPort, workerData } = require("node:worker_threads");',
-  'const { readFileSync } = require("node:fs");',
-  "const { pattern, files, limit } = workerData;",
-  "const re = new RegExp(pattern);",
-  "const matches = [];",
-  "let filesScanned = 0;",
-  "let hitLimit = false;",
-  "for (const f of files) {",
-  "  filesScanned++;",
-  "  let content;",
-  '  try { content = readFileSync(f.abs, "utf8"); } catch { continue; }',
-  '  const lines = content.split("\\n");',
-  "  for (let i = 0; i < lines.length; i++) {",
-  "    if (re.test(lines[i])) {",
-  "      if (matches.length >= limit) { hitLimit = true; break; }",
-  "      const t = lines[i].trim();",
-  "      matches.push({ file: f.rel, line: i + 1, text: t });",
-  "    }",
-  "  }",
-  "  if (hitLimit) break;",
-  "}",
-  "parentPort.postMessage({ matches, filesScanned, hitLimit });"
-].join("\n");
+// lib/src/agent.js
+var BUDGET_NOTE = "Tool budget exhausted. Respond with ONLY the JSON findings object matching the schema.";
+var REPAIR_NOTE = "Your previous message was not valid JSON. Respond with ONLY the JSON findings object matching the schema; no prose.";
+var TIMEOUT_DETAIL = "agent budget exhausted";
+var NO_TOOLS = { allowTools: false, allowFormat: true };
+var WITH_TOOLS = { allowTools: true, allowFormat: false };
+function statusOf2(result) {
+  return !result.ok && result.reason === "http-error" ? result.status : void 0;
+}
+function tryParseFinal(text) {
+  let parsed;
+  try {
+    parsed = parseContent(text);
+  } catch (e) {
+    return { ok: false, reason: "invalid-json", detail: e instanceof Error ? e.message : String(e) };
+  }
+  const findings = toFindings(parsed);
+  if (findings === void 0) {
+    return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
+  }
+  return { ok: true, findings };
+}
+function capOutput(output, maxResultBytes) {
+  if (Buffer.byteLength(output, "utf8") <= maxResultBytes)
+    return output;
+  let lo = 0;
+  let hi = output.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(output.slice(0, mid), "utf8") <= maxResultBytes)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  let cut = lo;
+  if (cut > 0 && cut < output.length) {
+    const code = output.charCodeAt(cut);
+    if (code >= 56320 && code <= 57343)
+      cut -= 1;
+  }
+  return output.slice(0, cut) + "[truncated]";
+}
+async function runAgent(conv, toolCtx, budget, hooks) {
+  const clock = hooks.clock ?? Date.now;
+  const start = clock();
+  const deadline = start + budget.maxSeconds * 1e3;
+  const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
+  const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
+  const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
+  const turnsArr = conv.turns ?? (conv.turns = []);
+  let turns = 0;
+  let calls = 0;
+  let bytes = 0;
+  let toolsUnsupported = false;
+  const elapsedMs = () => clock() - start;
+  const finish = (result, stop, probeAdvance) => {
+    const ms = elapsedMs();
+    hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1e3}s`);
+    return { result, stop, probeAdvance, toolsUnsupported, turns, calls, bytes, elapsedMs: ms };
+  };
+  const timeoutFor = (remaining) => Math.min(budget.timeoutSeconds, Math.ceil(remaining / 1e3));
+  const timedOut = () => {
+    if (deadline - clock() < 1e4) {
+      return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
+    }
+    return null;
+  };
+  const appendAssistant = (reply) => {
+    turnsArr.push({
+      role: "assistant",
+      text: reply.text,
+      toolCalls: reply.toolCalls,
+      ...reply.rawItems !== void 0 ? { rawItems: reply.rawItems } : {}
+    });
+  };
+  for (; ; ) {
+    const expired = timedOut();
+    if (expired)
+      return expired;
+    const remaining = deadline - clock();
+    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes;
+    const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
+    if (forced)
+      turnsArr.push({ role: "user", text: BUDGET_NOTE });
+    const turnStart = clock();
+    const turnIndex = turns;
+    const reply = await hooks.call(conv, flags, { timeoutSeconds: timeoutFor(remaining) });
+    if (!reply.ok) {
+      const status = statusOf2(reply.result);
+      if (turns === 0 && !forced) {
+        if (status === 400) {
+          const retryExpired = timedOut();
+          if (retryExpired)
+            return retryExpired;
+          const retry = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+          if (!retry.ok) {
+            const s2 = statusOf2(retry.result);
+            toolsUnsupported = true;
+            return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
+          }
+          const parsed = tryParseFinal(retry.text);
+          appendAssistant(retry);
+          if (parsed.ok) {
+            turns += 1;
+            toolsUnsupported = true;
+            return finish(parsed, "fallback", false);
+          }
+          turnsArr.push({ role: "user", text: REPAIR_NOTE });
+          const repairExpired = timedOut();
+          if (repairExpired)
+            return repairExpired;
+          const fixed = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+          if (!fixed.ok) {
+            toolsUnsupported = true;
+            return finish(fixed.result, "error", false);
+          }
+          turns += 2;
+          appendAssistant(fixed);
+          const p2 = tryParseFinal(fixed.text);
+          toolsUnsupported = true;
+          if (p2.ok)
+            return finish(p2, "fallback", false);
+          return finish(p2, "error", false);
+        }
+        if (status === 404)
+          return finish(reply.result, "error", true);
+        return finish(reply.result, "error", false);
+      }
+      return finish(reply.result, "error", false);
+    }
+    if (forced) {
+      appendAssistant(reply);
+      turns += 1;
+      hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+      const parsed = tryParseFinal(reply.text);
+      if (parsed.ok)
+        return finish(parsed, "budget", false);
+      return finish(parsed, "error", false);
+    }
+    if (reply.toolCalls.length === 0) {
+      appendAssistant(reply);
+      turns += 1;
+      const parsed = tryParseFinal(reply.text);
+      if (parsed.ok) {
+        hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+        return finish(parsed, "final", false);
+      }
+      hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+      turnsArr.push({ role: "user", text: REPAIR_NOTE });
+      const repairExpired = timedOut();
+      if (repairExpired)
+        return repairExpired;
+      const repairStart = clock();
+      const fixed = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+      if (!fixed.ok)
+        return finish(fixed.result, "error", false);
+      appendAssistant(fixed);
+      turns += 1;
+      const p2 = tryParseFinal(fixed.text);
+      hooks.log(`agent turn ${turnIndex + 1}: tools=[] results_bytes=0 ms=${clock() - repairStart}`);
+      if (p2.ok)
+        return finish(p2, "final", false);
+      return finish(p2, "error", false);
+    }
+    appendAssistant(reply);
+    turns += 1;
+    let turnBytes = 0;
+    for (let i = 0; i < reply.toolCalls.length; i++) {
+      const call = reply.toolCalls[i];
+      let output;
+      let isError;
+      if (i < maxCalls) {
+        const res = await executeTool(call.name, call.args, toolCtx);
+        output = res.output;
+        isError = res.isError;
+        calls += 1;
+      } else {
+        output = `{"error":"too many tool calls in one turn (max ${maxCalls})"}`;
+        isError = true;
+      }
+      output = capOutput(output, maxResultBytes);
+      const n = Buffer.byteLength(output, "utf8");
+      bytes += n;
+      turnBytes += n;
+      turnsArr.push(isError ? { role: "tool", id: call.id, name: call.name, output, isError: true } : { role: "tool", id: call.id, name: call.name, output });
+    }
+    hooks.log(`agent turn ${turnIndex}: tools=[${reply.toolCalls.map((t) => t.name).join(",")}] results_bytes=${turnBytes} ms=${clock() - turnStart}`);
+  }
+}
 
 // lib/src/llm.js
 var InvalidJsonError = class extends Error {
@@ -26185,6 +27155,45 @@ async function callLlm(ep, messages, o) {
   }
   return { ok: true, findings };
 }
+async function callChatTurn(ep, conv, o, flags) {
+  const key = o.apiKey;
+  if (key === "")
+    return { ok: false, result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+  const anthropic = isAnthropicCompat(o.provider);
+  try {
+    validateSampling({ model: o.model, temperature: o.temperature, topP: o.topP, provider: o.provider });
+  } catch (e) {
+    return { ok: false, result: { ok: false, reason: "unsupported", detail: redact(errMessage(e), key) } };
+  }
+  const chatFlags = { allowTools: flags.allowTools, allowFormat: flags.allowFormat, anthropic };
+  const payload = JSON.stringify(buildChatBody(conv, o, chatFlags));
+  let a = await attempt(ep, payload, o);
+  if (a.kind === "fail")
+    return { ok: false, result: a.result };
+  if (a.status === 429 || a.status >= 500) {
+    await sleep(retryDelayMs(a.retryAfter));
+    a = await attempt(ep, payload, o);
+    if (a.kind === "fail")
+      return { ok: false, result: a.result };
+  }
+  if (!a.ok) {
+    const snippet = redact(a.text, key).slice(0, SNIPPET_CHARS);
+    return {
+      ok: false,
+      result: { ok: false, reason: "http-error", detail: `HTTP ${a.status}${snippet ? `: ${snippet}` : ""}`, status: a.status }
+    };
+  }
+  let json;
+  try {
+    json = JSON.parse(a.text);
+  } catch {
+    return { ok: false, result: { ok: false, reason: "invalid-json", detail: "response body is not JSON" } };
+  }
+  const reply = parseChatReply(json, chatFlags);
+  if (!reply.ok)
+    return { ok: false, result: reply.result };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+}
 var PULL_TIMEOUT_DEFAULT_S = 300;
 async function callByStyle(ep, messages, o) {
   switch (ep.apiStyle) {
@@ -26245,6 +27254,100 @@ async function callWithProbe(provider, model, baseUrl2, key, messages, o, explic
     if (!isProbeTrigger(last))
       return out;
     PROBE_MEMO.delete(memoKey);
+  }
+  warning(`model "${model}": no API style accepted the request; tried ${attempted.join(" \u2192 ")}. Set llm_api_style explicitly to skip the probe.`);
+  const detail = last !== void 0 && !last.ok ? last.detail : "no API style accepted the request";
+  const status = last !== void 0 && !last.ok && last.reason === "http-error" ? last.status : void 0;
+  return {
+    result: {
+      ok: false,
+      reason: "http-error",
+      detail: redact(detail, key),
+      ...status !== void 0 ? { status } : {}
+    },
+    via: attempted.at(-1)
+  };
+}
+var TOOLS_MEMO = /* @__PURE__ */ new Map();
+async function callTurnByStyle(ep, conv, o, flags) {
+  switch (ep.apiStyle) {
+    case "openai-responses":
+      return callResponsesTurn(ep, conv, o, flags);
+    case "anthropic-messages":
+      return callMessagesTurn(ep, conv, o, flags);
+    case "google-models":
+      return callGoogleTurn(ep, o.model, conv, o, flags);
+    case "openai-chat":
+      return callChatTurn(ep, conv, o, flags);
+    default:
+      throw new Error("unsupported apiStyle: " + String(ep.apiStyle));
+  }
+}
+function agentCallFor(ep, o) {
+  return (c, flags, callOpts) => callTurnByStyle(ep, c, {
+    model: o.model,
+    apiKey: o.apiKey,
+    temperature: o.temperature,
+    topP: o.topP,
+    maxTokens: o.maxTokens,
+    timeoutSeconds: callOpts.timeoutSeconds,
+    provider: o.provider
+  }, flags);
+}
+async function callByStyleAgent(ep, conv, o, toolCtx) {
+  const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds }, { call: agentCallFor(ep, o), log: info });
+  return outcome.result;
+}
+async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolCtx, explicitStyle) {
+  if (key === "") {
+    return { result: { ok: false, reason: "no-key", detail: "no API key configured" } };
+  }
+  const memoKey = `${provider}:${model}`;
+  if (TOOLS_MEMO.get(memoKey) === false) {
+    info("agent tools unsupported for this model: using single-shot");
+    return callWithProbe(provider, model, baseUrl2, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+  }
+  const agentOpts = {
+    model,
+    apiKey: key,
+    temperature: o.temperature,
+    topP: o.topP,
+    maxTokens: o.maxTokens,
+    timeoutSeconds: o.timeoutSeconds,
+    provider,
+    maxTurns: o.maxTurns,
+    maxSeconds: o.maxSeconds
+  };
+  const runStyle = async (style) => {
+    const ep = buildEndpointForStyle(provider, model, baseUrl2, key, style, o.prNumber ?? null, o.userBase ?? false);
+    const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds }, { call: agentCallFor(ep, agentOpts), log: info });
+    return { outcome, via: style };
+  };
+  if (explicitStyle !== void 0 && explicitStyle !== "auto") {
+    const { outcome } = await runStyle(explicitStyle);
+    return { result: outcome.result, via: explicitStyle };
+  }
+  const memoized = PROBE_MEMO.get(memoKey);
+  const order = memoized !== void 0 ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
+  const attempted = [];
+  let last;
+  for (const style of order) {
+    attempted.push(style);
+    const { outcome } = await runStyle(style);
+    last = outcome.result;
+    if (outcome.probeAdvance) {
+      PROBE_MEMO.delete(memoKey);
+      continue;
+    }
+    if (outcome.toolsUnsupported) {
+      TOOLS_MEMO.set(memoKey, false);
+      return { result: outcome.result, via: style };
+    }
+    if (outcome.result.ok) {
+      PROBE_MEMO.set(memoKey, style);
+      return { result: outcome.result, via: style };
+    }
+    return { result: outcome.result, via: style };
   }
   warning(`model "${model}": no API style accepted the request; tried ${attempted.join(" \u2192 ")}. Set llm_api_style explicitly to skip the probe.`);
   const detail = last !== void 0 && !last.ok ? last.detail : "no API style accepted the request";
@@ -26390,6 +27493,22 @@ function exitFor(failLevel, findings) {
   return findings.some((f) => f.severity === "high") ? 1 : 0;
 }
 var FALLBACK_SUMMARY = "pr-reviewer: review complete.";
+function redactFindings(findings, secrets) {
+  const keys = secrets.filter((s) => s !== "");
+  return findings.map((f) => {
+    let out = f;
+    for (const key of keys) {
+      out = {
+        ...out,
+        message: redact(out.message, key),
+        file: redact(out.file, key),
+        rule: redact(out.rule, key),
+        ...out.suggestion !== void 0 ? { suggestion: redact(out.suggestion, key) } : {}
+      };
+    }
+    return out;
+  });
+}
 function locate(f) {
   if (f.file === "")
     return "(repository)";
@@ -26414,9 +27533,9 @@ ${items.join("\n")}`;
 
 // lib/src/scanners.js
 import os5 from "node:os";
-import { execFile as execFile2 } from "node:child_process";
-import { mkdtemp, readFile, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join3, resolve as resolvePath } from "node:path";
+import { execFile as execFile3 } from "node:child_process";
+import { mkdtemp, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join5, resolve as resolvePath } from "node:path";
 var TRIVY_IMAGE = "ghcr.io/aquasecurity/trivy:0.75.0";
 var TRIVY_DIGEST = "sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa";
 var OSV_IMAGE = "ghcr.io/google/osv-scanner:v2.6.0";
@@ -26522,16 +27641,16 @@ function parseSarif(text) {
 }
 var TOOL_TIMEOUT_MS = 6e5;
 function runExec(file, args, cwd, env, timeoutMs = TOOL_TIMEOUT_MS) {
-  return new Promise((resolve) => {
-    execFile2(file, args, { cwd, env: { ...process.env, ...env }, maxBuffer: MAX_BUFFER2, timeout: timeoutMs }, (err, stdout) => {
+  return new Promise((resolve2) => {
+    execFile3(file, args, { cwd, env: { ...process.env, ...env }, maxBuffer: MAX_BUFFER2, timeout: timeoutMs }, (err, stdout) => {
       if (!err)
-        return resolve({ missing: false, code: 0, stdout: String(stdout), timedOut: false });
+        return resolve2({ missing: false, code: 0, stdout: String(stdout), timedOut: false });
       const e = err;
       if (e.code === "ENOENT")
-        return resolve({ missing: true, code: null, stdout: "", timedOut: false });
+        return resolve2({ missing: true, code: null, stdout: "", timedOut: false });
       const timedOut = e.killed === true;
       const code = typeof e.code === "number" ? e.code : null;
-      resolve({ missing: false, code, stdout: stdout ? String(stdout) : "", timedOut });
+      resolve2({ missing: false, code, stdout: stdout ? String(stdout) : "", timedOut });
     });
   });
 }
@@ -26577,8 +27696,8 @@ async function runScanners(o) {
     } else {
       let sbomDir;
       try {
-        sbomDir = await mkdtemp(join3(o.outDir ?? os5.tmpdir(), "sbom-"));
-        const out = join3(sbomDir, "sbom.cdx.json");
+        sbomDir = await mkdtemp(join5(o.outDir ?? os5.tmpdir(), "sbom-"));
+        const out = join5(sbomDir, "sbom.cdx.json");
         await writeFile2(out, sb.stdout, "utf8");
         sbomPath = out;
       } catch (e) {
@@ -26601,11 +27720,11 @@ function isCycloneDx(text) {
 async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS) {
   let reportDir;
   try {
-    reportDir = await mkdtemp(join3(os5.tmpdir(), "gitleaks-"));
+    reportDir = await mkdtemp(join5(os5.tmpdir(), "gitleaks-"));
   } catch (e) {
     return [warning2("scanner-failed", `gitleaks temp dir unavailable: ${e.message}`)];
   }
-  const hostReport = join3(reportDir, "report.sarif");
+  const hostReport = join5(reportDir, "report.sarif");
   try {
     const gl = await runExec("docker", dockerArgs(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), [
       `${reportDir}:/out`
@@ -26616,7 +27735,7 @@ async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS) {
       return [warning2("scanner-failed", `gitleaks timed out after ${timeoutMs / 1e3}s`)];
     let text;
     try {
-      text = await readFile(hostReport, "utf8");
+      text = await readFile2(hostReport, "utf8");
     } catch {
       text = void 0;
     }
@@ -26709,16 +27828,16 @@ function requireSha(name, value) {
     throw new Error(`pr-reviewer: ${name} must be a 40-character lowercase commit SHA`);
 }
 function readDiff(dir) {
-  const path = join4(dir, "diff.patch");
-  if (!existsSync4(path))
+  const path = join6(dir, "diff.patch");
+  if (!existsSync5(path))
     throw new Error(`pr-reviewer: diff.patch not found in ${dir}`);
-  return readFileSync4(path, "utf8");
+  return readFileSync5(path, "utf8");
 }
 function sizeOf(workDir, file) {
   if (workDir === void 0)
     return 0;
   try {
-    return statSync2(join4(workDir, file)).size;
+    return statSync4(join6(workDir, file)).size;
   } catch {
     return 0;
   }
@@ -26792,12 +27911,12 @@ function isFinding(v) {
   return typeof f.severity === "string" && SEVERITIES2.has(f.severity) && typeof f.file === "string" && typeof f.rule === "string" && typeof f.message === "string" && (f.line === void 0 || typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1) && (f.suggestion === void 0 || typeof f.suggestion === "string");
 }
 function readFindings(dir) {
-  const path = join4(dir, "findings.json");
-  if (!existsSync4(path))
+  const path = join6(dir, "findings.json");
+  if (!existsSync5(path))
     throw new Error(`pr-reviewer: findings.json not found in ${dir}`);
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync4(path, "utf8"));
+    parsed = JSON.parse(readFileSync5(path, "utf8"));
   } catch {
     throw new Error("pr-reviewer: findings.json is malformed JSON");
   }
@@ -26807,7 +27926,7 @@ function readFindings(dir) {
   return parsed;
 }
 function writeFindings(dir, findings) {
-  writeFileSync2(join4(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
+  writeFileSync2(join6(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
 }
 function capText(s, cap) {
   const cps = Array.from(s);
@@ -26936,6 +28055,34 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped) {
     // a preset-derived base rebuilt during the probe must stay silent.
     userBase: i.llmBaseUrl !== ""
   };
+  if (i.llmAgent) {
+    const selfRepo = String(env.payload.repository?.full_name ?? "");
+    const linked = parseLinkedRepos((await deps.gh.getPr(pr)).body, selfRepo);
+    const toolCtx = {
+      roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
+      ensureLinked: async (alias) => {
+        const r = await ensureLinkedRepo(alias, {
+          token: i.githubToken,
+          baseDir: join6(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
+          sizeKb: async (a) => {
+            const [o, n] = a.split("/");
+            return deps.gh.getRepoSize(o, n);
+          }
+        });
+        if ("dir" in r)
+          toolCtx.roots.linked.set(alias, r.dir);
+        return r;
+      }
+    };
+    const conv = { ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }), tools: [...TOOL_DEFS] };
+    const agentOpts = { ...llmOpts, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
+    const res2 = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbeAgent(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, conv, agentOpts, toolCtx) : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
+    if (!res2.ok) {
+      warning(`slow path failed (${res2.reason}): ${res2.detail}`);
+      return void 0;
+    }
+    return res2.findings;
+  }
   const res = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts) : await deps.analysis.callByStyle(ep, messages, llmOpts);
   if (!res.ok) {
     warning(`slow path failed (${res.reason}): ${res.detail}`);
@@ -26944,7 +28091,7 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped) {
   return res.findings;
 }
 async function publishReview(a) {
-  const findings = a.findings;
+  const findings = redactFindings(a.findings, [a.env.inputs.githubToken, a.env.inputs.llmApiKey].filter((s) => s !== ""));
   const { inline, general } = mapToComments(findings, parseHunks(a.hunks));
   const body = buildBody(general, summaryFor(findings));
   const payload = {
@@ -27063,11 +28210,11 @@ async function runFlowA(env, deps, out) {
   });
   if (scan.sbomPath !== void 0) {
     try {
-      copyFileSync(scan.sbomPath, join4(env.artifactDir, "sbom.cdx.json"));
+      copyFileSync(scan.sbomPath, join6(env.artifactDir, "sbom.cdx.json"));
     } catch (e) {
       warning(`sbom not copied to the artifact: ${e.message}`);
     } finally {
-      rmSync(dirname(scan.sbomPath), { recursive: true, force: true });
+      rmSync2(dirname2(scan.sbomPath), { recursive: true, force: true });
     }
   }
   const fast = [...l0, ...scan.findings, ...l2];
@@ -27088,7 +28235,7 @@ async function runFlowA(env, deps, out) {
   out.findingsFrom = llm === void 0 ? "fastpath" : "llm";
   const all = [...fast, ...llm ?? []].map(sanitizeFinding);
   writeFindings(env.artifactDir, all);
-  writeFileSync2(join4(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(all), null, 2) + "\n", "utf8");
+  writeFileSync2(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(all), null, 2) + "\n", "utf8");
   await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
   out.exitCode = exitFor(env.inputs.failLevel, all);
 }
@@ -27172,6 +28319,7 @@ function realGateway(token) {
       const r = await octokit().rest.issues.get({ owner, repo, issue_number: issue2 });
       return r.data.body ?? "";
     },
+    getRepoSize: (owner, repo) => getRepoSize(octokit(), owner, repo),
     createReview: (pr, payload, opts) => postReview(octokit(), pr, payload, { canWrite: opts.canWrite }).then(() => void 0),
     createIssueComment: (pr, body, opts) => postIssueFallback(octokit(), { pr, body, ...opts })
   };
@@ -27191,19 +28339,30 @@ function realAnalysis() {
       if (via !== void 0)
         info(`llm api style: ${via}`);
       return result;
+    },
+    callByStyleAgent: async (ep, conv, o, toolCtx) => {
+      const result = await callByStyleAgent(ep, conv, o, toolCtx);
+      info(`llm api style: ${ep.apiStyle}`);
+      return result;
+    },
+    callWithProbeAgent: async (provider, model, baseUrl2, apiKey, conv, o, toolCtx) => {
+      const { result, via } = await callWithProbeAgent(provider, model, baseUrl2, apiKey, conv, o, toolCtx);
+      if (via !== void 0)
+        info(`llm api style: ${via}`);
+      return result;
     }
   };
 }
 function readRunEnv() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync4(eventPath, "utf8")) : {};
+  const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync5(eventPath, "utf8")) : {};
   const inputs = getInputs();
   return {
     eventName: process.env.GITHUB_EVENT_NAME ?? "",
     payload,
     inputs,
     workDir: process.env.GITHUB_WORKSPACE ?? process.cwd(),
-    artifactDir: process.env.PR_REVIEWER_ARTIFACT_DIR ?? join4(process.env.RUNNER_TEMP ?? tmpdir(), "pr-reviewer-out"),
+    artifactDir: process.env.PR_REVIEWER_ARTIFACT_DIR ?? join6(process.env.RUNNER_TEMP ?? tmpdir(), "pr-reviewer-out"),
     baseSha: process.env.PR_REVIEWER_BASE_SHA ?? "",
     headSha: process.env.PR_REVIEWER_HEAD_SHA ?? "",
     tokenIsApp: process.env.PR_REVIEWER_TOKEN_TYPE === "app",

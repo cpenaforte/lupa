@@ -1,6 +1,7 @@
 import type { Finding } from "./fastpath.js";
 import type { FailLevel } from "./inputs.js";
 import type { HunkLine, ParsedHunk } from "./diff.js";
+import { redact } from "./llm.js";
 
 export interface InlineComment {
   path: string;
@@ -124,6 +125,28 @@ export function exitFor(failLevel: FailLevel, findings: Finding[]): number {
 }
 
 const FALLBACK_SUMMARY = "pr-reviewer: review complete.";
+
+/**
+ * Replaces every non-empty secret in `message`, `suggestion`, `file` and
+ * `rule` with the redaction marker. Empty secrets are skipped: redacting
+ * with an empty key would interleave markers between every character.
+ */
+export function redactFindings(findings: Finding[], secrets: readonly string[]): Finding[] {
+  const keys = secrets.filter((s) => s !== "");
+  return findings.map((f) => {
+    let out = f;
+    for (const key of keys) {
+      out = {
+        ...out,
+        message: redact(out.message, key),
+        file: redact(out.file, key),
+        rule: redact(out.rule, key),
+        ...(out.suggestion !== undefined ? { suggestion: redact(out.suggestion, key) } : {}),
+      };
+    }
+    return out;
+  });
+}
 
 /** `file:line`, `file` when there is no line, `(repository)` for repo-level findings. */
 function locate(f: Finding): string {

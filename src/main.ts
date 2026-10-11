@@ -17,12 +17,28 @@ import {
 } from "./diff.js";
 import { runL0, type Finding } from "./fastpath.js";
 import { runL2 } from "./l2.js";
-import { postIssueFallback, postReview, ReadonlyTokenError, resolvePrNumber, shouldTrigger } from "./github.js";
+import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
+import {
+  getRepoSize as fetchRepoSize,
+  postIssueFallback,
+  postReview,
+  ReadonlyTokenError,
+  resolvePrNumber,
+  shouldTrigger,
+} from "./github.js";
 import { getInputs, type ActionInputs } from "./inputs.js";
-import { callByStyle, callWithProbe, ensureOllama, type LlmResult } from "./llm.js";
+import { ensureLinkedRepo, parseLinkedRepos } from "./linked-repos.js";
+import {
+  callByStyle,
+  callByStyleAgent as runStyleAgent,
+  callWithProbe,
+  callWithProbeAgent as runProbeAgent,
+  ensureOllama,
+  type LlmResult,
+} from "./llm.js";
 import { buildMessages, linkedIssueNumber } from "./prompt.js";
 import { authHeaderFor, resolveEndpoint, validateModelExists, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, eventFor, exitFor, mapToComments, type ReviewPayload } from "./review.js";
+import { buildBody, eventFor, exitFor, mapToComments, redactFindings, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 
 /** Everything the run needs from the environment. Built by readRunEnv() in production. */
@@ -58,6 +74,8 @@ export interface Gateway {
   /** Open PR numbers in the base repository whose head is `headRepo:headRef`. */
   findPrsByHead(headRepo: string, headRef: string): Promise<number[]>;
   getIssueBody(issue: number): Promise<string>;
+  /** Repository size in KB, or undefined when unknown (any API error). */
+  getRepoSize(owner: string, repo: string): Promise<number | undefined>;
   createReview(pr: number, payload: ReviewPayload, opts: { canWrite: boolean }): Promise<void>;
   createIssueComment(pr: number, body: string, opts: { enabled: boolean; issuesWrite: boolean }): Promise<void>;
 }
@@ -78,6 +96,23 @@ export interface Analysis {
     apiKey: string,
     messages: { system: string; user: string },
     o: Parameters<typeof callWithProbe>[5],
+  ): Promise<LlmResult>;
+  /** Agent-mode single call against the endpoint's already-resolved style. */
+  callByStyleAgent(
+    ep: ResolvedEndpoint,
+    conv: Parameters<typeof runStyleAgent>[1],
+    o: Parameters<typeof runStyleAgent>[2],
+    toolCtx: ToolContext,
+  ): Promise<LlmResult>;
+  /** Agent-mode error-driven style routing; the real seam logs the winning style. */
+  callWithProbeAgent(
+    provider: string,
+    model: string,
+    baseUrl: string,
+    apiKey: string,
+    conv: Parameters<typeof runProbeAgent>[4],
+    o: Parameters<typeof runProbeAgent>[5],
+    toolCtx: ToolContext,
   ): Promise<LlmResult>;
 }
 
@@ -512,6 +547,41 @@ async function slowPath(
   // walks the styles and learns from 400/404. An explicit llm_api_style — and
   // any llm_path override, which pins the path the probe would rebuild — is
   // honored as-is through the resolved endpoint, with no probing.
+  if (i.llmAgent) {
+    const selfRepo = String((env.payload.repository as { full_name?: unknown } | undefined)?.full_name ?? "");
+    const linked = parseLinkedRepos((await deps.gh.getPr(pr)).body, selfRepo);
+    const toolCtx: ToolContext = {
+      roots: { self: env.workDir, linked: new Map() },
+      ensureLinked: async (alias) => {
+        const r = await ensureLinkedRepo(alias, {
+          token: i.githubToken,
+          baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
+          sizeKb: async (a) => { const [o, n] = a.split("/"); return deps.gh.getRepoSize(o!, n!); },
+        });
+        if ("dir" in r) toolCtx.roots.linked!.set(alias, r.dir);
+        return r;
+      },
+    };
+    const conv = { ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }), tools: [...TOOL_DEFS] };
+    const agentOpts = { ...llmOpts, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
+    const res: LlmResult =
+      i.llmApiStyle === "auto" && i.llmPath === ""
+        ? await deps.analysis.callWithProbeAgent(
+            i.llmProvider,
+            i.llmModel,
+            ep.baseUrl,
+            i.llmApiKey,
+            conv,
+            agentOpts,
+            toolCtx,
+          )
+        : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
+    if (!res.ok) {
+      core.warning(`slow path failed (${res.reason}): ${res.detail}`);
+      return undefined;
+    }
+    return res.findings;
+  }
   const res: LlmResult =
     i.llmApiStyle === "auto" && i.llmPath === ""
       ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts)
@@ -540,7 +610,7 @@ interface PublishArgs {
  * A failed issue fallback is a warning; it never changes the exit code.
  */
 async function publishReview(a: PublishArgs): Promise<void> {
-  const findings = a.findings;
+  const findings = redactFindings(a.findings, [a.env.inputs.githubToken, a.env.inputs.llmApiKey].filter(s => s !== ""));
   const { inline, general } = mapToComments(findings, parseHunks(a.hunks));
   const body = buildBody(general, summaryFor(findings));
   const payload: ReviewPayload = {
@@ -816,6 +886,7 @@ function realGateway(token: string): Gateway {
       const r = await octokit().rest.issues.get({ owner, repo, issue_number: issue });
       return r.data.body ?? "";
     },
+    getRepoSize: (owner, repo) => fetchRepoSize(octokit(), owner, repo),
     createReview: (pr, payload, opts) =>
       postReview(octokit(), pr, payload, { canWrite: opts.canWrite }).then(() => undefined),
     createIssueComment: (pr, body, opts) => postIssueFallback(octokit(), { pr, body, ...opts }),
@@ -834,6 +905,16 @@ function realAnalysis(): Analysis {
     callByStyle,
     callWithProbe: async (provider, model, baseUrl, apiKey, messages, o) => {
       const { result, via } = await callWithProbe(provider, model, baseUrl, apiKey, messages, o);
+      if (via !== undefined) core.info(`llm api style: ${via}`);
+      return result;
+    },
+    callByStyleAgent: async (ep, conv, o, toolCtx) => {
+      const result = await runStyleAgent(ep, conv, o, toolCtx);
+      core.info(`llm api style: ${ep.apiStyle}`);
+      return result;
+    },
+    callWithProbeAgent: async (provider, model, baseUrl, apiKey, conv, o, toolCtx) => {
+      const { result, via } = await runProbeAgent(provider, model, baseUrl, apiKey, conv, o, toolCtx);
       if (via !== undefined) core.info(`llm api style: ${via}`);
       return result;
     },

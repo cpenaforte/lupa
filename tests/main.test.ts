@@ -14,6 +14,7 @@ import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
 import { ReadonlyTokenError } from "../src/github.js";
 import type { ReviewPayload } from "../src/review.js";
+import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
 
 const SHA_HEAD = "a".repeat(40);
@@ -79,10 +80,18 @@ interface Rec {
   validateAuth?: { header?: string };
   scanEnv?: NodeJS.ProcessEnv;
   l2Env?: NodeJS.ProcessEnv;
+  agentCalled: number;
+  /** Which agent seam served the slow-path LLM call. */
+  agentVia?: "probe" | "style";
+  agentTools?: unknown;
+  agentMaxTurns?: number;
+  agentMaxSeconds?: number;
+  toolOutput?: string;
+  toolError?: boolean;
 }
 
 function newRec(): Rec {
-  return { reviews: [], reviewAttempts: 0, issueComments: [], getPrCalls: 0, llmCalled: 0, ollamaCalled: 0 };
+  return { reviews: [], reviewAttempts: 0, issueComments: [], getPrCalls: 0, llmCalled: 0, ollamaCalled: 0, agentCalled: 0 };
 }
 
 interface GwOpts {
@@ -115,6 +124,7 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
       rec.issueBodyFetched = n;
       return "issue text";
     },
+    getRepoSize: async () => 1024,
     createReview: async (_pr, payload) => {
       rec.reviewAttempts += 1;
       if (o.write403) {
@@ -131,26 +141,30 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
 
 function inputsFor(o: MockOpts): ActionInputs {
   return {
-    githubToken: "t",
+    githubToken: o.githubToken ?? "test-github-token",
     llmProvider: o.llmProvider ?? "openai",
     llmBaseUrl: o.llmBaseUrl ?? "https://llm.example/v1",
     llmApiStyle: o.llmApiStyle ?? "auto",
     llmPath: "",
     llmModel: o.llmModel ?? "gpt-test",
-    llmApiKey: o.llmApiKey ?? "k",
+    llmApiKey: o.llmApiKey ?? "test-llm-key",
     llmMaxTokens: 2000,
     failLevel: o.failLevel ?? "warning",
     maxDiffChars: 60000,
     postComment: o.postComment ?? true,
     timeoutSeconds: 90,
     prNumber: o.prNumber === undefined ? 7 : o.prNumber,
-    llmAgent: false,
+    llmAgent: o.llmAgent ?? false,
     llmAgentMaxTurns: 10,
     llmAgentMaxSeconds: 180,
   };
 }
 
 interface MockOpts {
+  githubToken?: string;
+  llmAgent?: boolean;
+  /** Drive one linked-repo tool call through the agent ToolContext (clone is expected to fail). */
+  agentToolProbe?: boolean;
   llmApiKey?: string;
   prBody?: string;
   forkReadonly?: boolean;
@@ -254,6 +268,27 @@ async function runWithMocks(o: MockOpts = {}) {
               rec.llmVia = "probe";
               return { ok: true, findings: o.llm ?? [LLM_FINDING] };
             },
+      callByStyleAgent: async (_ep, conv, opts) => {
+        rec.agentCalled += 1;
+        rec.agentVia = "style";
+        rec.agentTools = (conv as { tools?: unknown }).tools;
+        rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
+        rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
+        return { ok: true, findings: o.llm ?? [LLM_FINDING] };
+      },
+      callWithProbeAgent: async (_provider, _model, _baseUrl, _key, conv, opts, toolCtx) => {
+        rec.agentCalled += 1;
+        rec.agentVia = "probe";
+        rec.agentTools = (conv as { tools?: unknown }).tools;
+        rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
+        rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
+        if (o.agentToolProbe === true) {
+          const res = await executeTool("read_file", { path: "README.md", repo: "someone/else" }, toolCtx);
+          rec.toolOutput = res.output;
+          rec.toolError = res.isError;
+        }
+        return { ok: true, findings: o.llm ?? [LLM_FINDING] };
+      },
     },
   };
 
@@ -269,6 +304,13 @@ async function runWithMocks(o: MockOpts = {}) {
     body: rec.reviews.at(-1)?.body,
     llmCalled: rec.llmCalled,
     llmVia: rec.llmVia,
+    agentCalled: rec.agentCalled,
+    agentVia: rec.agentVia,
+    agentTools: rec.agentTools,
+    agentMaxTurns: rec.agentMaxTurns,
+    agentMaxSeconds: rec.agentMaxSeconds,
+    toolOutput: rec.toolOutput,
+    toolError: rec.toolError,
     scanEnv: rec.scanEnv,
     l2Env: rec.l2Env,
     artifactDir,
@@ -344,6 +386,8 @@ async function runPrivileged(o: PrivOpts = {}) {
       validateModelExists: spyFail("models"),
       callByStyle: spyFail("llm"),
       callWithProbe: spyFail("llm"),
+      callByStyleAgent: spyFail("llm-agent"),
+      callWithProbeAgent: spyFail("llm-agent"),
     },
   };
   const out = await run(env, deps);
@@ -463,6 +507,12 @@ describe("run() orchestration", () => {
         callWithProbe: () => {
           throw new Error("llm must not run");
         },
+        callByStyleAgent: () => {
+          throw new Error("llm-agent must not run");
+        },
+        callWithProbeAgent: () => {
+          throw new Error("llm-agent must not run");
+        },
       },
     };
     await expect(run(env, deps)).rejects.toThrow(/pr-meta\.json/);
@@ -564,6 +614,53 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
     expect(r.llmCalled).toBe(1);
     expect(r.llmVia).toBe("style");
+  });
+
+  it("llm_agent true routes through callWithProbeAgent with tools and maxTurns/maxSeconds", async () => {
+    const r = await runWithMocks({ llmAgent: true });
+    expect(r.posted).toBe(true);
+    expect(r.agentCalled).toBe(1);
+    expect(r.agentVia).toBe("probe");
+    expect(r.llmCalled).toBe(0);
+    expect(r.agentTools).toEqual(TOOL_DEFS);
+    expect(r.agentMaxTurns).toBe(10);
+    expect(r.agentMaxSeconds).toBe(180);
+  });
+
+  it("llm_agent false does not route through the agent methods (single-shot path unchanged)", async () => {
+    const r = await runWithMocks({});
+    expect(r.agentCalled).toBe(0);
+    expect(r.llmVia).toBe("probe");
+    expect(r.llmCalled).toBe(1);
+    expect(r.getPrCalls).toBe(2);
+  });
+
+  it("publishReview redacts github_token and llm_api_key from findings before posting", async () => {
+    const leaked: Finding = {
+      severity: "warning",
+      file: "src/a.ts",
+      line: 2,
+      rule: "leak-gh-secret-token-123",
+      message: "saw gh-secret-token-123 and sk-secret-key-456 in code",
+      suggestion: "rotate gh-secret-token-123, not sk-secret-key-456",
+    };
+    const r = await runWithMocks({
+      githubToken: "gh-secret-token-123",
+      llmApiKey: "sk-secret-key-456",
+      llm: [leaked],
+    });
+    expect(r.posted).toBe(true);
+    const dumped = JSON.stringify(r.reviews);
+    expect(dumped).not.toContain("gh-secret-token-123");
+    expect(dumped).not.toContain("sk-secret-key-456");
+    expect(dumped).toContain("[REDACTED]");
+  });
+
+  it("linked alias clone failure still posts the review (tool error only)", async () => {
+    const r = await runWithMocks({ llmAgent: true, agentToolProbe: true });
+    expect(r.posted).toBe(true);
+    expect(r.toolError).toBe(true);
+    expect(r.toolOutput).toContain("repository not accessible");
   });
 
   // Task 19 wiring: with plain `auto` the slow path probes (error-driven, spec §9.5) —
@@ -843,6 +940,8 @@ describe("findings from binaries, renames and skip paths", () => {
         validateModelExists: fail("models"),
         callByStyle: fail("llm"),
         callWithProbe: fail("llm"),
+        callByStyleAgent: fail("llm-agent"),
+        callWithProbeAgent: fail("llm-agent"),
       },
     };
     const out = await run(env, deps);
