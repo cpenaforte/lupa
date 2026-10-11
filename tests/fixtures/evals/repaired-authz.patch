@@ -1,0 +1,9 @@
+diff --git a/src/auth.ts b/src/auth.ts
+index 1111111..2222222 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1,2 +1,4 @@
+ export function readRecord(user: User, record: RecordData) {
++  if (!user.isOwner(record)) throw new Error("forbidden");
++  return record;
+ }

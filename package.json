@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && esbuild lib/src/main.js --bundle --platform=node --target=node24 --format=esm --banner:js='import { createRequire as __cr } from \"node:module\"; const require = __cr(import.meta.url);' --outfile=dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "evals": "vitest run tests/evals --reporter=verbose"
   },
   "dependencies": {
     "@actions/core": "3.0.1",
