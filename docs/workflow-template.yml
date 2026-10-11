@@ -99,11 +99,12 @@ jobs:
           git checkout --detach --force "${HEAD_SHA}"
 
       - name: Install semgrep (pinned, from PyPI; no docker needed)
+        working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/semgrep-venv"
-          "$RUNNER_TEMP/semgrep-venv/bin/pip" install --disable-pip-version-check semgrep==1.180.0
-          echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"
+          python3 -m venv "$RUNNER_TEMP/lupa-semgrep-venv"
+          "$RUNNER_TEMP/lupa-semgrep-venv/bin/pip" install --disable-pip-version-check semgrep==1.180.0
+          echo "$RUNNER_TEMP/lupa-semgrep-venv/bin" >> "$GITHUB_PATH"
 
       - name: Write diff (base...head, never the runner HEAD)
         env:

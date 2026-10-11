@@ -90,7 +90,14 @@ describe("workflow templates", () => {
     const t = fs.readFileSync("docs/workflow-template.yml", "utf8");
     expect(t).toContain("semgrep==1.180.0");
     expect(t).toContain("python3 -m venv");
-    expect(t).toContain('echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"');
+    expect(t).toContain('echo "$RUNNER_TEMP/lupa-semgrep-venv/bin" >> "$GITHUB_PATH"');
+  });
+
+  it("semgrep setup runs with cwd outside the PR checkout", () => {
+    const t = fs.readFileSync("docs/workflow-template.yml", "utf8");
+    expect(t).toContain("working-directory: ${{ runner.temp }}");
+    expect(t).toContain("$RUNNER_TEMP/lupa-semgrep-venv");
+    expect(t).not.toContain("$RUNNER_TEMP/semgrep-venv");
   });
 
   it("explicit fetches authenticate in memory via GIT_CONFIG env, anonymous otherwise", () => {
