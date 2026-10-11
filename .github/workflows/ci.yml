@@ -1,6 +1,6 @@
 # CI for pr-reviewer itself. Every third-party `uses:` is pinned by a full commit SHA (tests/ci.test.ts
-# enforces this). Only `uses: ./` (the action under test) is unpinned by design. No remote code except
-# URL+sha256-pinned actionlint.
+# enforces this). The smoke jobs run the committed bundle via `node` rather than the action under test,
+# so no unpinned ref remains. No remote code except URL+sha256-pinned actionlint.
 name: CI
 
 on:
@@ -51,17 +51,22 @@ jobs:
 
       - name: Execute the bundle on a non-triggering event (must exit 0 and write a summary)
         env:
-          GITHUB_EVENT_NAME: push
-          GITHUB_EVENT_PATH: ${{ github.workspace }}/tests/fixtures/push-event.json
           GITHUB_STEP_SUMMARY: ${{ runner.temp }}/bundle-summary.md
           GITHUB_OUTPUT: ${{ runner.temp }}/bundle-output.txt
           INPUT_POST_COMMENT: "false"
           INPUT_FAIL_LEVEL: none
           INPUT_LLM_API_KEY: ""
+        shell: bash
         run: |
           set -euo pipefail
+          # NOTE: the runner's event context cannot be faked via step env on
+          # pull_request-triggered runs (the bundle observed the ambient PR event
+          # and failed on missing SHAs), so the non-triggering context is set with
+          # shell exports, which always reach the node child process.
+          export GITHUB_EVENT_NAME=push
+          export GITHUB_EVENT_PATH="${{ github.workspace }}/tests/fixtures/push-event.json"
           : > "$GITHUB_OUTPUT"
-          node dist/index.js
+          node ./dist/index.js
           test -s "$GITHUB_STEP_SUMMARY"
 
       - name: Committed dist matches the build
@@ -105,16 +110,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run the action without an LLM key (dry-run, no comment)
-        uses: ./
-        env:
-          # Non-triggering context: CI has no PR head to review. The action must exit 0.
-          GITHUB_EVENT_NAME: push
-          GITHUB_EVENT_PATH: ${{ github.workspace }}/tests/fixtures/push-event.json
+      - name: Set up Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          post_comment: "false"
-          fail_level: none
-          llm_api_key: ""
+          node-version: 24
+
+      - name: Run the bundle without an LLM key (dry-run, no comment)
+        env:
+          INPUT_POST_COMMENT: "false"
+          INPUT_FAIL_LEVEL: none
+          INPUT_LLM_API_KEY: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          # NOTE: same as build step 8 — event context via shell exports (see above).
+          # Trade: this exercises the committed bundle, not the action.yml wiring;
+          # the wiring is pinned statically by tests/smoke.test.ts.
+          export GITHUB_EVENT_NAME=push
+          export GITHUB_EVENT_PATH="${{ github.workspace }}/tests/fixtures/push-event.json"
+          node ./dist/index.js
 
   no-secret-smoke:
     name: "no-secret smoke (simulates fork, same repo)"
@@ -129,18 +143,30 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run the action as a fork PR would (summary only)
-        uses: ./
-        env:
-          GITHUB_EVENT_NAME: push
-          GITHUB_EVENT_PATH: ${{ github.workspace }}/tests/fixtures/push-event.json
+      - name: Set up Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          post_comment: "false"
-          fail_level: none
-          llm_api_key: ""
+          node-version: 24
+
+      - name: Run the bundle as a fork PR would (summary only)
+        env:
+          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/action-summary.md
+          INPUT_POST_COMMENT: "false"
+          INPUT_FAIL_LEVEL: none
+          INPUT_LLM_API_KEY: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          # NOTE: same as build step 8 — event context via shell exports (see above).
+          export GITHUB_EVENT_NAME=push
+          export GITHUB_EVENT_PATH="${{ github.workspace }}/tests/fixtures/push-event.json"
+          node ./dist/index.js
 
       - name: Assert the summary was written
-        run: test -s "$GITHUB_STEP_SUMMARY"
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/action-summary.md"
+          cat "$RUNNER_TEMP/action-summary.md" >> "$GITHUB_STEP_SUMMARY"
 
   sarif:
     name: SARIF upload plumbing (same-repo PRs only)

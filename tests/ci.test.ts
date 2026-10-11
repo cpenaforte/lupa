@@ -71,7 +71,6 @@ describe("ci workflow", () => {
     const uses = [...c.matchAll(/^\s*(?:-\s*)?uses:\s*(\S+)/gm)].map((m) => m[1]);
     expect(uses.length).toBeGreaterThan(0);
     for (const u of uses) {
-      if (u.startsWith("./")) continue;
       expect(u, `unpinned: ${u}`).toMatch(/^[^@\s]+@[0-9a-f]{40}$/);
     }
   });
@@ -86,16 +85,18 @@ describe("ci workflow", () => {
     expect(npmCi).toBeLessThan(vitest);
     expect(vitest).toBeLessThan(build);
     expect(build).toBeLessThan(check);
-    expect(c).toMatch(/uses:\s*\.\//);
     expect(c).toMatch(/os:\s*\[\s*ubuntu-latest,\s*macos-latest,\s*windows-latest\s*\]/);
   });
 
   it("no-secret smoke simulates a fork: no secrets, summary-only, job-scoped assertions", () => {
     const c = fs.readFileSync(CI, "utf8");
     const job = jobBlock(c, "no-secret-smoke");
-    expect(job).toMatch(/post_comment:\s*"false"/);
+    expect(job).toContain('INPUT_POST_COMMENT: "false"');
     expect(job).toContain("GITHUB_STEP_SUMMARY");
+    expect(job).toContain("GITHUB_STEP_SUMMARY: ${{ runner.temp }}/action-summary.md");
+    expect(job).toContain('test -s "$RUNNER_TEMP/action-summary.md"');
     expect(job).toContain("simulates fork");
+    expect(job).toContain("export GITHUB_EVENT_NAME=push");
     expect(job).not.toMatch(/secrets\./);
     expect(job).not.toMatch(/\bPOST\b/);
   });
@@ -183,8 +184,9 @@ describe("ci workflow", () => {
   it("build job executes the bundle on a non-triggering event (C1: ESM/CJS interop must load)", () => {
     const c = fs.readFileSync(CI, "utf8");
     const job = jobBlock(c, "build");
-    expect(job).toContain("node dist/index.js");
-    expect(job).toContain("GITHUB_EVENT_NAME: push");
+    expect(job).toContain("node ./dist/index.js");
+    expect(job).toContain("export GITHUB_EVENT_NAME=push");
+    expect(job).not.toContain("GITHUB_EVENT_NAME: push");
     expect(job).toContain("tests/fixtures/push-event.json");
     expect(job).toContain('INPUT_POST_COMMENT: "false"');
     expect(job).toContain('test -s "$GITHUB_STEP_SUMMARY"');
@@ -196,8 +198,11 @@ describe("ci workflow", () => {
     const c = fs.readFileSync(CI, "utf8");
     for (const key of ["smoke", "no-secret-smoke"]) {
       const job = jobBlock(c, key);
-      expect(job, key).toContain("GITHUB_EVENT_NAME: push");
-      expect(job, key).toContain("GITHUB_EVENT_PATH: ${{ github.workspace }}/tests/fixtures/push-event.json");
+      expect(job, key).toContain("export GITHUB_EVENT_NAME=push");
+      expect(job, key).toContain("export GITHUB_EVENT_PATH=");
+      expect(job, key).toContain("shell: bash");
+      expect(job, key).toContain("node ./dist/index.js");
+      expect(job, key).not.toContain("GITHUB_EVENT_NAME: push");
     }
   });
 
