@@ -1,7 +1,7 @@
 # Sub-project 2: native provider protocols and review-trigger isolation — design
 
 Date: 2026-10-11
-Status: design approved (2026-10-11); review round 1 applied (2026-10-11)
+Status: design approved (2026-10-11); review rounds 1-4 applied, round 5 clean
 Source: Codex audit `PROJECT_FINDINGS.md` (F04, F05, F06), local HEAD `458bd34`
 Goal: close the remaining P1 findings before any deployment expansion — make native
 Google/Anthropic endpoints usable end-to-end (catalog discovery + multi-turn replay)
