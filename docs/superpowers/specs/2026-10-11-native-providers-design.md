@@ -1,7 +1,7 @@
 # Sub-project 2: native provider protocols and review-trigger isolation — design
 
 Date: 2026-10-11
-Status: design approved (2026-10-11) — scope F04+F05+F06; F04 advisory fail-open
+Status: design approved (2026-10-11); review round 1 applied (2026-10-11)
 Source: Codex audit `PROJECT_FINDINGS.md` (F04, F05, F06), local HEAD `458bd34`
 Goal: close the remaining P1 findings before any deployment expansion — make native
 Google/Anthropic endpoints usable end-to-end (catalog discovery + multi-turn replay)
@@ -24,7 +24,7 @@ and stop an ordinary trusted comment from cancelling an active review.
 
 ### Problem
 
-`validateModelExists` (`src/providers.ts`) is the preflight for every LLM path. It
+`validateModelExists` (`src/providers.ts:223`) is the preflight for every LLM path. It
 assumes one catalog shape (`data[].id`) and one auth scheme (Bearer, except a
 Google-native `x-goog-api-key`). Consequences:
 
@@ -39,25 +39,31 @@ Google-native `x-goog-api-key`). Consequences:
 
 ### Design
 
-Separate **catalog protocol** from **inference protocol**. The catalog protocol is
-chosen from the endpoint being talked to (provider preset + resolved apiStyle), never
-from the POST adapter:
+Separate **catalog protocol** from **inference protocol**. A new
+`catalogProtocolFor(provider, apiStyle)` (`src/providers.ts`) returns
+`"openai" | "anthropic" | "google"`, chosen from the endpoint being talked to, never
+from the POST adapter. The protocol **owns its auth headers** — it supersedes
+`authHeaderFor` (`src/providers.ts:206`), which returns only a header *name* and cannot
+express the Anthropic two-header row. `authHeaderFor` and its pins
+(`tests/providers.test.ts:323-333`) are retired in favor of the protocol table:
 
-| Condition | Catalog | Auth headers | Shape | Pagination |
+| `catalogProtocolFor` condition | Catalog | Auth headers | Shape | Pagination |
 |---|---|---|---|---|
 | apiStyle `google-models` and provider `google` or `custom` | `google` | `x-goog-api-key` | `models[].name` (`models/` prefix stripped) | `nextPageToken` → `?pageToken=` |
-| provider `anthropic` | `anthropic` | `x-api-key` + `anthropic-version: 2023-06-01` | `data[].id` | `has_more`/`last_id` → `?after=&limit=` |
+| provider `anthropic`, or provider `custom` with apiStyle `anthropic-messages` | `anthropic` | `x-api-key` + `anthropic-version: 2023-06-01` | `data[].id` | `has_more`/`last_id` → `?after_id=&limit=` |
 | everything else (incl. `opencode-go`/`opencode-zen`, even when the POST adapter is google-models) | `openai` | `Authorization: Bearer` | `data[].id` | none |
 
-The Google-native condition reuses the existing `authHeaderFor` rule (provider
-`google`/`custom` + `google-models`). Zen/Go keep the OpenAI-shaped catalog because
-their `/models` is the OpenCode catalog even when the POST body is native Google
-(already documented on `authHeaderFor`).
+The Anthropic row mirrors the Google row's `custom` clause because the Messages adapter
+is itself `x-api-key`-native (`src/adapters/messages.ts:151`); a `custom` base with an
+explicit `anthropic-messages` style speaks the Anthropic catalog. Zen/Go keep the
+OpenAI-shaped catalog because their `/models` is the OpenCode catalog even when the POST
+body is native Google (already documented on `authHeaderFor`).
 
 Replace the boolean `validateModelExists` with a tri-state check:
 
 ```
-checkModelListed(baseUrl, model, apiKey, protocol): Promise<"listed" | "absent" | "unknown">
+checkModelListed(baseUrl, model, apiKey, protocol: "openai" | "anthropic" | "google")
+  : Promise<"listed" | "absent" | "unknown">
 ```
 
 - `listed`: 2xx, expected array present, model found (case-sensitive `id` equality;
@@ -66,7 +72,7 @@ checkModelListed(baseUrl, model, apiKey, protocol): Promise<"listed" | "absent" 
 - `unknown`: 404, any other non-2xx, invalid JSON, missing/!array shape, timeout, or
   network error. **Never throws.**
 
-Caller (`src/main.ts` slow-path preflight):
+Caller (`src/main.ts` slow-path preflight, `:520-535`):
 
 - `absent` → warn `model "<id>" is not listed by the provider` and skip (unchanged).
 - `unknown` → warn `model check inconclusive (<reason>); continuing` and **proceed**
@@ -81,13 +87,25 @@ from real 400/404s on the POST.
 Pagination is bounded (≤ 5 pages) and stops as soon as the model is found; each page
 honors the existing `VALIDATE_TIMEOUT_MS` per request.
 
+### Change sites
+
+- `src/providers.ts`: add `catalogProtocolFor`; replace `validateModelExists` with
+  `checkModelListed`; retire `authHeaderFor`.
+- `src/main.ts`: the `Analysis` interface member (`:90`), the `realAnalysis` wiring
+  (`:948`), and the preflight call (`:526`).
+- Tests: `tests/providers.test.ts` (retire the `authHeaderFor`/`validateModelExists`
+  pins; add the protocol/header/parse matrix), `tests/main.test.ts` (the four `Analysis`
+  fakes at `:281`, `:436`, `:551`, `:1154`).
+
 ### Tests
 
 Fixtures only (no live provider calls): Google-native `models[].name` match and miss;
 Anthropic `data[].id` with `x-api-key`/`anthropic-version` and a multi-page `has_more`
-walk; OpenAI `data[].id` unchanged; every `unknown` path (404, 401, 500, invalid JSON,
-missing array, timeout) warns-and-proceeds; `absent` skips; the header matrix (Bearer
-vs `x-goog-api-key` vs `x-api-key`+`anthropic-version`).
+walk that **asserts the exact `?after_id=` cursor** (not a server-agnostic fake that
+echoes whatever the client sends); OpenAI `data[].id` unchanged; every `unknown` path
+(404, 401, 500, invalid JSON, missing array, timeout) warns-and-proceeds; `absent`
+skips; the header matrix (Bearer vs `x-goog-api-key` vs `x-api-key`+`anthropic-version`)
+across `google`/`custom`/`anthropic`/`opencode-go` providers.
 
 ## 2. F05 — native assistant history replay
 
@@ -141,9 +159,12 @@ cancellation.
 
 ### Design
 
-- Move `concurrency` from the workflow level to the `review` job. A skipped job never
-  acquires the group, so non-review events cannot cancel a running review; a superseded
-  PR-head run still joins and cancels (unchanged).
+- Move `concurrency` from the workflow level to the `review` job. GitHub evaluates a
+  job's `if` before the job starts and acquires job concurrency when the job starts, so
+  a skipped job never joins the group (see the concurrency docs:
+  https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+  Non-review events therefore cannot cancel a running review; a superseded PR-head run
+  still joins and cancels (unchanged).
 - Mirror the action's `shouldTrigger` content predicate in the job `if:`
   (`src/github.ts:257`):
   - `issue_comment`: `github.event.issue.pull_request && contains(github.event.comment.body, '/review') && <trusted association>`.
@@ -155,14 +176,20 @@ cancellation.
 Scope: `docs/workflow-template.yml` only. The privileged template triggers on
 `workflow_run` and has no comment path.
 
+**Accepted divergence:** the action uses `reviewBody.trim() !== ""`; GitHub expressions
+have no `trim`, so the workflow's review-body check is a plain non-empty test. A
+whitespace-only submitted review body would still join the group — accepted as a
+negligible edge (the primary F06 vector is comments).
+
 ### Tests
 
 `tests/templates.test.ts` / `tests/ci.test.ts` assertions: concurrency is job-level
 (not workflow-level); the job `if:` contains the `/review` content gate and the
 non-empty review-body gate; actionlint on the template. A negative assertion that the
-old workflow-level `concurrency:` block is gone.
+old workflow-level `concurrency:` block is gone. Because the YAML shape cannot prove
+runtime cancellation, **the canary below is a required gate**, not optional.
 
-### Canary
+### Canary (required)
 
 On test-lupa: start a review (a `synchronize` push) and post an ordinary trusted comment
 while it runs; confirm the review run is not cancelled and no review is posted for the
@@ -172,9 +199,9 @@ plain comment. Post `/review` and confirm it triggers.
 
 - Gates per task: full `vitest`, `tsc --noEmit`, `npm run build && node --check dist/index.js`,
   actionlint on changed templates, non-triggering run exit 0.
-- Canary (test-lupa, focused): F06 live as above. F04/F05 cannot be canaried live
-  without real native provider keys; they are fixture-pinned. If a Google/Anthropic key
-  is available, add an optional live check; otherwise record the limitation.
+- Canary (test-lupa, focused): F06 live as above (required). F04/F05 cannot be canaried
+  live without real native provider keys; they are fixture-pinned. If a Google/Anthropic
+  key is available, add an optional live check; otherwise record the limitation.
 - Release order: branch `native-providers` → PR → owner merge → tag `v0.5.0` → canary
   on tag → templates re-pin PR → move `v1`.
 
