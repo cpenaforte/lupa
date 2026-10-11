@@ -26190,13 +26190,17 @@ function buildGoogleBody(conv, modelId, o, flags) {
   let pendingResults = [];
   const flushResults = () => {
     if (pendingResults.length > 0) {
-      contents.push({ role: "function", parts: pendingResults });
+      contents.push({ role: "user", parts: pendingResults });
       pendingResults = [];
     }
   };
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
       flushResults();
+      if (turn.rawItems !== void 0) {
+        contents.push({ role: "model", parts: turn.rawItems });
+        continue;
+      }
       const parts = [];
       if (turn.text)
         parts.push({ text: turn.text });
@@ -26288,7 +26292,13 @@ function parseGoogleReply(json, flags) {
       }
     }
   }
-  return { ok: true, text: joinCandidateText(json), toolCalls };
+  const contentParts = firstCandidate(json)?.content?.parts;
+  return {
+    ok: true,
+    text: joinCandidateText(json),
+    toolCalls,
+    rawItems: Array.isArray(contentParts) ? contentParts : []
+  };
 }
 async function callGoogle(ep, modelId, messages, o) {
   const key = o.apiKey;
@@ -26407,7 +26417,7 @@ async function callGoogleTurn(ep, modelId, conv, o, flags) {
   const reply = parseGoogleReply(json, gFlags);
   if (!reply.ok)
     return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls, rawItems: reply.rawItems };
 }
 
 // lib/src/adapters/messages.js

@@ -304,7 +304,7 @@ describe("callGoogleTurn", () => {
     expect((body.systemInstruction as { parts: Array<{ text: string }> }).parts[0]!.text).toBe(c.system);
   });
 
-  it("echoes model functionCall parts and role=function functionResponse parts", async () => {
+  it("echoes model functionCall parts and role=user functionResponse parts", async () => {
     const c: Conversation = {
       system: "s",
       user: "u",
@@ -334,12 +334,29 @@ describe("callGoogleTurn", () => {
         ],
       },
       {
-        role: "function",
+        role: "user",
         parts: [
           { functionResponse: { name: "read_file", response: { output: "ok" } } },
           { functionResponse: { name: "read_file", response: { error: "boom" } } },
         ],
       },
+    ]);
+  });
+
+  it("replays assistant rawItems (thoughtSignature + native ids) verbatim", async () => {
+    const c: Conversation = {
+      system: "s", user: "u",
+      turns: [{
+        role: "assistant", text: "t",
+        toolCalls: [{ id: "fc_0", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+        rawItems: [{ text: "t", thoughtSignature: "sig-123" }, { functionCall: { id: "native-1", name: "read_file", args: { path: "a.ts" } } }],
+      }],
+      tools: [toolDef],
+    };
+    await callGoogleTurn(fakeGoogleEp(), MODEL, c, opts(), turnFlags);
+    expect(lastBody().contents).toEqual([
+      { role: "user", parts: [{ text: "u" }] },
+      { role: "model", parts: [{ text: "t", thoughtSignature: "sig-123" }, { functionCall: { id: "native-1", name: "read_file", args: { path: "a.ts" } } }] },
     ]);
   });
 
@@ -366,6 +383,10 @@ describe("callGoogleTurn", () => {
       toolCalls: [
         { id: "fc_0", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' },
         { id: "fc_1", name: "read_file", args: { path: "b.ts" }, rawArgs: '{"path":"b.ts"}' },
+      ],
+      rawItems: [
+        { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+        { functionCall: { name: "read_file", args: { path: "b.ts" } } },
       ],
     });
   });

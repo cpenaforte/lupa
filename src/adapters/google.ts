@@ -109,7 +109,7 @@ interface GoogleFlags {
 /** A parsed google reply: the failure union, or the extracted text + tool calls. */
 type GoogleReply =
   | { ok: false; result: LlmResult }
-  | { ok: true; text: string | undefined; toolCalls: ToolCall[] };
+  | { ok: true; text: string | undefined; toolCalls: ToolCall[]; rawItems: unknown[] };
 
 /**
  * Builds the Google generateContent request body from a neutral conversation.
@@ -118,8 +118,8 @@ type GoogleReply =
  * with `googleSchema` parameters); `responseMimeType`+`responseSchema` only when
  * `allowFormat`. `systemInstruction` rides in BOTH modes — the agent addendum
  * carries the untrusted-tool-output rule, so it must never be dropped. Assistant
- * turns become `role:"model"` parts (text then `functionCall`); consecutive
- * tool-result turns collapse into ONE `role:"function"` part set (the API wants
+ * turns become `role:"model"` parts (raw parts when available, otherwise text
+ * then `functionCall`); consecutive tool-result turns collapse into ONE `role:"user"` part set (the API wants
  * every `functionResponse` for a parallel call set together). `modelId` is part
  * of the shared signature for parity with the call sites; the model id rides the
  * endpoint path (`:generateContent`), not the body, so it is not emitted here.
@@ -136,13 +136,17 @@ function buildGoogleBody(
   let pendingResults: Array<Record<string, unknown>> = [];
   const flushResults = (): void => {
     if (pendingResults.length > 0) {
-      contents.push({ role: "function", parts: pendingResults });
+      contents.push({ role: "user", parts: pendingResults });
       pendingResults = [];
     }
   };
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
       flushResults();
+      if (turn.rawItems !== undefined) {
+        contents.push({ role: "model", parts: turn.rawItems });
+        continue;
+      }
       const parts: Array<Record<string, unknown>> = [];
       if (turn.text) parts.push({ text: turn.text });
       for (const tc of turn.toolCalls) {
@@ -249,7 +253,13 @@ function parseGoogleReply(json: unknown, flags: GoogleFlags): GoogleReply {
     }
   }
 
-  return { ok: true, text: joinCandidateText(json), toolCalls };
+  const contentParts = (firstCandidate(json)?.content as { parts?: unknown } | undefined)?.parts;
+  return {
+    ok: true,
+    text: joinCandidateText(json),
+    toolCalls,
+    rawItems: Array.isArray(contentParts) ? contentParts : [],
+  };
 }
 
 /**
@@ -429,5 +439,5 @@ export async function callGoogleTurn(
   }
   const reply = parseGoogleReply(json, gFlags);
   if (!reply.ok) return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls, rawItems: reply.rawItems };
 }
