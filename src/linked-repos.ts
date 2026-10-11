@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export interface CloneRunResult {
@@ -46,7 +46,13 @@ function defaultRun(
 }
 
 function cleanAlias(owner: string, repo: string): string | null {
-  const trimmedRepo = repo.replace(/\.git$/i, "").replace(/[.,;:!?)\]'"]+$/, "");
+  // Strip trailing punctuation first so a `.git` suffix followed by sentence
+  // punctuation (e.g. `tools.git.`) still has its `.git` recognized; strip
+  // punctuation again afterwards to catch what the `.git` removal exposed.
+  const trimmedRepo = repo
+    .replace(/[.,;:!?)\]'"]+$/, "")
+    .replace(/\.git$/i, "")
+    .replace(/[.,;:!?)\]'"]+$/, "");
   if (!/[A-Za-z0-9]/.test(owner) || !/[A-Za-z0-9]/.test(trimmedRepo)) return null;
   if (trimmedRepo.length === 0) return null;
   return `${owner}/${trimmedRepo}`;
@@ -85,7 +91,8 @@ export function parseLinkedRepos(prBody: string, selfFullName: string, cap = 3):
 
 function redactToken(s: string, token: string): string {
   if (token === "") return s;
-  return s.split(token).join("[redacted]");
+  const b64 = Buffer.from("x-access-token:" + token, "utf8").toString("base64");
+  return s.split(token).join("[redacted]").split(b64).join("[redacted]");
 }
 
 function dirBytes(root: string): number {
@@ -120,7 +127,14 @@ function removeDir(dir: string): void {
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch {
-    // ignore cleanup failures
+    // If removal fails, a partial checkout would remain and the next call
+    // would trust it via existsSync — rename it out of the way instead so
+    // the next call re-clones rather than using a partial checkout.
+    try {
+      renameSync(dir, `${dir}.broken-${Date.now()}`);
+    } catch {
+      // ignore cleanup failures
+    }
   }
 }
 
@@ -135,7 +149,7 @@ export async function ensureLinkedRepo(
   alias: string,
   o: { token: string; baseDir: string; timeoutMs?: number; maxBytes?: number; deps?: CloneDeps },
 ): Promise<{ dir: string } | { error: string }> {
-  const dir = join(o.baseDir, alias.replace("/", "__"));
+  const dir = join(o.baseDir, alias.split("/").join("__"));
   if (existsSync(dir)) return { dir };
 
   const deps: CloneDeps = o.deps ?? { run: defaultRun };

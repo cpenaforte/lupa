@@ -24,6 +24,9 @@ describe("parseLinkedRepos", () => {
       "acme/tools",
     ]);
     expect(parseLinkedRepos("(https://www.github.com/acme/tools/)", "me/self")).toEqual(["acme/tools"]);
+    expect(parseLinkedRepos("see https://github.com/acme/tools.git. ok", "me/self")).toEqual([
+      "acme/tools",
+    ]);
   });
 
   it("parses bare owner/repo#12 tokens and excludes self", () => {
@@ -147,5 +150,29 @@ describe("ensureLinkedRepo", () => {
     const tooBig = await ensureLinkedRepo("acme/grown", { token: "t", baseDir: baseDir2, maxBytes: 1024, deps: growing });
     expect(tooBig).toEqual({ error: "repository too large" });
     expect(existsSync(join(baseDir2, "acme__grown"))).toBe(false);
+  });
+
+  it("ensureLinkedRepo redacts the base64 auth header as well as the raw token", async () => {
+    const baseDir = tempRoot();
+    const token = "s3cret-token";
+    const b64 = Buffer.from("x-access-token:" + token, "utf8").toString("base64");
+    const deps: CloneDeps = {
+      run: async () => ({ code: 128, stdout: "", stderr: `fatal: header '${b64}' rejected for '${token}'` }),
+    };
+    const res = await ensureLinkedRepo("acme/missing", { token, baseDir, deps });
+    expect("error" in res).toBe(true);
+    const error = (res as { error: string }).error;
+    expect(error).toContain("not accessible");
+    expect(error).not.toContain(token);
+    expect(error).not.toContain(b64);
+  });
+
+  it("ensureLinkedRepo flattens multi-slash aliases instead of nesting dirs", async () => {
+    const baseDir = tempRoot();
+    const deps: CloneDeps = {
+      run: async () => ({ code: 0, stdout: "", stderr: "" }),
+    };
+    const res = await ensureLinkedRepo("a/b/c", { token: "", baseDir, deps });
+    expect(res).toEqual({ dir: join(baseDir, "a__b__c") });
   });
 });
