@@ -91,6 +91,8 @@ interface Rec {
   agentToolCtx?: ToolContext;
   toolOutput?: string;
   toolError?: boolean;
+  /** findings.json payload observed by the slow-path seam: the early (fast-only) write, before the merged overwrite. */
+  earlyFindingsRaw?: string;
   repoSizeCalls: Array<[string, string]>;
 }
 
@@ -286,6 +288,14 @@ async function runWithMocks(o: MockOpts = {}) {
           : async () => {
               rec.llmCalled += 1;
               rec.llmVia = "probe";
+              // The slow path runs after the early findings.json write, so snapshot the
+              // file here: this is the first (fast-findings-only) payload, before the
+              // merged write below overwrites it.
+              try {
+                rec.earlyFindingsRaw = readFileSync(join(artifactDir, "findings.json"), "utf8");
+              } catch {
+                rec.earlyFindingsRaw = undefined;
+              }
               return { ok: true, findings: o.llm ?? [LLM_FINDING] };
             },
       callByStyleAgent: async (_ep, conv, opts, toolCtx) => {
@@ -340,6 +350,7 @@ async function runWithMocks(o: MockOpts = {}) {
     repoSizeCalls: rec.repoSizeCalls,
     scanEnv: rec.scanEnv,
     l2Env: rec.l2Env,
+    earlyFindingsRaw: rec.earlyFindingsRaw,
     artifactDir,
     summaryPath,
     sbomDir,
@@ -691,8 +702,18 @@ describe("run() orchestration", () => {
       rule: "tok-rule",
       message: "saw tok-live-123 in scanner output",
     };
-    const r = await runWithMocks({ githubToken: "tok-live-123", llmApiKey: "", scan: [fast] });
-    expect(r.findingsFrom).toBe("fastpath");
+    // Slow path runs (default llm key): the merged write below would mask a raw early
+    // write, so the early site is pinned via the payload the slow-path seam observed —
+    // the first, fast-findings-only write, before the merge overwrote it.
+    const r = await runWithMocks({ githubToken: "tok-live-123", scan: [fast] });
+    expect(r.llmCalled).toBe(1);
+    const early = r.earlyFindingsRaw;
+    expect(early).toBeDefined();
+    const parsed = JSON.parse(early!) as Finding[];
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.rule).toBe("tok-rule");
+    expect(early!).not.toContain("tok-live-123");
+    expect(early!).toContain("[REDACTED]");
     const raw = readFileSync(join(r.artifactDir, "findings.json"), "utf8");
     expect(raw).not.toContain("tok-live-123");
     expect(raw).toContain("[REDACTED]");
