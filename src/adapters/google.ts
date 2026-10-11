@@ -246,14 +246,33 @@ function parseGoogleReply(json: unknown, flags: GoogleFlags): GoogleReply {
   if (flags.allowTools && typeof content === "object" && content !== null) {
     const parts = (content as { parts?: unknown }).parts;
     if (Array.isArray(parts)) {
+      const reservedIds = new Set<string>();
+      for (const part of parts) {
+        if (typeof part !== "object" || part === null) continue;
+        const fc = (part as { functionCall?: unknown }).functionCall;
+        if (typeof fc !== "object" || fc === null) continue;
+        const id = (fc as { id?: unknown }).id;
+        if (typeof id === "string" && id !== "") reservedIds.add(id);
+      }
+
+      let syntheticIndex = 0;
       for (const part of parts) {
         if (typeof part !== "object" || part === null) continue;
         const fc = (part as { functionCall?: unknown }).functionCall;
         if (typeof fc !== "object" || fc === null) continue;
         const call = fc as { id?: unknown; name?: unknown; args?: unknown };
         const args = call.args;
+        let id: string;
+        if (typeof call.id === "string" && call.id !== "") {
+          id = call.id;
+        } else {
+          do {
+            id = `fc_${syntheticIndex++}`;
+          } while (reservedIds.has(id));
+          reservedIds.add(id);
+        }
         toolCalls.push({
-          id: typeof call.id === "string" && call.id !== "" ? call.id : `fc_${toolCalls.length}`,
+          id,
           name: typeof call.name === "string" ? call.name : "",
           args,
           // Gemini's FunctionCall.args is optional; rawArgs is typed string, so
