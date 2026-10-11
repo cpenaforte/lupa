@@ -234,10 +234,14 @@ git commit -m "fix: skip (never relabel) on stale PR head (F03)"
   and walks `runs[].invocations[]`: `executionSuccessful === false` or any
   error-level `toolExecutionNotifications` entry appends the exact message
   `` `${label} reported an unsuccessful run` `` as `warning("scanner-failed", ...)`.
-  Exit-code rule when SARIF carries no invocation info at all: code >= 2, null, or
-  abnormal appends the same warning; code 1 (findings-found for all four scanners)
-  stays quiet. When SARIF parses, `parseSarif`'s findings are always kept — the
-  warning is appended, never substituted.
+  Exit-code fallback when SARIF carries no invocation info at all, keyed by an
+  internal per-scanner findings-code table on the `label` (`semgrep: [1]`,
+  `osv-scanner: [1]` matched by label prefix since osv labels carry the lockfile in
+  parentheses, `trivy: []` — `tool` is `"docker"` for both trivy and osv, so the
+  table must key on `label`, not `tool`): code in the table stays quiet, any other
+  nonzero (or null/abnormal) appends the warning; code 0 stays quiet. Explicit
+  invocation success wins over a contradictory exit code. When SARIF parses,
+  `parseSarif`'s findings are always kept — the warning is appended, never substituted.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -252,7 +256,11 @@ it("unsuccessful run WITH results keeps the findings and appends the warning", (
   // expect findings present AND the trailing scanner-failed warning.
 });
 it("exit-1 with clean successful SARIF stays quiet (findings codes keep meaning)", () => {
-  // code 1, executionSuccessful true/absent, one result → findings only, no warning.
+  // fromStdout("semgrep", "semgrep", code 1, ...) with one result → findings only, no warning.
+});
+it("trivy exit-1 with parseable SARIF warns (trivy findings exit is 0)", () => {
+  // fromStdout("docker", "trivy", code 1, valid SARIF with one result, no invocations)
+  // → findings plus the warning (proves the table keys on label, not tool).
 });
 it("fatal exit without invocation info still warns", () => {
   // code 2, valid SARIF with results but NO invocations key → findings plus the warning.
@@ -298,7 +306,7 @@ git commit -m "fix: failed scanner invocations emit warning findings (F08)"
 
 **Interfaces:**
 - Consumes: `CloneDeps.run` test seam (exists; reuse for git introspection with `cwd` set to the clone dir and `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` env, no token vars), existing `removeDir` helper (exists).
-- Produces: `ensureLinkedRepo` writes `.lupa-clone.json` (`{repo, branch, sha}`) next to the clone after a successful fresh clone (post-size-walk); on an existing dir it validates before returning — `.git` present, marker parses with matching `repo`, `git config --get remote.origin.url` equals `https://github.com/${alias}.git`, `git rev-parse --abbrev-ref HEAD` equals marker branch, size walk within `maxBytes` (skipped when `maxBytes` is undefined). Any mismatch or git error → wipe (marker included) and run the full fresh-clone path. Success returns `{ dir: string; sha: string }` (sha now required; update fake results in `tests/linked-repos.test.ts` and `tests/main.test.ts` that construct `{ dir }` literals). `main.ts` `ensureLinked` closure logs the exact string `` `agent linked repo ${alias} at ${sha}` `` whenever `sha` is present.
+- Produces: `ensureLinkedRepo` writes `<cloneDir>/.lupa-clone.json` (`{repo, branch, sha}`) inside the clone dir after a successful fresh clone (post-size-walk), so a wipe removes it with the dir; on an existing dir it validates before returning — `.git` present, marker parses with matching `repo`, `git config --get remote.origin.url` equals `https://github.com/${alias}.git`, `git rev-parse --abbrev-ref HEAD` equals marker branch, size walk within `maxBytes` (skipped when `maxBytes` is undefined). Any mismatch or git error → wipe (marker included) and run the full fresh-clone path. Success returns `{ dir: string; sha: string }` (sha now required; update fake results in `tests/linked-repos.test.ts` and `tests/main.test.ts` that construct `{ dir }` literals). `main.ts` `ensureLinked` closure logs the exact string `` `agent linked repo ${alias} at ${sha}` `` whenever `sha` is present.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -317,9 +325,9 @@ it("logs the linked repo SHA on reuse", ...);
 
 Determinism mechanism (no network): the fixture sets `RUNNER_TEMP` to a scratch
 dir, pre-creates `<scratch>/lupa-linked/someone__else` as a real local git repo
-(`git init`, `git remote add origin https://github.com/someone/else.git`, one commit
+(`git init -b main`, `git remote add origin https://github.com/someone/else.git`, one commit
 with `git -c user.email=t@t -c user.name=t commit`, marker `.lupa-clone.json` with
-matching repo/branch), then drives `run()` — validation passes on local git ops
+matching repo/branch `someone/else`/`main`), then drives `run()` — validation passes on local git ops
 only, no clone is attempted, and the log contains
 "agent linked repo someone/else at <sha>". Requires a git binary (already required
 by the existing clone-failure test).

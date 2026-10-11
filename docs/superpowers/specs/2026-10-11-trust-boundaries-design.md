@@ -57,24 +57,29 @@ code plus `run.executionSuccessful` / execution-error notifications — instead 
 accepting any parseable SARIF at face value. Concretely: when SARIF parses, inspect
 `runs[].invocations[]`; `executionSuccessful === false` or any error-level
 `toolExecutionNotifications` entry appends the warning. When SARIF parses but carries
-no invocation info at all, a fatal-style exit (code >= 2, null, or abnormal) appends
-it; exit code 1 (the findings-found code for semgrep, gitleaks, trivy, osv-scanner)
-stays quiet. A failed/partial invocation emits a
+no invocation info at all, fall back to a per-scanner findings-exit-code table keyed
+by `label` (`semgrep: [1]`, `osv-scanner: [1]` by label prefix, `trivy: []` — trivy
+runs without `--exit-code`, so its findings exit is 0 and any nonzero exit is an
+error; gitleaks exit 1 means leaks-or-error and is ambiguous, so the file-report path
+never uses exit codes): code in the table stays quiet, any other nonzero (or
+null/abnormal) appends the warning; code 0 stays quiet. Explicit invocation success
+wins over a contradictory exit code. A failed/partial invocation emits a
 `warning` finding (scanner rule id, e.g. `[scanner-failed]`, naming tool and reason)
 as a general review item, alongside usable partial findings, never instead of them.
 Clean-empty stays silent. Known coverage limitation: invocation health only fires
 where the scanner emits `runs[].invocations[]` (verified for semgrep; unconfirmed
 for trivy/osv-scanner/gitleaks file reports, which stay on the exit-code rule).
 Fixtures: exit-2 + `executionSuccessful: false` + error notification + zero results
-yields exactly one warning; partial yields findings plus warning; exit-1 with clean
-successful SARIF yields findings only.
+yields exactly one warning; partial yields findings plus warning; semgrep exit-1 with clean
+successful SARIF yields findings only; trivy exit-1 with parseable SARIF yields
+findings plus the warning.
 
 ## 5. F12 — validate linked-clone cache before reuse
 
 `src/linked-repos.ts` (+ one `main.ts` touch). When the expected clone dir exists,
 `ensureLinkedRepo` verifies before returning: `.git` present, `origin` URL exactly
 equals `https://github.com/<owner>/<repo>.git`, checked-out ref is the expected default branch (recorded at clone time in a
-`.lupa-clone.json` marker next to the clone: `{repo, branch, sha}` — no network
+`.lupa-clone.json` marker at `<cloneDir>/.lupa-clone.json` (inside the dir, so a wipe removes it too): `{repo, branch, sha}` — no network
 needed on reuse; the marker only names expectations, and every claim is rechecked
 against git itself (`git config --get remote.origin.url`,
 `git rev-parse --abbrev-ref HEAD`, size walk) before reuse. Exact origin matching
