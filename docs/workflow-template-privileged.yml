@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in diff.patch pr-meta.json findings.json; do
-            test -s "$ARTIFACT_DIR/$f" || { echo "pr-reviewer: missing $f in artifact" >&2; exit 1; }
+            test -s "$ARTIFACT_DIR/$f" || { echo "lupa: missing $f in artifact" >&2; exit 1; }
           done
 
       - name: Post review

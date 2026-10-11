@@ -179,5 +179,5 @@ jobs:
         run: |
           case "$EXIT_CODE" in
             0|2) exit 0 ;;
-            *) echo "pr-reviewer: gate failed (exit code: ${EXIT_CODE:-none})" >&2; exit 1 ;;
+            *) echo "lupa: gate failed (exit code: ${EXIT_CODE:-none})" >&2; exit 1 ;;
           esac

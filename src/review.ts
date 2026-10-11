@@ -124,7 +124,7 @@ export function exitFor(failLevel: FailLevel, findings: Finding[]): number {
   return findings.some((f) => f.severity === "high") ? 1 : 0;
 }
 
-const FALLBACK_SUMMARY = "pr-reviewer: review complete.";
+const FALLBACK_SUMMARY = "lupa: review complete.";
 
 /**
  * Replaces every non-empty secret in `message`, `suggestion`, `file` and

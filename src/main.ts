@@ -242,12 +242,12 @@ function newOutcome(): Outcome {
 }
 
 function requireSha(name: string, value: string): void {
-  if (!SHA_RE.test(value)) throw new Error(`pr-reviewer: ${name} must be a 40-character lowercase commit SHA`);
+  if (!SHA_RE.test(value)) throw new Error(`lupa: ${name} must be a 40-character lowercase commit SHA`);
 }
 
 function readDiff(dir: string): string {
   const path = join(dir, "diff.patch");
-  if (!existsSync(path)) throw new Error(`pr-reviewer: diff.patch not found in ${dir}`);
+  if (!existsSync(path)) throw new Error(`lupa: diff.patch not found in ${dir}`);
   return readFileSync(path, "utf8");
 }
 
@@ -347,15 +347,15 @@ function isFinding(v: unknown): v is Finding {
 
 function readFindings(dir: string): Finding[] {
   const path = join(dir, "findings.json");
-  if (!existsSync(path)) throw new Error(`pr-reviewer: findings.json not found in ${dir}`);
+  if (!existsSync(path)) throw new Error(`lupa: findings.json not found in ${dir}`);
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    throw new Error("pr-reviewer: findings.json is malformed JSON");
+    throw new Error("lupa: findings.json is malformed JSON");
   }
   if (!Array.isArray(parsed) || !parsed.every(isFinding)) {
-    throw new Error("pr-reviewer: findings.json does not match the finding contract");
+    throw new Error("lupa: findings.json does not match the finding contract");
   }
   return parsed;
 }
@@ -463,7 +463,7 @@ function note(env: RunEnv, out: Outcome, text: string): void {
 }
 
 function summaryFor(findings: Finding[]): string {
-  return findings.length === 0 ? "pr-reviewer: no findings." : `pr-reviewer: ${findings.length} finding(s).`;
+  return findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
 }
 
 /**
@@ -685,7 +685,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
       note(
         a.env,
         a.out,
-        `pr-reviewer: PR head moved during posting; analyzed ${e.analyzedSha}, live ${e.liveSha}; skipping review for the stale head — a fresh run will cover the new head.`,
+        `lupa: PR head moved during posting; analyzed ${e.analyzedSha}, live ${e.liveSha}; skipping review for the stale head — a fresh run will cover the new head.`,
       );
       a.out.staleSkipped = true;
       a.out.exitCode = 0;
@@ -741,12 +741,12 @@ export function toSarif(findings: Finding[]): unknown {
 async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   out.slowPathSkipped = true;
   if (!triggerFor(env)) {
-    note(env, out, `pr-reviewer: event "${env.eventName}" does not trigger a review; nothing to do.`);
+    note(env, out, `lupa: event "${env.eventName}" does not trigger a review; nothing to do.`);
     return;
   }
   const pr = prNumberFor(env);
   if (pr === null) {
-    note(env, out, "pr-reviewer: no pull request for this event; nothing to review.");
+    note(env, out, "lupa: no pull request for this event; nothing to review.");
     return;
   }
   requireSha("PR_REVIEWER_BASE_SHA", env.baseSha);
@@ -844,41 +844,41 @@ async function runFlowB(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   const meta = readPrMeta(env.artifactDir);
   if (meta === undefined) {
     throw new Error(
-      `pr-reviewer: pr-meta.json not found in ${env.artifactDir}; refusing to post without the PR run's artifact`,
+      `lupa: pr-meta.json not found in ${env.artifactDir}; refusing to post without the PR run's artifact`,
     );
   }
   const wr = fields(env).workflow_run;
   const runRepo = wr?.head_repository?.full_name;
   const runBranch = wr?.head_branch;
   if (wr?.head_sha === undefined || runRepo === undefined || runRepo === "" || runBranch === undefined) {
-    throw new Error("pr-reviewer: workflow_run head context is incomplete; refusing to post");
+    throw new Error("lupa: workflow_run head context is incomplete; refusing to post");
   }
   // Lowercase at the binding site: readPrMeta accepts either case, the API returns lowercase.
   const headSha = meta.head_sha.toLowerCase();
   if (headSha !== wr.head_sha.toLowerCase()) {
-    throw new Error("pr-reviewer: artifact head_sha does not match workflow_run.head_sha; refusing to post");
+    throw new Error("lupa: artifact head_sha does not match workflow_run.head_sha; refusing to post");
   }
   // The PR comes from trusted event fields, never from the artifact: exactly one open PR must
   // have this head (repo + branch), and the artifact's pr_number must name that same PR.
   const prs = await deps.gh.findPrsByHead(runRepo, runBranch);
   if (prs.length !== 1) {
     throw new Error(
-      `pr-reviewer: expected exactly one open PR for ${runRepo}:${runBranch}, found ${prs.length}; refusing to post`,
+      `lupa: expected exactly one open PR for ${runRepo}:${runBranch}, found ${prs.length}; refusing to post`,
     );
   }
   const pr = prs[0];
   if (pr !== meta.pr_number) {
-    throw new Error("pr-reviewer: artifact pr_number does not match the PR derived from workflow_run; refusing to post");
+    throw new Error("lupa: artifact pr_number does not match the PR derived from workflow_run; refusing to post");
   }
   const live = await deps.gh.getPr(pr);
   if (live.headRepo !== runRepo) {
-    throw new Error("pr-reviewer: PR head repository does not match workflow_run.head_repository; refusing to post");
+    throw new Error("lupa: PR head repository does not match workflow_run.head_repository; refusing to post");
   }
   if (live.headSha.toLowerCase() !== headSha) {
-    throw new Error("pr-reviewer: live PR head does not match workflow_run.head_sha; refusing to post");
+    throw new Error("lupa: live PR head does not match workflow_run.head_sha; refusing to post");
   }
   if (live.headRef !== runBranch) {
-    throw new Error("pr-reviewer: PR head branch does not match workflow_run.head_branch; refusing to post");
+    throw new Error("lupa: PR head branch does not match workflow_run.head_branch; refusing to post");
   }
   const findings = readFindings(env.artifactDir).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));

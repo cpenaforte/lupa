@@ -584,7 +584,7 @@ describe("run() orchestration", () => {
     const summary = readFileSync(r.summaryPath, "utf8");
     expect(summary).toContain("skipping review for the stale head");
     expect(summary).toContain(
-      `pr-reviewer: PR head moved during posting; analyzed ${SHA_HEAD}, live ${SHA_OTHER}; skipping review for the stale head — a fresh run will cover the new head.`,
+      `lupa: PR head moved during posting; analyzed ${SHA_HEAD}, live ${SHA_OTHER}; skipping review for the stale head — a fresh run will cover the new head.`,
     );
     expect(r.exitCode).toBe(0);
   });
@@ -596,7 +596,7 @@ describe("run() orchestration", () => {
     expect(r.staleSkipped).toBe(true);
     const summary = readFileSync(r.summaryPath, "utf8");
     expect(summary).toContain(
-      `pr-reviewer: PR head moved during posting; analyzed ${SHA_HEAD}, live ${SHA_OTHER}; skipping review for the stale head — a fresh run will cover the new head.`,
+      `lupa: PR head moved during posting; analyzed ${SHA_HEAD}, live ${SHA_OTHER}; skipping review for the stale head — a fresh run will cover the new head.`,
     );
     expect(r.exitCode).toBe(0);
   });
@@ -613,7 +613,7 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({ write403: true, issueFallback: true });
     expect(r.reviewAttempts).toBe(1);
     expect(r.issueComments).toHaveLength(1);
-    expect(r.issueComments[0]).toContain("pr-reviewer: 1 finding(s).");
+    expect(r.issueComments[0]).toContain("lupa: 1 finding(s).");
     expect(r.posted).toBe(true);
   });
 

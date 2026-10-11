@@ -180,4 +180,4 @@ The segregation matters: the privileged job reads only the artifact, so PR code 
 
 ## Why the technical identifiers still say pr-reviewer
 
-Lupa is the product's display name, but `pr-reviewer` remains the stable technical namespace: `PR_REVIEWER_*` variables and inputs, `pr-reviewer/1.0` user-agent, `pr-reviewer-*` concurrency groups, `pr-reviewer-out` artifacts, `pr-reviewer:` log prefixes and the SARIF driver name are all kept so existing workflows, gates and tooling keep working without migration.
+Lupa is the product's display name, but `pr-reviewer` remains the stable technical namespace: `PR_REVIEWER_*` variables and inputs, `pr-reviewer/1.0` user-agent, `pr-reviewer-*` concurrency groups, `pr-reviewer-out` artifacts and the SARIF driver name are all kept so existing workflows, gates and tooling keep working without migration. Human-readable messages use the `lupa:` prefix.
