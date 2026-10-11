@@ -225,9 +225,58 @@ function warning(rule: string, message: string): Finding {
 }
 
 /**
+ * Invocation health from a SARIF log (F08). Re-parses `stdout` without touching
+ * `parseSarif`. Returns `true` when any `runs[].invocations[]` entry reports
+ * `executionSuccessful === false` or carries an error-level
+ * `toolExecutionNotifications` entry, `false` when invocation info is present
+ * and all successful, and `undefined` when the SARIF carries no invocation
+ * info at all (so the caller falls back to the exit-code rule).
+ */
+function invocationFailed(stdout: string): boolean | undefined {
+  let log: unknown;
+  try {
+    log = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isObj(log) || !Array.isArray(log.runs)) return undefined;
+  let seen = false;
+  for (const run of log.runs) {
+    if (!isObj(run) || !Array.isArray(run.invocations)) continue;
+    for (const inv of run.invocations) {
+      if (!isObj(inv)) continue;
+      seen = true;
+      if (inv.executionSuccessful === false) return true;
+      if (Array.isArray(inv.toolExecutionNotifications)) {
+        for (const n of inv.toolExecutionNotifications) {
+          if (isObj(n) && n.level === "error") return true;
+        }
+      }
+    }
+  }
+  return seen ? false : undefined;
+}
+
+/**
+ * Exit codes that mean "findings present", keyed by scanner `label` (not `tool`:
+ * `tool` is `"docker"` for both trivy and osv). The osv label carries the
+ * lockfile in parentheses (`osv-scanner (<lock>)`), so it matches by prefix.
+ * Trivy's argv has no `--exit-code`, so its findings exit is 0 and any nonzero
+ * is an error; semgrep exits 1 on findings; osv-scanner exits 1 on findings.
+ */
+function findingsExitCodes(label: string): number[] {
+  if (label === "semgrep") return [1];
+  if (label === "osv-scanner" || label.startsWith("osv-scanner ")) return [1];
+  return [];
+}
+
+/**
  * Interpret a scanner whose SARIF arrives on stdout. Fail-open: a non-zero exit (or
  * any exit) with empty/unparseable stdout is a `scanner-failed` warning, never a clean pass.
  * The timeout message names the actual `timeoutMs` budget the tool ran under.
+ * Parsed findings are always kept; a failed invocation appends a `scanner-failed`
+ * warning, never substituted. Explicit invocation success wins over a contradictory
+ * exit code; code 0 with no invocation info stays quiet.
  */
 export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: number = TOOL_TIMEOUT_MS): Finding[] {
   if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`)];
@@ -235,6 +284,15 @@ export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: numb
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : undefined;
   if (!parsed) {
     return [warning("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`)];
+  }
+  const health = invocationFailed(r.stdout);
+  if (health === true) {
+    return [...parsed, warning("scanner-failed", `${label} reported an unsuccessful run`)];
+  }
+  if (health === false) return parsed;
+  if (r.code === 0) return parsed;
+  if (r.code === null || !findingsExitCodes(label).includes(r.code)) {
+    return [...parsed, warning("scanner-failed", `${label} reported an unsuccessful run`)];
   }
   return parsed;
 }
@@ -378,7 +436,13 @@ async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS): Pr
       return gl.code === 0 ? [] : [warning("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`)];
     }
     const parsed = parseSarif(text);
-    return parsed ?? [warning("scanner-failed", "gitleaks report is not parseable SARIF")];
+    if (!parsed) return [warning("scanner-failed", "gitleaks report is not parseable SARIF")];
+    // Exit codes do not apply here (this path parses a report file, not a process
+    // result), but invocation health still does when the SARIF carries it.
+    if (invocationFailed(text) === true) {
+      return [...parsed, warning("scanner-failed", "gitleaks reported an unsuccessful run")];
+    }
+    return parsed;
   } finally {
     await rm(reportDir, { recursive: true, force: true }).catch(() => undefined);
   }

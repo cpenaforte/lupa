@@ -27675,6 +27675,42 @@ function runExec(file, args, cwd, env, timeoutMs = TOOL_TIMEOUT_MS) {
 function warning2(rule, message) {
   return { severity: "warning", file: "", rule, message };
 }
+function invocationFailed(stdout) {
+  let log;
+  try {
+    log = JSON.parse(stdout);
+  } catch {
+    return void 0;
+  }
+  if (!isObj(log) || !Array.isArray(log.runs))
+    return void 0;
+  let seen = false;
+  for (const run2 of log.runs) {
+    if (!isObj(run2) || !Array.isArray(run2.invocations))
+      continue;
+    for (const inv of run2.invocations) {
+      if (!isObj(inv))
+        continue;
+      seen = true;
+      if (inv.executionSuccessful === false)
+        return true;
+      if (Array.isArray(inv.toolExecutionNotifications)) {
+        for (const n of inv.toolExecutionNotifications) {
+          if (isObj(n) && n.level === "error")
+            return true;
+        }
+      }
+    }
+  }
+  return seen ? false : void 0;
+}
+function findingsExitCodes(label) {
+  if (label === "semgrep")
+    return [1];
+  if (label === "osv-scanner" || label.startsWith("osv-scanner "))
+    return [1];
+  return [];
+}
 function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS) {
   if (r.missing)
     return [warning2("scanner-missing", `${label} unavailable: ${tool} not found`)];
@@ -27683,6 +27719,17 @@ function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS) {
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : void 0;
   if (!parsed) {
     return [warning2("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`)];
+  }
+  const health = invocationFailed(r.stdout);
+  if (health === true) {
+    return [...parsed, warning2("scanner-failed", `${label} reported an unsuccessful run`)];
+  }
+  if (health === false)
+    return parsed;
+  if (r.code === 0)
+    return parsed;
+  if (r.code === null || !findingsExitCodes(label).includes(r.code)) {
+    return [...parsed, warning2("scanner-failed", `${label} reported an unsuccessful run`)];
   }
   return parsed;
 }
@@ -27761,7 +27808,12 @@ async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS) {
       return gl.code === 0 ? [] : [warning2("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`)];
     }
     const parsed = parseSarif(text);
-    return parsed ?? [warning2("scanner-failed", "gitleaks report is not parseable SARIF")];
+    if (!parsed)
+      return [warning2("scanner-failed", "gitleaks report is not parseable SARIF")];
+    if (invocationFailed(text) === true) {
+      return [...parsed, warning2("scanner-failed", "gitleaks reported an unsuccessful run")];
+    }
+    return parsed;
   } finally {
     await rm2(reportDir, { recursive: true, force: true }).catch(() => void 0);
   }
