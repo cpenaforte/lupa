@@ -60,6 +60,9 @@ Expected: FAIL on the new test (no `working-directory`, old venv path present).
 Add `working-directory: ${{ runner.temp }}` to the step; rename all three
 `$RUNNER_TEMP/semgrep-venv` references to `$RUNNER_TEMP/lupa-semgrep-venv`.
 Checkout/diff steps do not move. Privileged template untouched (no Python setup).
+Also update the existing pin at `tests/templates.test.ts:93`
+(`echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"`) to the new venv path —
+it asserts the old string and would otherwise fail.
 
 - [ ] **Step 4: Run tests + actionlint to verify they pass**
 
@@ -79,7 +82,7 @@ git commit -m "fix: run semgrep setup outside the PR checkout (F01)"
 ### Task 34: F02 — redact runtime keys at every artifact write
 
 **Files:**
-- Modify: `src/main.ts` (three write sites + one helper)
+- Modify: `src/main.ts` (three write sites + one helper), `README.md` (redaction non-goal note), `tests/readme.test.ts` (pin it)
 - Test: `tests/main.test.ts` (extend run() fixtures)
 
 **Interfaces:**
@@ -121,7 +124,20 @@ the originals):
 2. merged `writeFindings` (line ~806),
 3. the `sarif.json` write (line ~807, redact `all` before `toSarif`).
 Replace the inline secrets expression at the publish site (line ~637) with
-`runtimeSecrets(env)`.
+`runtimeSecrets(env)`, and put a code comment on `runtimeSecrets` stating the
+non-goal: runtime-key masking only; secrets committed in the diff are a separate
+scanner concern and are not covered. Add the same two clauses to `README.md` in a
+short redaction subsection, pinned by `tests/readme.test.ts`:
+
+```ts
+it("documents runtime-key masking scope", () => {
+  const r = fs.readFileSync("README.md", "utf8");
+  expect(r).toContain("runtime-key masking only");
+  expect(r).toContain("separate scanner concern");
+});
+```
+
+Use those exact clause strings in both the comment and the README so the pin holds.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -131,7 +147,7 @@ Expected: PASS all green; build clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main.ts tests/main.test.ts dist/index.js
+git add src/main.ts tests/main.test.ts README.md tests/readme.test.ts dist/index.js
 git commit -m "fix: redact runtime keys at every artifact write (F02)"
 ```
 
@@ -145,9 +161,9 @@ git commit -m "fix: redact runtime keys at every artifact write (F02)"
 
 **Interfaces:**
 - Consumes: `STALE_SHA` classifier, `OFF_DIFF` classifier in `src/github.ts` (unchanged).
-- Produces: `export class StaleHeadError extends Error { analyzedSha: string; liveSha: string }` from `src/github.ts`; `postReview` throws it on the first stale-commit 422 (after learning `liveSha` via the existing `pulls.get` call, which stays); the re-resolve-and-retry branch is removed. `PostReviewResult` drops `retriedWithNewSha`. `publishReview` catches `StaleHeadError` and calls `note(env, out, ...)` with the exact string below, posts nothing, exit 0. Both flows (A and B) share `publishReview`, so both are covered.
+- Produces: `export class StaleHeadError extends Error { analyzedSha: string; liveSha: string }` from `src/github.ts`; `postReview` throws it on the first stale-commit 422 (after learning `liveSha` via the existing `pulls.get` call, which stays); the re-resolve-and-retry branch is removed. `PostReviewResult` drops `retriedWithNewSha`. `publishReview` catches `StaleHeadError` and calls `note(env, out, ...)` with the exact string below, posts nothing, and sets a new optional `staleSkipped?: boolean` flag on the outcome plus `out.exitCode = 0`. Both flow callers (`runFlowA`, `runFlowB`) skip their unconditional `out.exitCode = exitFor(...)` overwrite when `out.staleSkipped` is set — otherwise the default warning gate would exit 2 on the skipped run. Both flows (A and B) share `publishReview`, so both are covered.
 
-Exact skip note: `` `pr-reviewer: PR head moved during posting; analyzed ${analyzedSha}, live ${liveSha}; skipping review for the stale head.` ``
+Exact skip note: `` `pr-reviewer: PR head moved during posting; analyzed ${analyzedSha}, live ${liveSha}; skipping review for the stale head — a fresh run will cover the new head.` ``
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -162,17 +178,19 @@ it("stale commit_id 422 throws StaleHeadError with both SHAs and makes no second
 ```ts
 // tests/main.test.ts
 it("stale head during posting skips the review with a note and exit 0", async () => {
-  // run() fixture whose fake Gateway postReview throws StaleHeadError-like path;
-  // assert no review posted, summary contains "skipping review for the stale head", exit 0.
+  // run() fixture (fail_level warning, warning-severity findings present) whose fake
+  // Gateway postReview path throws StaleHeadError; assert no review posted, summary
+  // contains "skipping review for the stale head", and exit code is 0 (not 2).
 });
 it("stale head on the Flow B path skips with the same note", async () => {
   // workflow_run fixture reaching publishReview with a stale 422; same assertions.
 });
 ```
 
-Update the eight tests pinning the old contract
-(`tests/github.test.ts:70,175,245,279,286,293,300,309,316`) to the new one:
-no re-resolve-and-retry; single POST attempt on the stale path. Update the doc
+Update the tests pinning the old contract
+(`tests/github.test.ts:70,175,245,272,279,286,293,300,309,316` — including :272,
+whose `toEqual({ degraded: false, retriedWithNewSha: false })` must drop the
+removed field) to the new one: no re-resolve-and-retry; single POST attempt on the stale path. Update the doc
 comments at `src/github.ts:26,124,126` (remove re-resolve language, state skip).
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -185,7 +203,9 @@ Expected: FAIL (old retry behavior / missing StaleHeadError).
 In `postReview`: on `STALE_SHA` match, keep the `pulls.get` live-sha lookup
 (unchanged error mapping), then `throw new StaleHeadError(commitId, head)`
 instead of retrying. In `publishReview`: catch `StaleHeadError`, emit the exact
-skip note via `note()`, return without posting (exit code stays 0).
+skip note via `note()`, set `out.staleSkipped = true` (new optional field on the
+outcome) and `out.exitCode = 0`, return without posting. In `runFlowA` and
+`runFlowB`: guard the `exitFor` overwrite with `if (!out.staleSkipped)`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -208,8 +228,16 @@ git commit -m "fix: skip (never relabel) on stale PR head (F03)"
 - Test: `tests/scanners.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `parseSarif(text)` (exists), `warning(rule, message)` helper (exists; check its exact name/signature in `src/scanners.ts` before use).
-- Produces: unchanged `fromStdout(tool, label, r, timeoutMs?)` signature; when parsed SARIF is present AND (`runs[].invocations[]` has `executionSuccessful === false` OR any `toolExecutionNotifications[]` with `level: "error"`), the returned array is `[...parsed, warning("scanner-failed", ...)]` with the exact message `` `${label} reported an unsuccessful run` ``.
+- Consumes: `parseSarif(text)` (exists; contract unchanged — its tests pin `toEqual([...])`).
+- Produces: unchanged `fromStdout(tool, label, r, timeoutMs?)` signature; implementation
+  `JSON.parse`s the stdout a second time in a `try/catch` (never touching `parseSarif`)
+  and walks `runs[].invocations[]`: `executionSuccessful === false` or any
+  error-level `toolExecutionNotifications` entry appends the exact message
+  `` `${label} reported an unsuccessful run` `` as `warning("scanner-failed", ...)`.
+  Exit-code rule when SARIF carries no invocation info at all: code >= 2, null, or
+  abnormal appends the same warning; code 1 (findings-found for all four scanners)
+  stays quiet. When SARIF parses, `parseSarif`'s findings are always kept — the
+  warning is appended, never substituted.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -226,6 +254,9 @@ it("unsuccessful run WITH results keeps the findings and appends the warning", (
 it("exit-1 with clean successful SARIF stays quiet (findings codes keep meaning)", () => {
   // code 1, executionSuccessful true/absent, one result → findings only, no warning.
 });
+it("fatal exit without invocation info still warns", () => {
+  // code 2, valid SARIF with results but NO invocations key → findings plus the warning.
+});
 ```
 
 Check the `Exec` type fields (`missing`, `timedOut`, `code`, `stdout`) in `src/scanners.ts` and construct fakes accordingly.
@@ -237,11 +268,13 @@ Expected: FAIL (no warning appended).
 
 - [ ] **Step 3: Implement invocation-health check in `fromStdout`**
 
-After successful `parseSarif`, walk `runs[].invocations[]`; on
-`executionSuccessful === false` or any error-level
-`toolExecutionNotifications` entry, append the exact warning above. Apply the
+After successful `parseSarif`, re-parse the stdout JSON in a `try/catch` (never alter
+`parseSarif` itself) and walk `runs[].invocations[]` per Interfaces, including the
+exit-code rule for SARIF without invocation info. Apply the
 same check to the file-report SARIF path (line ~380) if it parses the same
-`runs` shape; otherwise note in the report why it is out of scope.
+`runs` shape; otherwise note in the report why it is out of scope (that path parses
+a report file, not a process result, so exit codes do not apply there — invocation
+health still does if the shape matches).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -279,10 +312,24 @@ it("skips the size check when maxBytes is undefined", ...);
 
 ```ts
 // tests/main.test.ts
-it("logs the linked repo SHA on reuse", ...); // agent fixture; assert log contains "agent linked repo someone/else at "
+it("logs the linked repo SHA on reuse", ...);
 ```
 
+Determinism mechanism (no network): the fixture sets `RUNNER_TEMP` to a scratch
+dir, pre-creates `<scratch>/lupa-linked/someone__else` as a real local git repo
+(`git init`, `git remote add origin https://github.com/someone/else.git`, one commit
+with `git -c user.email=t@t -c user.name=t commit`, marker `.lupa-clone.json` with
+matching repo/branch), then drives `run()` — validation passes on local git ops
+only, no clone is attempted, and the log contains
+"agent linked repo someone/else at <sha>". Requires a git binary (already required
+by the existing clone-failure test).
+
 Check how `core.info` is asserted in existing agent tests before writing the log test.
+
+Existing `toEqual({ dir })` expectations at `tests/linked-repos.test.ts:76,113,176`
+become `{ dir, sha }`; the "already-cloned dir is returned without running git"
+test at `:102-113` is REPLACED by the non-git-dir re-clone test above (an empty dir
+is exactly the force-reclone case now).
 
 - [ ] **Step 2: Run tests to verify they fail**
 

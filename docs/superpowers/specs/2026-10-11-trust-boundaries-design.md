@@ -41,7 +41,10 @@ synthetic key through each write path and assert `[REDACTED]` with intact struct
 
 `src/main.ts` publish path. The analyzed SHA is the review's identity. On a
 stale-commit 422, drop the post and write a summary/log note naming both SHAs
-(analyzed vs live) stating a fresh run will cover the new head; exit 0. Never
+(analyzed vs live) stating a fresh run will cover the new head; exit 0 — implemented
+via a `staleSkipped` flag on the outcome: `publishReview` sets it with the note,
+and both flow callers skip their `exitFor` overwrite when it is set (otherwise the
+default warning gate would exit 2 on the skipped run). Never
 re-stamp old findings with a new `commit_id`. The next push/synchronize already
 opens a fresh run, so signal is deferred, not lost. The live `getPr` head-check
 before posting is unchanged. Tests extend existing 422 coverage: stale head now
@@ -51,26 +54,37 @@ asserts no POST with the new SHA plus the skip note.
 
 `src/scanners.ts`. `fromStdout` (and equivalents) record invocation health — exit
 code plus `run.executionSuccessful` / execution-error notifications — instead of
-accepting any parseable SARIF at face value. A failed/partial invocation emits a
+accepting any parseable SARIF at face value. Concretely: when SARIF parses, inspect
+`runs[].invocations[]`; `executionSuccessful === false` or any error-level
+`toolExecutionNotifications` entry appends the warning. When SARIF parses but carries
+no invocation info at all, a fatal-style exit (code >= 2, null, or abnormal) appends
+it; exit code 1 (the findings-found code for semgrep, gitleaks, trivy, osv-scanner)
+stays quiet. A failed/partial invocation emits a
 `warning` finding (scanner rule id, e.g. `[scanner-failed]`, naming tool and reason)
 as a general review item, alongside usable partial findings, never instead of them.
-Clean-empty stays silent; per-scanner "findings found" exit codes keep their meaning.
+Clean-empty stays silent. Known coverage limitation: invocation health only fires
+where the scanner emits `runs[].invocations[]` (verified for semgrep; unconfirmed
+for trivy/osv-scanner/gitleaks file reports, which stay on the exit-code rule).
 Fixtures: exit-2 + `executionSuccessful: false` + error notification + zero results
-yields exactly one warning; partial yields findings plus warning.
+yields exactly one warning; partial yields findings plus warning; exit-1 with clean
+successful SARIF yields findings only.
 
 ## 5. F12 — validate linked-clone cache before reuse
 
 `src/linked-repos.ts` (+ one `main.ts` touch). When the expected clone dir exists,
-`ensureLinkedRepo` verifies before returning: `.git` present, `origin` URL matches
-`github.com/<owner>/<repo>`, checked-out ref is the expected default branch (recorded at clone time in a
+`ensureLinkedRepo` verifies before returning: `.git` present, `origin` URL exactly
+equals `https://github.com/<owner>/<repo>.git`, checked-out ref is the expected default branch (recorded at clone time in a
 `.lupa-clone.json` marker next to the clone: `{repo, branch, sha}` — no network
 needed on reuse; the marker only names expectations, and every claim is rechecked
 against git itself (`git config --get remote.origin.url`,
-`git rev-parse --abbrev-ref HEAD`, size walk) before reuse. Any mismatch → wipe
-and re-clone under the existing guards/timeouts. The resolved SHA is logged. Failures reuse the existing
+`git rev-parse --abbrev-ref HEAD`, size walk) before reuse. Exact origin matching
+fails closed: a mismatch can only ever trigger a safe re-clone, never a wrong reuse.
+Any mismatch → wipe
+and re-clone under the existing guards/timeouts. The resolved SHA (re-derived from
+git, never trusted from the marker) is logged. Failures reuse the existing
 "not accessible" tool-error contract, so the model loop is unaffected. Fixtures:
 non-git dir, wrong origin, and oversized cache each force re-clone; valid cache is
-reused with zero git calls asserted plus SHA logged.
+reused with zero git-mutating calls asserted plus SHA logged.
 
 ## 6. Verification and release
 
