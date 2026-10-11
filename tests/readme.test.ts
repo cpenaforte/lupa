@@ -70,4 +70,20 @@ describe("README", () => {
     expect(sec).toContain("continue-on-error");
     expect(sec).toMatch(/review still posts/i);
   });
+
+  it("documents the agent inputs, tools and disclosure", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    for (const s of [
+      "llm_agent",
+      "llm_agent_max_turns",
+      "llm_agent_max_seconds",
+      "read_file",
+      "stop=final",
+    ]) {
+      expect(r).toContain(s);
+    }
+    expect(r).toContain(
+      "In agent mode, whole files from the repository (and from linked repositories mentioned in the PR body) may be sent to your LLM provider — not just the diff.",
+    );
+  });
 });

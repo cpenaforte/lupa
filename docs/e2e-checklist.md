@@ -84,6 +84,12 @@ Release order (strict; `v1` moves exactly once, as the last tag move):
      Security tab (Code scanning alerts). With either permission missing the upload fails with
      "Resource not accessible by integration" and `continue-on-error` absorbs it silently; that is
      expected, but the canary should exercise the enabled path at least once.
+   - **Agent-mode check:** enable `llm_agent: true` on the canary and run two PRs: one that needs
+     cross-file context (e.g. a changed function whose caller in another file breaks) and one whose
+     body mentions a public linked repo. Verify the job log shows `agent turn ...` lines and
+     `agent done: ... stop=final`, plus `agent linked repositories: ...` for the linked-repo PR.
+     For a model without tool support, verify the run falls back to single-shot with the warning
+     `agent tools unsupported for this model: using single-shot`.
 4. **Substitute the tag's commit SHA into BOTH templates**, then commit on `main` (follow-up commit C).
    Get the SHA from the tag, never type it by hand. The first `sed` replaces the placeholder with the
    owner and the SHA; the second drops the stale `# replace with a released SHA` comment. Replace

@@ -5,7 +5,7 @@ A reusable GitHub Action (TypeScript, Node 24) that reviews pull requests in two
 - **Fast-path (always, free, any language):** diff statistics, sensitive paths, secret detection (gitleaks), TODO/FIXME markers, lockfile changes without a manifest, and scanners (semgrep, gitleaks, trivy, osv-scanner). Optional L2 native toolchains run only when the repository already has their config.
 - **Slow-path (optional, bring your own key):** an LLM reviews the diff. It runs only when `llm_api_key` is set. Without a key it is skipped with a warning and the fast-path result is posted.
 
-The diff is treated as untrusted data. The LLM has no tools and its output is validated against a schema before anything is posted.
+The diff is treated as untrusted data. By default the LLM has no tools (see Agent mode for the opt-in tool loop) and its output is validated against a schema before anything is posted.
 
 ## Quick start
 
@@ -43,6 +43,9 @@ The diff is treated as untrusted data. The LLM has no tools and its output is va
 | `llm_api_key` | (empty) | Provider key. Never logged. |
 | `llm_temperature`, `llm_top_p` | (unset) | Sent only when set explicitly. Left unset by default because reasoning models reject other values. |
 | `llm_max_tokens` | `2000` | Maximum output tokens. |
+| `llm_agent` | `false` | Enable read-only repository tools so the reviewer can verify claims before reporting. |
+| `llm_agent_max_turns` | `10` | Maximum number of tool-call rounds the agent may take. |
+| `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. |
 | `pr_number` | (empty) | Used only by `workflow_dispatch`. |
 | `fail_level` | `warning` | `none`, `warning` or `high`. See the gate section. |
 | `max_diff_chars` | `60000` | Diff ceiling sent to the LLM. |
@@ -92,6 +95,27 @@ The default wire format is `openai-chat`: `POST {base_url}/chat/completions` wit
 - The `GET {base}/models` check still runs before the probe and only confirms that the model id exists; probing never changes that check.
 - A path-only `llm_path` that names a non-chat endpoint (`/messages`, `/responses`, `/models`) is still rejected without a v2 style, because the path alone cannot select a body adapter.
 - All styles share one outcome contract: the same findings schema, the same failure reasons, a 90 s timeout, one retry on 5xx/429, and `temperature`/`top_p` only when set explicitly.
+
+## Agent mode
+
+Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock).
+
+| Tool | What it does | Caps |
+|---|---|---|
+| `read_file` | Reads a UTF-8 text file with numbered lines (1-based, inclusive range). | Truncated with `[truncated]` past the 32768-byte per-result cap. |
+| `list_dir` | Lists a directory shallowly (name, type, size), directories first then files. | First 200 entries; `truncated: true` when there are more. |
+| `grep` | Searches file contents with a JavaScript regular expression. | At most 100 matches (`max_results` is capped at 100); files over 1 MiB are skipped. |
+| `glob` | Lists repository-relative paths matching a glob pattern. | First 200 paths; `truncated: true` when there are more. |
+
+At most 4 tool calls run per turn, each result is capped at 32768 bytes, and the loop stops when 131072 total result bytes are reached. Paths that escape the checkout, absolute paths, `..` segments and `.git` are rejected.
+
+Linked repositories: `owner/repo` references (github.com URLs or bare `owner/repo` mentions) in the PR body, up to 3, are lazily cloned at the default branch (`--depth 1 --single-branch`) with `github_token` when a tool call names them. Parsing is logged as `agent linked repositories: ...`.
+
+Fallback: a model whose endpoint rejects the tool-call shape (an HTTP 400 on the tool-call turn that succeeds without tools) is remembered as tools-unsupported and the run falls back to a single-shot review with the warning `agent tools unsupported for this model: using single-shot`.
+
+Progress is logged per turn (`agent turn <n>: tools=[...] results_bytes=<b> ms=<ms>`) and at the end (`agent done: turns=<t> calls=<c> bytes=<b> stop=<stop> elapsed=<s>s`, with `stop=final` when the model returned the findings object).
+
+In agent mode, whole files from the repository (and from linked repositories mentioned in the PR body) may be sent to your LLM provider — not just the diff.
 
 ## Cost
 
