@@ -1,4 +1,4 @@
-# CI for pr-reviewer itself. Every third-party `uses:` is pinned by a full commit SHA (tests/ci.test.ts
+# CI for lupa itself. Every third-party `uses:` is pinned by a full commit SHA (tests/ci.test.ts
 # enforces this). The smoke jobs run the committed bundle via `node` rather than the action under test,
 # so no unpinned ref remains. No remote code except URL+sha256-pinned actionlint.
 name: CI
