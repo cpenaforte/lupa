@@ -656,7 +656,7 @@ export async function callWithProbe(
 // ---------------------------------------------------------------------------
 
 /** In-process memo of models that reject tools, keyed provider:model. */
-export const TOOLS_MEMO = new Map<string, boolean>();
+const TOOLS_MEMO = new Map<string, boolean>();
 
 /** Test-only: clears the in-process tools memo (production never resets it). */
 export function resetToolsMemo(): void {
