@@ -46,24 +46,27 @@ export interface WalkLimits {
   maxFiles?: number;    // default 10_000 — entries examined: each dirent classified
   // in a directory loop counts 1, files and directories alike (pruned/.git/symlink/
   // non-regular entries are never examined and never counted), not just returned.
-  // Checked before classifying each entry (`examinedCount >= maxFiles` → stop).
+  // Checked in two places: (a) before classifying each entry (`examinedCount >=
+  // maxFiles` → stop); (b) at the top of each loop iteration after pop, before
+  // readdir (covers directories pushed when the count is already at max).
   deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked at the
-  // top of each directory iteration including the first, as `elapsed >= deadlineMs`
-  // against `Date.now()` (a non-positive deadline fires immediately — test-seam use;
-  // an unvisited start directory counts as one queued unit). Known granularity: one
-  // synchronous directory read plus its entry loop cannot be preempted, so the walk
-  // can overshoot the bound by one directory's processing time
+  // top of each directory iteration including the first, at the same point as (b),
+  // as `elapsed >= deadlineMs` against `Date.now()` (a non-positive deadline
+  // fires immediately — test-seam use; an unvisited start directory counts as one
+  // queued unit). Never applies to a file start (no directory iteration). Known
+  // granularity: one synchronous directory read plus its entry loop cannot be
+  // preempted, so the walk can overshoot the bound by one directory's processing time
 }
 export interface WalkSkipped {
   oversized: number;  // > 1 MiB, content walk only
   binary: number;     // NUL in first 8 KB, content walk only
-  // Unprocessed entries in the current loop + 1 per stacked directory whose listing
-  // was never read (contents unknowable — one unit each) at the moment a walk limit
-  // fired; pruned/.git/symlink/non-regular entries are excluded (they are
-  // deliberately skipped, not limit-cut). 0 unless a limit fired — a limit fires only
-  // when an unexamined entry remains, and end of walk with a non-empty stack also
-  // stops as truncated (a pushed-but-unlisted directory may hold unseen files), so
-  // exact fit with an empty stack yields `truncated: false`.
+  // Unprocessed entries in the current loop (for (a)) + 1 for the current directory
+  // when its listing was never read (for (b)) + 1 per remaining stacked directory
+  // at the moment a walk limit fired; pruned/.git/symlink/non-regular entries are
+  // excluded (they are deliberately skipped, not limit-cut). 0 unless a limit fired —
+  // a limit fires only when an unexamined entry remains, and end of walk with a
+  // non-empty stack also stops as truncated (a pushed-but-unlisted directory may hold
+  // unseen files), so exact fit with an empty stack yields `truncated: false`.
   overLimit: number;
 }
 ```
