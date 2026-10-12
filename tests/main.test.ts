@@ -22,7 +22,7 @@ import {
 } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
 import { ReadonlyTokenError, StaleHeadError } from "../src/github.js";
-import type { ReviewPayload } from "../src/review.js";
+import { buildFallbackReport, redactFindings, type ReviewPayload } from "../src/review.js";
 import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
@@ -2219,5 +2219,29 @@ describe("finding provenance rendering (Q04)", () => {
     const b: Finding = { severity: "warning", file: "src/b.ts", rule: "r2", message: "second", source: "llm", confidence: 70 };
     const r = await runWithMocks({ maxFindings: 1, llm: [a, b] });
     expect(r.body ?? "").toContain("> Omitted: 1 finding(s) omitted to fit the 1-finding publication limit.");
+  });
+
+  it("redacted secret appears on neither the fallback nor the SARIF surface", () => {
+    const secret = "sk-secret-1";
+    const redacted = redactFindings(
+      [
+        {
+          severity: "warning",
+          file: "src/a.ts",
+          line: 2,
+          rule: "r",
+          message: `saw ${secret} in code`,
+          suggestion: `rotate ${secret} now`,
+          source: "semgrep",
+          confidence: 90,
+          evidence: { analyzer: `tool ${secret}`, snippet: `token ${secret} here` },
+        },
+      ],
+      [secret],
+    );
+    const fallback = buildFallbackReport(redacted);
+    expect(fallback).not.toContain(secret);
+    expect(fallback).toContain("[REDACTED]");
+    expect(JSON.stringify(toSarif(redacted))).not.toContain(secret);
   });
 });
