@@ -53,8 +53,9 @@ deadlineMs?: number  // absolute epoch-ms; when present runAgent uses it verbati
 - `runAgent` uses `budget.deadlineMs ?? start + maxSeconds * 1000`, reusing the
   existing `start`/`deadline` locals — no new `clock()` reads (the `:166`
   `++reads` fixture is safe). All four `hooks.call` sites pass the absolute value.
-  `timeoutFor` becomes `Math.max(1, Math.floor(remaining / 1000))` (floor keeps the
-  absolute bound; the existing 10 s `timedOut()` margin means the max-guard is
+- `timeoutFor` becomes `Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)))` (floor keeps the
+  absolute bound; the cap preserves the configured per-turn ceiling — dropping it would send
+  `timeoutSeconds: 120` on a 60 s default; the existing 10 s `timedOut()` margin means the max-guard is
   unreachable in practice).
 - `callWithProbeAgent` computes `Date.now() + maxSeconds * 1000` ONCE and threads
   `deadlineMs` into every `runStyle` budget (explicit and probe paths alike), so
@@ -106,6 +107,13 @@ executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: nu
 ```
 
 - runAgent's tool loop supplies both on every call: `deadlineMs` is the run's
+  absolute deadline converted to wall-clock (`Date.now() + max(0, deadline - clock())`
+  — the loop clock may be fake in tests while tool timers are real; the conversion
+  keeps them consistent, identity in production); `maxResultBytes` is the per-call
+  effective cap from the byte rules below. No other caller passes `limits` (existing
+  3-arg callers compile).
+
+- runAgent's tool loop supplies both on every call: `deadlineMs` is the run's
   absolute deadline (the hop that makes the whole grep/glob/clone chain reachable
   from the loop); `maxResultBytes` is the per-call effective cap from the byte
   rules below. No other caller passes `limits` (existing 3-arg callers compile).
@@ -117,6 +125,9 @@ executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: nu
   the walk the worker timeout is recomputed as `min(GREP_TIMEOUT_MS, remaining-now)`
   (expired → timeout error, no spawn). `grepInRoot(root, args, timeoutMs?,
   limits?, endMs?)` and `grep()` forward the absolute end.
+  Each tool function takes the per-call cap explicitly: `readFile`/`grep` parameterize
+  their caps; `listDir(args, ctx, maxBytes?)` / `glob(args, ctx, maxBytes?)` take an
+  optional trailing cap for entry-dropping; `errorResult` caps via the constant.
 - `walkPaths` via glob: duration `min(WALK_DEFAULT, remaining)`; entry-expired →
   error result. `read_file`/`list_dir` are synchronous bounded work — no deadline
   (stated).
@@ -134,15 +145,22 @@ executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: nu
 
 ### Byte allowance (exact)
 
+`bytes` counts content outputs only (tool results shown to the model, markers
+included); bookkeeping records (budget-exhausted errors, backstop replacements),
+turn logs, and `elapsedMs` are excluded (observability/metadata, bounded to ~65 B
+each by construction).
+
 - Tools cap payloads to `limits?.maxResultBytes ?? AGENT_LIMITS.resultBytes`:
   `read_file`/`grep` parameterize their existing marker-inside caps (same behavior
   at default); `list_dir`/`glob` drop tail entries (`truncated` stays true — the
   flag IS the signal, no marker needed); `errorResult` caps messages at 2000 chars
   with the marker inside (`ERROR_MESSAGE_CAP = 2000`, new constant).
-- runAgent per tool call: `remaining = maxTotalBytes - bytes`; `remaining <= 0` →
+- runAgent per tool call: `remaining = maxTotalBytes - bytes`; `remaining < markerBytes`
+  (12, the `\n[truncated]` marker — below which no content output can fit) →
   skip execution, record `{"error":"tool result budget exhausted (max <maxTotalBytes> bytes)"}`
   (exact text with the number), do NOT increment `calls`; else pass
-  `maxResultBytes: min(maxResultBytes, remaining)` so the total stays exactly bounded.
+  `maxResultBytes: min(maxResultBytes, remaining)` so content totals stay exactly bounded.
+  (A bare `remaining <= 0` is subsumed: it is always `< markerBytes`.)
 - Backstop replaces `capOutput` (removed): exported
   `capToolResult(output: string, maxBytes: number): string` — JSON parses AND
   `byteLength <= maxBytes` → passthrough unchanged; else →
