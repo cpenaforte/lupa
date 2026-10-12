@@ -3,7 +3,7 @@
 Date: 2026-10-12
 Status: design approved (2026-10-12); review round 1 applied (2026-10-12)
 Source: Codex audit `PROJECT_FINDINGS.md` (F10), local HEAD `885adea`
-Goal: bound the whole single-shot inference request — fast findings, linked-issue
+Goal: bound the variable user-message portion of the single-shot inference request — fast findings, linked-issue
 context, and diff together — with sanitized evidence, separate allowances, and
 explicit omission records.
 
@@ -21,6 +21,10 @@ explicit omission records.
   overflow (whole findings dropped with a count — never mid-finding cuts), then
   stop: the diff is never cut below its own cap. Every cut leaves an explicit
   marker/count.
+- Non-ASCII-heavy PRs may skip at default config (60,000 UTF-16 units of CJK ≈
+  180,000 bytes > the 120,000-byte default): accepted as intended — the budget is a
+  cost/surprise control, the skip warns with both sizes, and the knob is tunable.
+  README states this plainly.
 - Sanitize-before-prompt: fast findings are sanitized once at Flow A construction,
   before both prompt assembly and artifact writes.
 - Ship with the whole-plan release — no tag for F10 alone (standing instruction:
@@ -54,7 +58,7 @@ skipped-files note, and section framing are accounted for automatically.
 ```yaml
 # action.yml, beside max_diff_chars
 max_prompt_chars:
-  description: "Maximum UTF-8 bytes for the assembled single-shot LLM user message: diff text, fast-findings JSON, linked-issue context, section headers, and the skipped-files note (the fixed ~1.5 KB system prompt is excluded). Requests that stay over budget after bounded cuts are skipped with a warning. Note: max_diff_chars is counted in UTF-16 code units, not bytes."
+  description: "Maximum UTF-8 bytes for the assembled initial LLM user message on both paths (single-shot reviews and the agent-mode initial message): diff text, fast-findings JSON, linked-issue context, section headers, and the skipped-files note (the fixed ~1.5 KB system prompt is excluded). Requests that stay over budget after bounded cuts are skipped with a warning. Note: max_diff_chars is counted in UTF-16 code units, not bytes."
   required: false
   default: "120000"
 ```
@@ -83,25 +87,28 @@ budgetPrompt(
 ```
 
 It takes the same structured regions `buildMessages` renders (never string surgery
-on the assembled message). `buildMessages` gains one optional trailing parameter,
-`omitted: number = 0`, rendering the prose line after the findings JSON when > 0:
+on the assembled message). `buildMessages` gains one optional parameter after the
+existing `agent?` slot — `buildMessages(fast, promptText, issueBody, skipped, agent, omitted = 0)` —
+rendering the prose line after the findings JSON when > 0 (single-shot callers pass
+`undefined` for `agent`: `buildMessages(fast, promptText, issueBody, skipped, undefined, omitted)`).
+Still a pure function; existing 4- and 5-arg callers and tests are unaffected. There is
+exactly ONE budgeted assembly: `budgetPrompt` + `buildMessages` run once before the
+`if (i.llmAgent)` branch, and both paths consume its outputs (the agent path adds
+tools/turns around the same message). Add one agent-path assertion that the `Tool budget`
+addendum survives an omission. Agent tool-round accumulation is F11 and
+out of scope (no agent-path budget test). Ordering within the slow path is unchanged
+and deliberate: key/model/endpoint checks, `ensureOllama`, and `checkModelListed`
+(`:520`) run before assembly + budget — authoritative preconditions first (a budget
+verdict is meaningless if the model is absent; the ollama-pull cost exists today
+regardless) — then the probe call. "No LLM call" holds either way.
 
 ```
 Omitted <M> fast finding(s) to fit the prompt budget.
 ```
 
-(still a pure function; existing 4-arg callers and tests are unaffected). The caller
-re-renders via the unchanged-shape `buildMessages(..., omitted)`; measurement happens
-on that final string, so the omission line is inside the budget. Both the single-shot
-(`:530`) and agent-mode (`:576`, threading its `{ maxTurns }` through) assembly sites
-share the helper for the initial message; agent tool-round accumulation is F11 and
-out of scope (no agent-path budget test). Ordering within the slow path is unchanged:
-key/model/endpoint checks and `checkModelListed` (`:520`) run first, then assembly +
-budget, then the probe call — "no LLM call" holds either way.
-
 Cut order, each leaving its explicit record:
 
-1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + markerReserve)`, all in bytes on the assembled regions. Truncate the neutralised issue text to the allowance with a trailing `…[issue context truncated to fit the prompt budget]` marker, keeping the `<linked-issue>` tags balanced (marker inside the block). When the allowance cannot fit marker + tags (~100 bytes), drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling).
+1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + markerReserve)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers, tags, skipped-files note, JSON brackets/commas, and the omission line). No closed-form constant is needed: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget. Truncate the neutralised issue text to the allowance with a trailing `…[issue context truncated to fit the prompt budget]` marker, keeping the `<linked-issue>` tags balanced (marker inside the block). When the allowance cannot fit marker + tags (computed byte lengths, not an estimate), drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling).
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
@@ -149,11 +156,18 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 - Still-over-budget-after-cuts skips with the size-naming warning; no LLM call.
   Two fixtures: (a) diff-alone: ASCII diff at default `maxDiffChars` scale with
   `maxPromptChars: 1000` (diff section alone exceeds the budget — deterministic, no
-  multibyte needed); (b) after-cuts: small diff that fits, but diff + framing +
-  a 100-file skipped-files note exceed a 6,000-byte budget after issue and findings
-  are dropped (pins the branch where cuts are exhausted yet the total still overflows).
-- Multibyte floor: 8 files of ~7,500 CJK units each (60,000 UTF-16 units ≈ 180,000
-  bytes; each file under the 8,000-unit `PER_FILE_CAP` so no per-file cut shrinks it)
+  multibyte needed); (b) after-cuts: diff file with a ~5,200-byte hunk (fits the 6,000
+  budget alone) + 100 skipped files (note capped at 20 ≈ 700 B) + framing ≈ 200 B, with
+  a linked issue and fast findings present: issue dropped, findings dropped to zero,
+  yet diff + note + framing ≈ 6,100 > 6,000 → skip (pins the branch where cuts are
+  exhausted yet the total still overflows).
+- Pure-renderer tests in `tests/prompt.test.ts`: the `omitted` prose line renders after
+  the findings JSON via the 6th param; the skipped-files list caps at 20 with the
+  `…and <N> more` line (both pure `buildMessages` assertions, no budget needed).
+- Multibyte floor: 8 files of ~7,450 CJK units each (≈60,000 UTF-16 units ≈ 180,000
+  bytes; each file under the 8,000-unit `PER_FILE_CAP` so no per-file cut shrinks it —
+  note the `--- path` headers and trailing newline count toward `maxChars`, so 7,500
+  would total ≈60,240 and skip the 8th file)
   with default 120,000-byte budget skips — this is intended default-config behavior for
   non-ASCII-heavy PRs, pinned so the unit fix cannot regress.
 - Skipped-files cap: >20 skipped paths render 20 + the `…and <N> more` line.
