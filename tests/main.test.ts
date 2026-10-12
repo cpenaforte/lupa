@@ -1525,20 +1525,33 @@ describe("prompt budget", () => {
     expect(r.llmCalled).toBe(0);
   });
   it("skips after cuts are exhausted", async () => {
+    vi.mocked(core.warning).mockClear();
     const r = await runWithMocks({ maxPromptChars: 6000, maxDiffChars: 5500, diff: BIG_FIRST_PATCH, issueBody: "z".repeat(3000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
     // ^ BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files `src/fixture-source-file-00.ts` …
     // `src/fixture-source-file-24.ts` (~29-char paths → ~33 B/note-line); test computes exact
     // Buffer.byteLength sums to show diff ≈ 5.2 KB, note ≈ 775 B, total > 6,000 with diff alone < 6,000.
+    expect(vi.mocked(core.warning).mock.calls.map(String).join("\n")).toMatch(/prompt \d+ exceeds max_prompt_chars 6000 after bounded cuts/);
     expect(r.llmCalled).toBe(0);
   });
   it("pins the multibyte floor", async () => {
+    vi.mocked(core.warning).mockClear();
     const r = await runWithMocks({ diff: CJK_PATCH });
     // ^ CJK_PATCH: 8 files × ~7,450 CJK units (each under PER_FILE_CAP 8000).
+    expect(vi.mocked(core.warning).mock.calls.map(String).join("\n")).toMatch(/prompt \d+ exceeds max_prompt_chars 120000 after bounded cuts/);
     expect(r.llmCalled).toBe(0); // ~180 KB bytes > 120,000 default
+  });
+  it("records a prompt-budget skip in the step summary", async () => {
+    const r = await runWithMocks({ maxPromptChars: 1000, diff: DIFF_2000 });
+    expect(r.llmCalled).toBe(0);
+    expect(readFileSync(r.summaryPath, "utf8")).toContain("LLM review skipped, gate uses fast findings only");
   });
   it("sanitizes evidence before the prompt", async () => {
     const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "a\0b" }] });
     expect(r.prompts!.user).toContain('"message":"ab"'); // control strip is the discriminator (NUL never survives JSON.stringify)
+    // The prompt path strips its own sanitized copy: the fast-only findings.json
+    // write the slow-path seam observed still carries the raw control char.
+    expect(r.earlyFindingsRaw).toBeDefined();
+    expect(r.earlyFindingsRaw!).toContain("a\\u0000b");
   });
   it("caps over-long finding fields in the prompt", async () => {
     const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "y".repeat(3000) }] });

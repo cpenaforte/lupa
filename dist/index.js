@@ -28437,7 +28437,7 @@ function budgetPrompt(fast, promptText, issueBody, skipped, budget) {
       curIssue = void 0;
       issueDropped = true;
     } else if (Buffer.byteLength(curIssue, "utf8") > allowance) {
-      curIssue = cutToBytes(curIssue, Math.max(0, allowance - markerBytes)) + ISSUE_TRUNCATION_MARKER;
+      curIssue = cutToBytes(curIssue, allowance - markerBytes) + ISSUE_TRUNCATION_MARKER;
     }
   }
   while (kept.length > 0 && Buffer.byteLength(render(kept, curIssue, omitted), "utf8") > budget) {
@@ -28479,7 +28479,7 @@ function note(env, out, text) {
 function summaryFor(findings) {
   return findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
 }
-async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prBody) {
+async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped, prBody) {
   const i = env.inputs;
   if (i.llmApiKey === "") {
     info("no llm_api_key: slow path skipped");
@@ -28530,6 +28530,7 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prB
   const promptBytes = Buffer.byteLength(messages.user, "utf8");
   if (promptBytes > i.maxPromptChars) {
     warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
+    note(env, out, `lupa: prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts \u2014 LLM review skipped, gate uses fast findings only.`);
     return void 0;
   }
   if (b.issueDropped) {
@@ -28754,7 +28755,7 @@ async function runFlowA(env, deps, out) {
       warning(`linked issue #${issueNo} not fetched: ${e.message}`);
     }
   }
-  const llm = await slowPath(env, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
+  const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
   out.slowPathSkipped = llm === void 0;
   out.findingsFrom = llm === void 0 ? "fastpath" : "llm";
   const all = [...fast, ...llm ?? []].map(sanitizeFinding);

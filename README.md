@@ -141,6 +141,7 @@ The findings and the gate are separate. The review event and the exit code follo
 - A `REQUEST_CHANGES` review always has a body.
 - The action step exits non-zero for `1` and `2`, so the template runs it with `continue-on-error: true` and reads `steps.review.outputs.exit-code` in a separate gate step.
 - The template's gate passes on `0` and `2` and fails on `1`. Warning findings never block a merge. A failed run (for example an action error, where no exit code is produced) still fails the gate. To block on high-severity findings, set `fail_level: high`.
+- A prompt-budget skip passes the gate on fast findings only; the skip is recorded in the step summary.
 
 ## Scanners and their runtimes
 

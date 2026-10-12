@@ -486,7 +486,7 @@ export function budgetPrompt(
       curIssue = undefined;
       issueDropped = true;
     } else if (Buffer.byteLength(curIssue, "utf8") > allowance) {
-      curIssue = cutToBytes(curIssue, Math.max(0, allowance - markerBytes)) + ISSUE_TRUNCATION_MARKER;
+      curIssue = cutToBytes(curIssue, allowance - markerBytes) + ISSUE_TRUNCATION_MARKER;
     }
   }
 
@@ -551,6 +551,7 @@ function summaryFor(findings: Finding[]): string {
  */
 async function slowPath(
   env: RunEnv,
+  out: Outcome,
   deps: Deps,
   pr: number,
   fast: Finding[],
@@ -618,6 +619,7 @@ async function slowPath(
   const promptBytes = Buffer.byteLength(messages.user, "utf8");
   if (promptBytes > i.maxPromptChars) {
     core.warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
+    note(env, out, `lupa: prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts — LLM review skipped, gate uses fast findings only.`);
     return undefined;
   }
   if (b.issueDropped) {
@@ -911,7 +913,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
     }
   }
 
-  const llm = await slowPath(env, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
+  const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
   out.slowPathSkipped = llm === undefined;
   out.findingsFrom = llm === undefined ? "fastpath" : "llm";
   const all = [...fast, ...(llm ?? [])].map(sanitizeFinding);
