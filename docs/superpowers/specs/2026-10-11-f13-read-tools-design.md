@@ -45,11 +45,16 @@ and bound traversal before the worker runs.
 export interface WalkLimits {
   maxFiles?: number;    // default 10_000 — files examined (not just returned)
   deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked per directory
+  // (known granularity: one synchronous directory read plus its entry loop cannot be
+  // preempted, so the walk can overshoot the bound by one directory's processing time)
 }
 export interface WalkSkipped {
   oversized: number;  // > 1 MiB, content walk only
   binary: number;     // NUL in first 8 KB, content walk only
-  overLimit: number;  // files not examined because a walk limit was hit
+  // Entries still queued (current directory remainder + unvisited directories)
+  // at the moment a walk limit fired; pruned/.git/symlink entries are excluded
+  // (they are deliberately skipped, not limit-cut). 0 unless a limit fired.
+  overLimit: number;
 }
 ```
 
@@ -69,9 +74,12 @@ export interface WalkSkipped {
 
 ### read_file line metadata
 
-`end_line` must describe the *visible* content: after the byte-budget cut,
-`visibleLines = cut === "" ? 0 : cut.split("\n").length` over the cut portion only
-(excluding the appended `\n[truncated]` marker), and
+`end_line` must describe the *visible* content: after the byte-budget cut, split the
+cut portion on `\n` and drop one trailing empty segment when the cut ends exactly
+on a line boundary (a raw prefix can end with `\n`, which would otherwise over-count
+by one and let a paging agent skip a line):
+`parts = cut.split("\n"); visibleLines = cut === "" ? 0 : parts.length - (parts[parts.length - 1] === "" ? 1 : 0)`,
+counted over the cut portion only (excluding the appended `\n[truncated]` marker), and
 `end_line = visibleLines ? start + visibleLines - 1 : start - 1`.
 `start_line`, `total_lines`, and `truncated` are unchanged. A truncated response
 therefore never claims lines the agent cannot see.
@@ -79,8 +87,10 @@ therefore never claims lines the agent cannot see.
 ### Prune set
 
 `node_modules`, `vendor`, `target`, `.venv`, `venv`, `__pycache__` — matched as
-exact directory-segment names (any depth), same mechanism as the existing `.git`
-skip. Case-sensitive except `.git`, which keeps its case-insensitive rule.
+exact entry names (file or directory, any depth), same mechanism as the existing
+`.git` entry check. Case-sensitive except `.git`, which keeps its case-insensitive
+rule. Non-regular nodes (fifos, sockets, and anything that is neither file, dir,
+nor symlink) are skipped: never recursed, never listed.
 
 ## 3. Tests
 
