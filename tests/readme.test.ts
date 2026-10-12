@@ -96,4 +96,21 @@ describe("README", () => {
     expect(r).toContain("runtime-key masking only");
     expect(r).toContain("separate scanner concern");
   });
+
+  it("fork section documents the workflow-run credential chain", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    expect(r).toContain("two-workflow pattern");
+    expect(r).toContain(
+      "On fork PRs, the workflow-run token is the default posting credential.",
+    );
+    expect(r).toContain(
+      "An App token via `PR_REVIEWER_APP_ID` / `PR_REVIEWER_APP_KEY` is the recommended upgrade.",
+    );
+    expect(r).toContain(
+      "Without an App token, the run posts with the workflow-run token and emits the downgrade notice.",
+    );
+    expect(r).toContain(
+      "A `github-token` or unset token type never posts on a fork; it skips posting with a loud warning.",
+    );
+  });
 });

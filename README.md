@@ -162,10 +162,12 @@ With `post_comment: false` the action runs the whole pipeline, writes the summar
 
 A fork PR gets a read-only `GITHUB_TOKEN`, so the review cannot be posted from the PR workflow. In that case the action writes the summary and uploads the review artifact (`pr-reviewer-out`, containing `diff.patch`, `pr-meta.json`, `findings.json`, `sarif.json` and `sbom.cdx.json`). Issue comments and code-scanning uploads do not work on read-only fork runs either.
 
-To post reviews on fork PRs, use the two-workflow pattern with an App token:
+To post reviews on fork PRs, use the two-workflow pattern:
 
 1. **Unprivileged** (`docs/workflow-template.yml`, trigger `pull_request`): checks out the PR head with `persist-credentials: false`, writes the diff against the fetched base SHA, runs the review and uploads the artifact. It holds no App key.
 2. **Privileged** (`docs/workflow-template-privileged.yml`, trigger `workflow_run` on `Lupa` with `types: [completed]`, guarded to fork `pull_request` runs that were not cancelled): runs in the base repository context. It only downloads the artifact by `run-id`, verifies the files, and posts the review, using a GitHub App token created with `actions/create-github-app-token` when `PR_REVIEWER_APP_ID` is set. It never checks out PR code, never runs scanners or L2, and never calls the LLM.
+
+On fork PRs, the workflow-run token is the default posting credential. An App token via `PR_REVIEWER_APP_ID` / `PR_REVIEWER_APP_KEY` is the recommended upgrade. Without an App token, the run posts with the workflow-run token and emits the downgrade notice. A `github-token` or unset token type never posts on a fork; it skips posting with a loud warning.
 
 The segregation matters: the privileged job reads only the artifact, so PR code never runs with the App key.
 

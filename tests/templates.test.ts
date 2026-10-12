@@ -230,4 +230,59 @@ describe("workflow templates", () => {
     expect(p).not.toContain("upload-sarif");
     expect(p).not.toMatch(/^ {2}issues:\s*write/m);
   });
+
+  it("privileged template falls back to the workflow-run token with a visible downgrade notice", () => {
+    const p = fs.readFileSync("docs/workflow-template-privileged.yml", "utf8");
+    const sentence =
+      "lupa: posting fork review with the workflow-run token (App token unavailable). For App-token posting set PR_REVIEWER_APP_ID / PR_REVIEWER_APP_KEY — see README (fork reviews)";
+    const escaped = sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Guard step present with the exact name.
+    expect(p).toContain("- name: Note posting credential");
+    // Guard condition pins always() plus the App-outcome check.
+    const guardIdx = p.indexOf("Note posting credential");
+    const guardEnd = p.indexOf("- name:", guardIdx + 1);
+    const guardBlock = p.slice(guardIdx, guardEnd);
+    expect(guardBlock).toContain("always()");
+    expect(guardBlock).toContain("steps.app.outcome != 'success'");
+    // Summary emission is a heredoc carrying the bare sentence on its own line
+    // (leading YAML indent allowed; an echo-prefix or trailing text fails).
+    expect(guardBlock).toContain('cat >> "$GITHUB_STEP_SUMMARY" <<\'EOF\'');
+    expect(guardBlock).toMatch(new RegExp(`^[ \\t]*${escaped}$`, "m"));
+    expect(guardBlock).toContain("EOF");
+    // Annotation echoes the identical line with the ::notice:: prefix.
+    expect(guardBlock).toContain("::notice::" + sentence);
+    expect(guardBlock).toContain(`echo "::notice::${sentence}"`);
+    // Ordering: guard sits after the App step and before the download step.
+    const appIdx = p.indexOf("Create GitHub App token");
+    const downloadIdx = p.indexOf("Download the PR run's review artifact");
+    expect(appIdx).toBeGreaterThanOrEqual(0);
+    expect(downloadIdx).toBeGreaterThanOrEqual(0);
+    expect(guardIdx).toBeGreaterThan(appIdx);
+    expect(guardIdx).toBeLessThan(downloadIdx);
+    // The App step's own block carries continue-on-error (scoped, not file-wide).
+    const appBlock = p.slice(appIdx, p.indexOf("- name:", appIdx + 1));
+    expect(appBlock).toContain("continue-on-error: true");
+    // Token-type fallback arm uses the workflow-run token.
+    expect(p).toContain("'workflow-run'");
+    expect(p).toContain("steps.app.outcome == 'success' && 'app'");
+  });
+
+  it("both templates pin the same fail_level (severity parity)", () => {
+    const extract = (file: string): string => {
+      const text = fs.readFileSync(file, "utf8");
+      const usesIdx = text.indexOf("uses: cpenaforte/lupa@");
+      expect(usesIdx, `${file}: lupa step missing`).toBeGreaterThanOrEqual(0);
+      const withIdx = text.indexOf("with:", usesIdx);
+      expect(withIdx, `${file}: with block missing`).toBeGreaterThanOrEqual(0);
+      const block = text.slice(withIdx, withIdx + 1500);
+      const m = /fail_level: (\w+)/.exec(block);
+      expect(m, `${file}: fail_level missing from lupa with block`).not.toBeNull();
+      const level = m![1];
+      expect(["none", "warning", "high"]).toContain(level);
+      return level;
+    };
+    const privileged = extract("docs/workflow-template-privileged.yml");
+    const producer = extract("docs/workflow-template.yml");
+    expect(privileged).toBe(producer);
+  });
 });
