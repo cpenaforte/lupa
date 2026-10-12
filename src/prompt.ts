@@ -24,9 +24,14 @@ Rules:
  */
 const BLOCK_TAG = /<\s*\/?\s*(?:untrusted-diff|linked-issue)\b[^>]*>?/gi;
 
-function neutralise(text: string): string {
+export function neutralise(text: string): string {
   return text.replace(BLOCK_TAG, (m) => m.replace(/</g, "&lt;").replace(/>/g, "&gt;"));
 }
+
+export const LINKED_ISSUE_HEADER = "## Linked issue (context from the PR's closing reference)";
+export const LINKED_ISSUE_OPEN = "<linked-issue>\n";
+export const LINKED_ISSUE_CLOSE = "\n</linked-issue>";
+export const ISSUE_TRUNCATION_MARKER = "…[issue context truncated to fit the prompt budget]";
 
 function agentAddendum(maxTurns: number): string {
   return [
@@ -42,21 +47,27 @@ export function buildMessages(
   issueBody?: string,
   skipped: string[] = [],
   agent?: { maxTurns: number },
+  omitted = 0,
 ): { system: string; user: string } {
   const system = agent ? `${SYSTEM}\n\n${agentAddendum(agent.maxTurns)}` : SYSTEM;
   const parts: string[] = [];
   parts.push("## Fast findings (deterministic checks already run)");
   // `<` -> \u003c is parse-neutral JSON and stops fake tags inside finding text.
-  parts.push(JSON.stringify(fast).replace(/</g, "\\u003c"));
+  parts.push(
+    JSON.stringify(fast).replace(/</g, "\\u003c") +
+      (omitted > 0 ? `\n\nOmitted ${omitted} fast finding(s) to fit the prompt budget.` : ""),
+  );
   if (skipped.length > 0) {
     parts.push(
       "## Diff budget note\nThe following files were omitted from the diff below to fit the review budget and were not reviewed:",
     );
-    parts.push(skipped.map((f) => `- ${neutralise(f).replace(/[\r\n]/g, "?")}`).join("\n"));
+    const shown = skipped.slice(0, 20).map((f) => `- ${neutralise(f).replace(/[\r\n]/g, "?")}`);
+    if (skipped.length > 20) shown.push(`- …and ${skipped.length - 20} more omitted from this note`);
+    parts.push(shown.join("\n"));
   }
   if (issueBody !== undefined && issueBody.trim() !== "") {
-    parts.push("## Linked issue (context from the PR's closing reference)");
-    parts.push(`<linked-issue>\n${neutralise(issueBody)}\n</linked-issue>`);
+    parts.push(LINKED_ISSUE_HEADER);
+    parts.push(`${LINKED_ISSUE_OPEN}${neutralise(issueBody)}${LINKED_ISSUE_CLOSE}`);
   }
   parts.push("## Pull request diff");
   parts.push(`<untrusted-diff>\n${neutralise(diffText)}\n</untrusted-diff>`);

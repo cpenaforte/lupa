@@ -25703,6 +25703,7 @@ function getInputs() {
     llmMaxTokens: readInt("llm_max_tokens", 2e3, 1),
     failLevel: parseFailLevel(readString("fail_level", "warning")),
     maxDiffChars: readInt("max_diff_chars", 6e4, 1),
+    maxPromptChars: readInt("max_prompt_chars", 12e4, 1),
     postComment: readBool("post_comment", true),
     timeoutSeconds: readInt("timeout_seconds", 90, 1),
     prNumber,
@@ -25978,6 +25979,9 @@ var BLOCK_TAG = /<\s*\/?\s*(?:untrusted-diff|linked-issue)\b[^>]*>?/gi;
 function neutralise(text) {
   return text.replace(BLOCK_TAG, (m) => m.replace(/</g, "&lt;").replace(/>/g, "&gt;"));
 }
+var LINKED_ISSUE_HEADER = "## Linked issue (context from the PR's closing reference)";
+var LINKED_ISSUE_OPEN = "<linked-issue>\n";
+var LINKED_ISSUE_CLOSE = "\n</linked-issue>";
 function agentAddendum(maxTurns) {
   return [
     "You have read-only tools to inspect the repository and any linked repositories: read_file, list_dir, grep, glob. Use them to verify claims (callers, definitions, configs, tests) before reporting.",
@@ -25985,22 +25989,25 @@ function agentAddendum(maxTurns) {
     `Tool budget: up to ${maxTurns} tool-call rounds. When you have enough evidence, respond with ONLY the JSON findings object matching the schema; no prose, no tool calls.`
   ].join("\n");
 }
-function buildMessages(fast, diffText, issueBody, skipped = [], agent) {
+function buildMessages(fast, diffText, issueBody, skipped = [], agent, omitted = 0) {
   const system = agent ? `${SYSTEM}
 
 ${agentAddendum(agent.maxTurns)}` : SYSTEM;
   const parts = [];
   parts.push("## Fast findings (deterministic checks already run)");
-  parts.push(JSON.stringify(fast).replace(/</g, "\\u003c"));
+  parts.push(JSON.stringify(fast).replace(/</g, "\\u003c") + (omitted > 0 ? `
+
+Omitted ${omitted} fast finding(s) to fit the prompt budget.` : ""));
   if (skipped.length > 0) {
     parts.push("## Diff budget note\nThe following files were omitted from the diff below to fit the review budget and were not reviewed:");
-    parts.push(skipped.map((f) => `- ${neutralise(f).replace(/[\r\n]/g, "?")}`).join("\n"));
+    const shown = skipped.slice(0, 20).map((f) => `- ${neutralise(f).replace(/[\r\n]/g, "?")}`);
+    if (skipped.length > 20)
+      shown.push(`- \u2026and ${skipped.length - 20} more omitted from this note`);
+    parts.push(shown.join("\n"));
   }
   if (issueBody !== void 0 && issueBody.trim() !== "") {
-    parts.push("## Linked issue (context from the PR's closing reference)");
-    parts.push(`<linked-issue>
-${neutralise(issueBody)}
-</linked-issue>`);
+    parts.push(LINKED_ISSUE_HEADER);
+    parts.push(`${LINKED_ISSUE_OPEN}${neutralise(issueBody)}${LINKED_ISSUE_CLOSE}`);
   }
   parts.push("## Pull request diff");
   parts.push(`<untrusted-diff>

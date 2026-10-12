@@ -30,6 +30,7 @@ function defaultInputs(): ActionInputs {
     llmMaxTokens: 128,
     failLevel: "warning",
     maxDiffChars: 60000,
+    maxPromptChars: 120000,
     postComment: true,
     timeoutSeconds: 1,
     prNumber: null,

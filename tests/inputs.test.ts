@@ -19,6 +19,7 @@ const INPUT_NAMES = [
   "pr_number",
   "fail_level",
   "max_diff_chars",
+  "max_prompt_chars",
   "post_comment",
   "timeout_seconds",
   "llm_max_tokens",
@@ -60,6 +61,7 @@ describe("getInputs defaults", () => {
     expect(i.llmApiStyle).toBe("auto");
     expect(i.failLevel).toBe("warning");
     expect(i.maxDiffChars).toBe(60000);
+    expect(i.maxPromptChars).toBe(120000);
     expect(i.timeoutSeconds).toBe(90);
     expect(i.llmMaxTokens).toBe(2000);
     expect(i.postComment).toBe(true);
@@ -246,9 +248,29 @@ describe("getInputs integer inputs", () => {
     ["timeout_seconds", "9007199254740993"],
     ["llm_max_tokens", "9007199254740993"],
     ["max_diff_chars", "9007199254740993"],
+    ["max_prompt_chars", "9007199254740993"],
   ])("rejects unsafe-integer %s naming the input", (name, v) => {
     setInputs({ [name]: v });
     expect(() => getInputs()).toThrow(new RegExp(name));
+  });
+
+  it("rejects non-integer max_prompt_chars naming the input", () => {
+    setInputs({ max_prompt_chars: "12.5" });
+    expect(() => getInputs()).toThrow(/max_prompt_chars/);
+  });
+
+  it.each([
+    ["max_prompt_chars", "lots"],
+    ["max_prompt_chars", "0"],
+    ["max_prompt_chars", "-5"],
+  ])("rejects max_prompt_chars %s naming the input", (name, v) => {
+    setInputs({ [name]: v });
+    expect(() => getInputs()).toThrow(new RegExp(name));
+  });
+
+  it("accepts max_prompt_chars boundary '1' (minimum)", () => {
+    setInputs({ max_prompt_chars: "1" });
+    expect(getInputs().maxPromptChars).toBe(1);
   });
 });
 

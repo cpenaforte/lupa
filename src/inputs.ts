@@ -40,6 +40,7 @@ export interface ActionInputs {
   llmMaxTokens: number;
   failLevel: FailLevel;
   maxDiffChars: number;
+  maxPromptChars: number;
   postComment: boolean;
   timeoutSeconds: number;
   prNumber: number | null;
@@ -116,6 +117,7 @@ export function getInputs(): ActionInputs {
     llmMaxTokens: readInt("llm_max_tokens", 2000, 1),
     failLevel: parseFailLevel(readString("fail_level", "warning")),
     maxDiffChars: readInt("max_diff_chars", 60000, 1),
+    maxPromptChars: readInt("max_prompt_chars", 120000, 1),
     postComment: readBool("post_comment", true),
     timeoutSeconds: readInt("timeout_seconds", 90, 1),
     prNumber,

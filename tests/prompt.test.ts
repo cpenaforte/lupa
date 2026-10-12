@@ -156,6 +156,20 @@ describe("PR_REVIEW_SCHEMA", () => {
   });
 });
 
+describe("budget rendering", () => {
+  it("renders the omission line via the 6th param", () => {
+    const m = buildMessages([], "DIFF", undefined, [], undefined, 3);
+    expect(m.user).toContain("\n\nOmitted 3 fast finding(s) to fit the prompt budget.");
+    expect(buildMessages([], "DIFF").user).not.toContain("Omitted ");
+  });
+  it("caps the skipped-files list at 20 with a count", () => {
+    const skipped = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`);
+    const m = buildMessages([], "DIFF", undefined, skipped);
+    expect(m.user).toContain("- …and 5 more omitted from this note");
+    expect(m.user.match(/^- src\/f\d+\.ts$/gm)).toHaveLength(20);
+  });
+});
+
 describe("linkedIssueNumber", () => {
   it("parses closing keywords from PR body only", () => {
     expect(linkedIssueNumber("Fixes #12")).toBe(12);

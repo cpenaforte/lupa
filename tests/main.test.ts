@@ -96,6 +96,8 @@ interface Rec {
   /** findings.json payload observed by the slow-path seam: the early (fast-only) write, before the merged overwrite. */
   earlyFindingsRaw?: string;
   repoSizeCalls: Array<[string, string]>;
+  /** Prompt messages observed by the slow-path seam (Task 58 asserts on these). */
+  prompts?: { system: string; user: string };
 }
 
 function newRec(): Rec {
@@ -108,6 +110,8 @@ interface GwOpts {
   staleDuringPost?: boolean;
   issue403?: boolean;
   body?: string;
+  /** Issue body returned by the getIssueBody fake (default "issue text"). */
+  issueBody?: string;
   /** Size in KB reported by the getRepoSize fake (default 1024). */
   repoSizeKb?: number;
   /** Second and later getPr calls report a moved head. */
@@ -136,7 +140,7 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
     },
     getIssueBody: async (n) => {
       rec.issueBodyFetched = n;
-      return "issue text";
+      return o.issueBody ?? "issue text";
     },
     getRepoSize: async (owner, repo) => {
       rec.repoSizeCalls.push([owner, repo]);
@@ -170,7 +174,8 @@ function inputsFor(o: MockOpts): ActionInputs {
     llmApiKey: o.llmApiKey ?? "test-llm-key",
     llmMaxTokens: 2000,
     failLevel: o.failLevel ?? "warning",
-    maxDiffChars: 60000,
+    maxDiffChars: o.maxDiffChars ?? 60000,
+    maxPromptChars: o.maxPromptChars ?? 120000,
     postComment: o.postComment ?? true,
     timeoutSeconds: 90,
     prNumber: o.prNumber === undefined ? 7 : o.prNumber,
@@ -199,6 +204,12 @@ interface MockOpts {
   issueFallback?: boolean;
   issue403?: boolean;
   failLevel?: "none" | "warning" | "high";
+  /** Prompt budget override (default 120000, the real default). */
+  maxPromptChars?: number;
+  /** Diff ceiling override (default 60000, the real default). */
+  maxDiffChars?: number;
+  /** Issue body returned by the getIssueBody fake (default "issue text"). */
+  issueBody?: string;
   llm?: Finding[];
   headMoves?: boolean;
   /** getPr throws once the call count exceeds this number. */
@@ -265,6 +276,7 @@ async function runWithMocks(o: MockOpts = {}) {
       failGetPrAfter: o.failGetPrAfter,
       body: o.prBody,
       repoSizeKb: o.repoSizeKb,
+      issueBody: o.issueBody,
       info: { isFork: o.forkReadonly === true, headRepo: o.forkReadonly ? "fork/r" : "o/r" },
     }),
     analysis: {
@@ -284,18 +296,20 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.modelProtocol = protocol;
         return { status: o.modelCheck ?? "listed" };
       },
-      callByStyle: async () => {
+      callByStyle: async (_ep, messages) => {
         rec.llmCalled += 1;
         rec.llmVia = "style";
+        rec.prompts = messages as { system: string; user: string };
         return { ok: true, findings: o.llm ?? [LLM_FINDING] };
       },
       callWithProbe:
         o.realLlm === true
           ? async (provider, model, baseUrl, apiKey, messages, opts) =>
               (await callWithProbe(provider, model, baseUrl, apiKey, messages, opts)).result
-          : async () => {
+          : async (_provider, _model, _baseUrl, _key, messages) => {
               rec.llmCalled += 1;
               rec.llmVia = "probe";
+              rec.prompts = messages as { system: string; user: string };
               // The slow path runs after the early findings.json write, so snapshot the
               // file here: this is the first (fast-findings-only) payload, before the
               // merged write below overwrites it.
@@ -356,6 +370,7 @@ async function runWithMocks(o: MockOpts = {}) {
     toolOutput: rec.toolOutput,
     toolError: rec.toolError,
     repoSizeCalls: rec.repoSizeCalls,
+    prompts: rec.prompts,
     scanEnv: rec.scanEnv,
     l2Env: rec.l2Env,
     l2Changed: rec.l2Changed,
