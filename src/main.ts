@@ -85,7 +85,7 @@ export interface Gateway {
 /** Scanner, linter and LLM boundary. The privileged flow never invokes these. */
 export interface Analysis {
   runScanners(o: Parameters<typeof runScanners>[0]): Promise<ScannerResult>;
-  runL2(dir: string): Promise<Finding[]>;
+  runL2(dir: string, changedFiles?: Set<string>): Promise<Finding[]>;
   ensureOllama(baseUrl: string, model: string, o: { timeoutSeconds?: number; apiKey?: string }): Promise<void>;
   checkModelListed(baseUrl: string, model: string, apiKey: string, protocol: CatalogProtocol): Promise<{ status: "listed" | "absent" | "unknown"; detail?: string }>;
   /** Single call to the endpoint's already-resolved style (explicit style / llm_path override). */
@@ -788,7 +788,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
       core.warning("fork PR with secrets in scope: L2 native toolchains skipped");
       return { scan: s, l2: [L2_SKIPPED] };
     }
-    const l = await deps.analysis.runL2(env.workDir);
+    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)));
     return { scan: s, l2: l };
   });
   if (scan.sbomPath !== undefined) {
@@ -938,7 +938,7 @@ function realGateway(token: string): Gateway {
 function realAnalysis(): Analysis {
   return {
     runScanners,
-    runL2: (dir) => runL2(dir),
+    runL2: (dir, changedFiles) => runL2(dir, undefined, undefined, changedFiles),
     ensureOllama,
     checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved

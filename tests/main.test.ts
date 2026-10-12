@@ -82,6 +82,7 @@ interface Rec {
   modelProtocol?: "openai" | "anthropic" | "google";
   scanEnv?: NodeJS.ProcessEnv;
   l2Env?: NodeJS.ProcessEnv;
+  l2Changed?: Set<string>;
   agentCalled: number;
   /** Which agent seam served the slow-path LLM call. */
   agentVia?: "probe" | "style";
@@ -271,8 +272,9 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.scanEnv = { ...process.env };
         return o.sbomMissing ? { findings: [], sbomPath: join(sbomDir, "sbom.cdx.json") } : { findings: o.scan ?? [] };
       },
-      runL2: async () => {
+      runL2: async (_dir, changedFiles) => {
         rec.l2Env = { ...process.env };
+        rec.l2Changed = changedFiles;
         return [];
       },
       ensureOllama: async () => {
@@ -356,6 +358,7 @@ async function runWithMocks(o: MockOpts = {}) {
     repoSizeCalls: rec.repoSizeCalls,
     scanEnv: rec.scanEnv,
     l2Env: rec.l2Env,
+    l2Changed: rec.l2Changed,
     earlyFindingsRaw: rec.earlyFindingsRaw,
     artifactDir,
     summaryPath,
@@ -780,6 +783,11 @@ describe("run() orchestration", () => {
       for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
       Object.assign(process.env, saved);
     }
+  });
+
+  it("passes the parsed-diff changed set to runL2", async () => {
+    const r = await runWithMocks({ scan: [] });
+    expect(r.l2Changed).toEqual(new Set(["src/a.ts"])); // exact changed paths of the DIFF fixture
   });
 
   it("the LLM slow path keeps its key (not scrubbed; it is intended API use)", async () => {

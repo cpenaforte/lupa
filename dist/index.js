@@ -28601,7 +28601,7 @@ async function runFlowA(env, deps, out) {
       warning("fork PR with secrets in scope: L2 native toolchains skipped");
       return { scan: s, l2: [L2_SKIPPED] };
     }
-    const l = await deps.analysis.runL2(env.workDir);
+    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)));
     return { scan: s, l2: l };
   });
   if (scan.sbomPath !== void 0) {
@@ -28726,7 +28726,7 @@ function realGateway(token) {
 function realAnalysis() {
   return {
     runScanners,
-    runL2: (dir) => runL2(dir),
+    runL2: (dir, changedFiles) => runL2(dir, void 0, void 0, changedFiles),
     ensureOllama,
     checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved
