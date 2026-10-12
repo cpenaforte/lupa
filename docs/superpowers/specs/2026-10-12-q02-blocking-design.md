@@ -152,20 +152,25 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   `nodes { isResolved path line originalLine comments(first:1) { nodes {
   author { login } body } } } pageInfo { hasPreviousPage }` (`last` keeps the
   NEWEST 100 — recent resolves are the relevant ones). Rule from the
-  first-comment body via `/^\*\*(\w+)\*\* \[(.+?)\]/` (the exact `formatBody`
-  head shape; lazy by design — a rule containing `]` mismatches fail-safe to
-  null). `hasPreviousPage` → warn (`lupa:` prefix) and use the 100. Any fetch
+  first-comment body via `/^\*\*(\w+)\*\* (?:\*\*reopened\*\* )?\[([^[\]]+)\]/`
+  (the `formatBody` head shape, tolerating our own inline reopened marker so a
+  re-posted thread stays parseable; lazy by design — a rule containing `]`
+  mismatches fail-safe to null). `hasPreviousPage` → warn (`lupa:` prefix) and use the 100. Any fetch
   error → warn + empty set (never blocks on infra failure). No token
   (dry-run without token) → skip silently (expected path; with a token,
   dry-run computes the identical reopen as live).
-- **Self identity.** `octokit.rest.users.getAuthenticated()` login, called
-  with the same token that posts. Failure → `undefined` → skip reopen with a
-  warning. Failure mode is fail-OPEN (feature inert, never a false block).
-  Residual: threads posted under a different token identity (e.g. repo
-  switched GITHUB_TOKEN → App) won't match — documented, not handled. The
-  installation-token behavior MUST be proven on a live canary (test-lupa:
-  resolve a posted thread, re-run, observe re-block) before merge — required
-  verification, §5.
+- **Self identity.** Primary: `octokit.rest.users.getAuthenticated()` login,
+  called with the same token that posts. Fallback (defined path when the
+  primary 403s on installation tokens): the login of the newest review on
+  this PR whose body starts with `lupa:` (via `pulls.listReviews` — repo-read
+  scope the run already has; our bodies always open with the `lupa:` summary
+  or `FALLBACK_SUMMARY`). Both sides `normalizeBot`-compared. Both failing →
+  `undefined` → skip reopen with a warning. Failure mode is fail-OPEN
+  (feature inert, never a false block). Residual: threads posted under a
+  different token identity (e.g. repo switched GITHUB_TOKEN → App) won't
+  match — documented, not handled. The installation-token behavior MUST be
+  proven on a live canary (test-lupa: resolve a posted thread, re-run,
+  observe re-block) before merge — required verification, §5.
 - **Display.** `buildBody(general, summary, marks?)`: every body item whose key
   is in `marks.blocking` renders a marker directly after the severity token —
   `**reopened**` when also in `marks.reopened`, else `**blocking**` (reachable
@@ -177,7 +182,9 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   heading (exact order: `${head}\n\n${NOTE}\n\n**Findings not placed inline:**\nitems`):
   `**Note:** <n> finding(s) below are outside the PR diff and do not block.`
   (`n` = body items outside the blocking set; omitted entirely when zero —
-  including the all-reopened and empty-general cases.) `summaryFor`,
+  including the all-reopened and empty-general cases. Folded-only
+  non-blocking items (general empty, excess folded) get NO header note —
+  their per-item `(non-blocking)` markers are the disclosure.) `summaryFor`,
   `buildFallbackReport`, SARIF, and artifact shapes unchanged — the fallback
   is a degraded path that already shows everything and carries no gate role.
 - **"Worsened" scope (explicit narrowing disclosure).** A finding on a
@@ -198,11 +205,12 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   `]`-in-rule mismatch, both-thread-lines-absent; `originalLine`-only match).
 - Fetch units (mocked graphql): last-100 newest, hasPreviousPage warn-truncate,
   error → empty, body-parse incl. unparseable → null, `[bot]`-normalization both sides.
-- Gate pins: README-only diff + high in untouched file (incl. high on a ctx
-  line of a touched file, and LEFT-only match) → COMMENT + exit 0 with the
-  finding still in the body AND the header note; lineless `sensitive-path` on
-  a touched file (incl. binary/mode-only entries with no hunks, and deleted
-  files) → still REQUEST_CHANGES + exit 1; new in-diff high →
+- Gate pins: README-only diff + high in untouched file, and high on a ctx
+  line of a touched file → COMMENT + exit 0 with the finding still INLINE
+  (ctx hits display inline — no body item, no note); LEFT-only high → COMMENT
+  + exit 0 with the finding in the body AND the header note; lineless
+  `sensitive-path` on a touched file (incl. binary/mode-only entries with no
+  hunks, and deleted files) → still REQUEST_CHANGES + exit 1; new in-diff high →
   REQUEST_CHANGES + exit 1 (unchanged); resolved-thread-persists (incl.
   joined-rule thread vs unmerged members, and ctx/LEFT-drifted lines →
   inline `**reopened**` marker) → re-blocks; resolved-thread-gone → stays
@@ -257,4 +265,6 @@ No new runtime dependencies, no new action inputs, stable namespace
 committed per task, suite + evals green. Accepted residuals: off-diff
 worsened-severity (no baseline infra); cross-identity threads; >100 threads
 warn-truncate; reopened findings past top-N still block but fold out of the
-visible body (gates keep the full pre-cap set, dedup precedent).
+visible body (gates keep the full pre-cap set, dedup precedent);
+outdated-thread line-drift miss (thread `line` null after the finding's line
+shifted → `originalLine` misses → stays resolved while persisting).
