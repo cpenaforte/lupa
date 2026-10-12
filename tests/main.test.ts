@@ -1987,6 +1987,23 @@ describe("dedup merge and flow wiring", () => {
     expect(r.reviews[0]!.body).not.toContain("> Omitted: 2 finding(s)");
   });
 
+  it("publishReview warns the exact unmergeable-verdict string and still publishes every finding", async () => {
+    vi.mocked(core.warning).mockClear();
+    const scan: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "scan-a", message: "first evidence" },
+      { severity: "warning", file: "src/b.ts", line: 2, rule: "scan-b", message: "second evidence" },
+    ];
+    const r = await runWithMocks({ scan, llm: [], llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    expect(r.posted).toBe(true);
+    expect(vi.mocked(core.warning).mock.calls.map((c) => String(c[0]))).toContain(
+      "lupa: ignored 1 unmergeable dedup verdict(s)",
+    );
+    expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
+    const dumped = JSON.stringify(r.reviews);
+    expect(dumped).toContain("scan-a");
+    expect(dumped).toContain("scan-b");
+  });
+
   it("Flow B merges the canary via pr-meta verdicts; a missing key posts unmerged", async () => {
     const findings: Finding[] = [
       { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: "Artifact: leak [REDACTED]" },
