@@ -53,11 +53,15 @@ stay stable and short):
   `"osv-scanner"` — used at EVERY construction site including `warning()`
   and `byteCheck`, so lockfile paths never reach the contract),
   `confidence: 90`, `evidence: { analyzer: <same fixed id> }` (name only).
+  "Success" means files parsed: gofmt per-file findings are success-shaped
+  even under nonzero exits (only timeout/signal delegate to the failure
+  path) — confidence 90 either way.
 - Fastpath L0 (TODO/path/large-file/binary/lockfile notes, sensitive-path
   highs): `source: "fastpath"`, `confidence: 50` (heuristic without proof —
   including `high` path findings, policy-consistent).
   Linter FAILURE warnings (`interpretDefault` abnormal exits/timeouts) are
-  tool-health (source set, confidence absent — never 90).
+  tool-health: `source` = the `name` argument (already the warning's `rule`
+  value — no invention), confidence absent — never 90.
 - `warning(rule, message, source?)` gains an optional third parameter
   (non-breaking for existing call sites); `runGitleaks` passes `"gitleaks"`,
   the SBOM branch `"sbom".
@@ -142,8 +146,15 @@ absent-confidence; `warning(rule, message, source?)` units); survivor units
 evidence merge + absent-when-none, cross-file-grouped); LLM
 structured-confidence extraction (present/absent/malformed via `okChat`,
 field dropped on invalid; schema + converted-schema pins:
-`tests/llm.test.ts:361-370`, `tests/probe-routing.test.ts:97-101`,
-`tests/prompt.test.ts:148`, `tests/adapters-google.test.ts:550`);
+`tests/llm.test.ts:361-370` + `:397`, `tests/probe-routing.test.ts:71,118,
+154,194,226,324` + `:97-101`, `tests/prompt.test.ts:148`,
+`tests/adapters-google.test.ts:550` + toEqual pins, `tests/adapters-routing.test.ts:142,160,178,197`); producer `toEqual` pins updated:
+`tests/scanners.test.ts:582,704,709,716,736,746`,
+`tests/l2.test.ts:150,161,173` (gofmt incl. nonzero-exit-with-files);
+`tests/artifact-limits.test.ts:90-96` (`byteCheck` source now set);
+`tests/fixtures/evals/cases.ts:96` + summary `:275-277` verified (updated
+iff the trailer renders there); `tests/evals/agent.test.ts:61-69` UNCHANGED
+(agent path carries no provenance — pinned by absence);
 sanitizer carry + caps + absent-stays-absent; redaction of `evidence.*`
 (secret in snippet redacted) + fresh-object aliasing test; rendering
 assertions per surface (inline trailer incl. partials + `conf 0`,
