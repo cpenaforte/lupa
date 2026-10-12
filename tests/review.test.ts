@@ -649,3 +649,210 @@ describe("mergeDuplicates", () => {
     expect(mergeDuplicates(fs, V([[0, 1]])).merged[0]!.severity).toBe("warning");
   });
 });
+
+describe("finding provenance rendering (Q04)", () => {
+  const F = (
+    severity: Finding["severity"],
+    file: string,
+    line: number | undefined,
+    rule: string,
+    message: string,
+    extra?: Partial<Finding>,
+  ): Finding => ({
+    severity,
+    file,
+    ...(line !== undefined ? { line } : {}),
+    rule,
+    message,
+    ...extra,
+  });
+  const V = (pairs: Array<[number, number]> = [], links: Array<[number, number]> = [], malformed = 0): DedupVerdicts => ({
+    pairs,
+    links,
+    malformed,
+  });
+  // a.ts line 10 is a RIGHT addition (rangeFixture).
+  const rightHunks = () => parseHunks([{ file: "a.ts", hunks: "@@ -7,0 +8,3 @@\n+x\n+y\n+z\n" }]);
+
+  it("inline trailer renders full source and confidence", () => {
+    const r = mapToComments(
+      [F("warning", "a.ts", 10, "r", "m", { source: "semgrep", confidence: 90 })],
+      rightHunks(),
+    );
+    expect(r.inline[0].body).toContain("`src:semgrep · conf 90`");
+  });
+
+  it("inline trailer partials: source-only, confidence-only, neither", () => {
+    const srcOnly = mapToComments([F("warning", "a.ts", 10, "r", "m", { source: "semgrep" })], rightHunks());
+    expect(srcOnly.inline[0].body).toContain("`src:semgrep`");
+    expect(srcOnly.inline[0].body).not.toContain("conf");
+    const confOnly = mapToComments([F("warning", "a.ts", 10, "r", "m", { confidence: 50 })], rightHunks());
+    expect(confOnly.inline[0].body).toContain("`conf 50`");
+    expect(confOnly.inline[0].body).not.toContain("src:");
+    const neither = mapToComments([F("warning", "a.ts", 10, "r", "m")], rightHunks());
+    expect(neither.inline[0].body).not.toContain("`src:");
+    expect(neither.inline[0].body).not.toContain("`conf");
+  });
+
+  it("confidence 0 renders (never truthiness-tested)", () => {
+    const r = mapToComments(
+      [F("warning", "a.ts", 10, "r", "m", { source: "llm", confidence: 0 })],
+      rightHunks(),
+    );
+    expect(r.inline[0].body).toContain("`src:llm · conf 0`");
+    const confZeroOnly = mapToComments([F("warning", "a.ts", 10, "r", "m", { confidence: 0 })], rightHunks());
+    expect(confZeroOnly.inline[0].body).toContain("`conf 0`");
+  });
+
+  it("trailer renders AFTER the suggestion fence, never inside the patch", () => {
+    const r = mapToComments(
+      [F("warning", "a.ts", 10, "r", "m", { source: "semgrep", confidence: 90, suggestion: "fixed" })],
+      rightHunks(),
+    );
+    const body = r.inline[0].body;
+    expect(body).toContain("```suggestion\nfixed\n```");
+    expect(body.indexOf("`src:semgrep · conf 90`")).toBeGreaterThan(body.lastIndexOf("```"));
+  });
+
+  it("LEFT suggestion renders the trailer after the Suggested text", () => {
+    const hunks = parseHunks([{ file: "a.ts", hunks: "@@ -3,1 +3,0 @@\n-c\n" }]);
+    const r = mapToComments(
+      [F("high", "a.ts", 3, "r", "m", { source: "fastpath", confidence: 50, suggestion: "fixed" })],
+      hunks,
+    );
+    expect(r.inline[0].side).toBe("LEFT");
+    const body = r.inline[0].body;
+    expect(body).toContain("Suggested: fixed");
+    expect(body.indexOf("`src:fastpath · conf 50`")).toBeGreaterThan(body.indexOf("Suggested: fixed"));
+  });
+
+  it("general-body items render the trailer after any Suggested block", () => {
+    const body = buildBody(
+      [F("warning", "a.ts", 99, "r", "off diff", { source: "llm", confidence: 70, suggestion: "fix it" })],
+      "Summary",
+    );
+    expect(body).toContain("`src:llm · conf 70`");
+    expect(body.indexOf("`src:llm · conf 70`")).toBeGreaterThan(body.indexOf("Suggested: fix it"));
+  });
+
+  it("trailer is part of item text: it renders BEFORE any capBody cut", () => {
+    const body = buildBody(
+      [F("warning", "a.ts", 99, "r", "off diff " + "x".repeat(200), { source: "semgrep", confidence: 90 })],
+      "Summary",
+    );
+    expect(body).toContain("`src:semgrep · conf 90`");
+    const capped = capBody(body, 120, []);
+    expect(capped).toContain("truncated to the 120-character limit");
+    expect(Array.from(capped).length).toBeLessThanOrEqual(120);
+  });
+
+  it("fallback rows follow the Message row in Source/Confidence/Evidence order", () => {
+    const report = buildFallbackReport([
+      F("warning", "a.ts", 2, "r", "m", { source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep", snippet: "flagged" } }),
+    ]);
+    expect(report).toContain("- Source:\n```text\nsemgrep\n```");
+    expect(report).toContain("- Confidence:\n```text\n90\n```");
+    const msgIdx = report.indexOf("- Message/evidence:");
+    const srcIdx = report.indexOf("- Source:");
+    const confIdx = report.indexOf("- Confidence:");
+    const evIdx = report.indexOf("- Evidence:");
+    const suggIdx = report.indexOf("- Suggested remediation");
+    expect(msgIdx).toBeLessThan(srcIdx);
+    expect(srcIdx).toBeLessThan(confIdx);
+    expect(confIdx).toBeLessThan(evIdx);
+    expect(evIdx).toBeLessThan(suggIdx);
+    expect(report).toContain("analyzer: semgrep");
+    expect(report).toContain("```text\nflagged\n```");
+  });
+
+  it("fallback rows show only present fields", () => {
+    const srcOnly = buildFallbackReport([F("warning", "a.ts", 2, "r", "m", { source: "l2" })]);
+    expect(srcOnly).toContain("- Source:");
+    expect(srcOnly).not.toContain("- Confidence:");
+    expect(srcOnly).not.toContain("- Evidence:");
+    const none = buildFallbackReport([F("warning", "a.ts", 2, "r", "m")]);
+    expect(none).not.toContain("- Source:");
+    expect(none).not.toContain("- Confidence:");
+    expect(none).not.toContain("- Evidence:");
+  });
+
+  it("survivor joins differing sources, collapses identical, and re-caps at 100", () => {
+    const joined = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0", { source: "semgrep" }), F("warning", "a.ts", 1, "r1", "m1", { source: "llm" })],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(joined.source).toBe("semgrep+llm");
+    const collapsed = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0", { source: "semgrep" }), F("warning", "a.ts", 1, "r1", "m1", { source: "semgrep" })],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(collapsed.source).toBe("semgrep");
+    const long = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0", { source: "s".repeat(60) }), F("warning", "a.ts", 1, "r1", "m1", { source: "t".repeat(60) })],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(Array.from(long.source!).length).toBeLessThanOrEqual(100);
+    expect(long.source!).toContain("…[truncated]");
+  });
+
+  it("survivor takes max confidence, absent only when all members absent", () => {
+    const maxed = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0", { confidence: 50 }), F("warning", "a.ts", 1, "r1", "m1", { confidence: 90 })],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(maxed.confidence).toBe(90);
+    const partial = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1", { confidence: 50 })],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(partial.confidence).toBe(50);
+    const absent = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1")],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(absent.confidence).toBeUndefined();
+    expect(absent.source).toBeUndefined();
+    expect(absent.evidence).toBeUndefined();
+  });
+
+  it("survivor merges evidence: first snippet, joined analyzers, absent when none", () => {
+    const merged = mergeDuplicates(
+      [
+        F("warning", "a.ts", 1, "r0", "m0", { evidence: { analyzer: "semgrep", snippet: "first" } }),
+        F("warning", "a.ts", 1, "r1", "m1", { evidence: { analyzer: "gitleaks", snippet: "second" } }),
+      ],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(merged.evidence).toEqual({ analyzer: "semgrep+gitleaks", snippet: "first" });
+    const snippetOnly = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0", { evidence: { snippet: "only" } }), F("warning", "a.ts", 1, "r1", "m1")],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(snippetOnly.evidence).toEqual({ snippet: "only" });
+    const none = mergeDuplicates(
+      [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1", { evidence: {} })],
+      V([[0, 1]]),
+    ).merged[0]!;
+    expect(none.evidence).toBeUndefined();
+  });
+
+  it("cross-file pair stays ungrouped with provenance intact", () => {
+    const a = F("warning", "a.ts", 1, "r", "m", { source: "semgrep", confidence: 90 });
+    const b = F("warning", "b.ts", 1, "r", "m", { source: "semgrep", confidence: 90 });
+    const { merged, dropped } = mergeDuplicates([a, b], V([[0, 1]]));
+    expect(merged).toHaveLength(2);
+    expect(dropped).toBe(1);
+    expect(merged).toEqual([a, b]);
+  });
+
+  it("provenance changes neither eventFor nor exitFor outcomes", () => {
+    const provenanced: Finding[] = [
+      F("high", "a.ts", 1, "r", "m", { source: "fastpath", confidence: 50 }),
+      F("warning", "a.ts", 2, "r", "m", { source: "llm", confidence: 70 }),
+    ];
+    expect(eventFor("high", provenanced)).toBe("REQUEST_CHANGES");
+    expect(exitFor("high", provenanced)).toBe(1);
+    expect(exitFor("warning", provenanced)).toBe(2);
+    expect(exitFor("none", provenanced)).toBe(0);
+  });
+});

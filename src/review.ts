@@ -46,6 +46,22 @@ function fenceFor(suggestion: string): string {
 }
 
 /**
+ * Provenance trailer (Q04, display-only): compact `` `src:<source> · conf <n>` ``
+ * appended after the message/suggestion — AFTER any suggestion fence or
+ * `Suggested:` block, never inside a patch. Partials: source-only renders
+ * `` `src:<source>` ``, confidence-only `` `conf <n>` ``, neither renders
+ * nothing. `confidence: 0` renders (`conf 0` — presence-tested, never
+ * truthiness-tested). The trailer is part of the item text: it is appended
+ * before any `capBody` cut and may be truncated with the item.
+ */
+function provenanceTrailer(f: Finding): string {
+  const parts: string[] = [];
+  if (f.source !== undefined) parts.push(`src:${f.source}`);
+  if (f.confidence !== undefined) parts.push(`conf ${f.confidence}`);
+  return parts.length === 0 ? "" : `\n\n\`${parts.join(" · ")}\``;
+}
+
+/**
  * Inline body. Only RIGHT-side hits get a ```suggestion fence (a suggestion replaces the
  * commented line, which only exists on the new side). LEFT hits show the suggestion as
  * plain text instead.
@@ -60,7 +76,7 @@ function formatBody(f: Finding, side: "LEFT" | "RIGHT"): string {
       body += `\n\nSuggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
     }
   }
-  return body;
+  return body + provenanceTrailer(f);
 }
 
 /**
@@ -184,6 +200,15 @@ export function buildFallbackReport(
       return `${fence}text\n${value}\n${fence}`;
     };
     const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
+    const provenance: string[] = [];
+    if (f.source !== undefined) provenance.push(`- Source:\n${field(f.source)}`);
+    if (f.confidence !== undefined) provenance.push(`- Confidence:\n${field(String(f.confidence))}`);
+    if (f.evidence !== undefined && (f.evidence.analyzer !== undefined || f.evidence.snippet !== undefined)) {
+      const parts: string[] = [];
+      if (f.evidence.analyzer !== undefined) parts.push(field(`analyzer: ${f.evidence.analyzer}`));
+      if (f.evidence.snippet !== undefined) parts.push(field(f.evidence.snippet));
+      provenance.push(`- Evidence:\n${parts.join("\n")}`);
+    }
     return [
       `### Finding ${index + 1}`,
       "",
@@ -191,6 +216,7 @@ export function buildFallbackReport(
       `- Location:\n${field(locate(f))}`,
       `- Rule:\n${field(f.rule)}`,
       `- Message/evidence:\n${field(f.message)}`,
+      ...provenance,
       `- Suggested remediation (advice only):\n${field(suggestion)}`,
     ].join("\n");
   });
@@ -246,7 +272,7 @@ export function buildBody(general: Finding[], summary: string): string {
   const items = general.map((f) => {
     let item = `- **${f.severity}** ${locate(f)} [${f.rule}] ${f.message}`;
     if (hasSuggestion(f)) item += `\n  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
-    return item;
+    return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
   });
   return `${head}\n\n**Findings not placed inline:**\n${items.join("\n")}`;
 }
@@ -302,6 +328,39 @@ function survivor(members: Finding[]): Finding {
       out.suggestion = m.suggestion;
       break;
     }
+  }
+  // Provenance (Q04, display-only): sources "+"-joined in group order
+  // (collapse identical, re-capped at 100, absent iff all members absent);
+  // confidence is the max (absent iff all members absent); evidence merges
+  // the first defined snippet with the distinct present analyzers "+"-joined
+  // and re-capped at 100 (absent when no member defines any evidence field,
+  // never an empty object).
+  const sources: string[] = [];
+  for (const m of members) {
+    if (m.source !== undefined && !sources.includes(m.source)) sources.push(m.source);
+  }
+  if (sources.length > 0) out.source = capText(sources.join("+"), RULE_CAP);
+  let confidence: number | undefined;
+  for (const m of members) {
+    if (m.confidence !== undefined && (confidence === undefined || m.confidence > confidence)) {
+      confidence = m.confidence;
+    }
+  }
+  if (confidence !== undefined) out.confidence = confidence;
+  let snippet: string | undefined;
+  const analyzers: string[] = [];
+  for (const m of members) {
+    if (m.evidence === undefined) continue;
+    if (snippet === undefined && m.evidence.snippet !== undefined) snippet = m.evidence.snippet;
+    if (m.evidence.analyzer !== undefined && !analyzers.includes(m.evidence.analyzer)) {
+      analyzers.push(m.evidence.analyzer);
+    }
+  }
+  if (snippet !== undefined || analyzers.length > 0) {
+    out.evidence = {
+      ...(analyzers.length > 0 ? { analyzer: capText(analyzers.join("+"), RULE_CAP) } : {}),
+      ...(snippet !== undefined ? { snippet } : {}),
+    };
   }
   return out;
 }

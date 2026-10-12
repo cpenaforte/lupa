@@ -9,7 +9,7 @@ vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
   return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
-import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, run, sanitizeFinding, toSarif, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { DedupVerdicts } from "../src/llm.js";
@@ -2145,5 +2145,79 @@ describe("dedup merge and flow wiring", () => {
     const cut = budgetPrompt(fast, text, undefined, [], fullBytes, { withIds: true });
     expect(cut.fast.length).toBeLessThan(fast.length);
     expect(cut.findingsOmitted).toBeGreaterThan(0);
+  });
+});
+
+describe("finding provenance rendering (Q04)", () => {
+  it("toSarif carries source and confidence independently, omits properties when both absent", () => {
+    const base: Finding = { severity: "warning", file: "src/a.ts", line: 2, rule: "r", message: "m" };
+    const full = toSarif([{ ...base, source: "semgrep", confidence: 90 }]) as {
+      runs: Array<{ results: Array<{ properties?: unknown; message: { text: string } }> }>;
+    };
+    expect(full.runs[0].results[0].properties).toEqual({ source: "semgrep", confidence: 90 });
+    expect(full.runs[0].results[0].message).toEqual({ text: "m" });
+    const confOnly = toSarif([{ ...base, confidence: 50 }]) as {
+      runs: Array<{ results: Array<{ properties?: unknown }> }>;
+    };
+    expect(confOnly.runs[0].results[0].properties).toEqual({ confidence: 50 });
+    const srcOnly = toSarif([{ ...base, source: "fastpath" }]) as {
+      runs: Array<{ results: Array<{ properties?: unknown }> }>;
+    };
+    expect(srcOnly.runs[0].results[0].properties).toEqual({ source: "fastpath" });
+    const neither = toSarif([base]) as {
+      runs: Array<{ results: Array<Record<string, unknown>> }>;
+    };
+    expect("properties" in neither.runs[0].results[0]).toBe(false);
+  });
+
+  it("findings.json round-trips provenance through the artifact", () => {
+    const dir = scratch();
+    const findings: Finding[] = [
+      { ...LLM_FINDING, source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } },
+      { ...LLM_FINDING, confidence: 0 },
+    ];
+    writeFileSync(join(dir, "findings.json"), JSON.stringify(findings), "utf8");
+    expect(readFindings(dir)).toEqual(findings);
+  });
+
+  it("no-LLM run renders scanner provenance inline and in the summary", async () => {
+    const scan: Finding = { ...LLM_FINDING, source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } };
+    const r = await runWithMocks({ llmApiKey: "", scan: [scan] });
+    expect(r.reviews).toHaveLength(1);
+    expect(r.reviews[0].comments[0].body).toContain("`src:semgrep · conf 90`");
+    const summary = readFileSync(r.summaryPath, "utf8");
+    expect(summary).toContain("- Source:");
+    expect(summary).toContain("semgrep");
+    expect(summary).toContain("- Confidence:");
+    expect(summary).toContain("- Evidence:");
+  });
+
+  it("agent run carries no provenance anywhere", async () => {
+    const r = await runWithMocks({ llmAgent: true, llm: [{ ...LLM_FINDING }] });
+    expect(r.agentCalled).toBe(1);
+    expect(r.body ?? "").not.toContain("`src:");
+    expect(r.body ?? "").not.toContain("`conf");
+    const summary = readFileSync(r.summaryPath, "utf8");
+    expect(summary).not.toContain("- Source:");
+    expect(summary).not.toContain("- Confidence:");
+    expect(summary).not.toContain("- Evidence:");
+  });
+
+  it("provenanced high and warning findings gate identically", async () => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "r", message: "h", source: "fastpath", confidence: 50 };
+    const warn: Finding = { ...LLM_FINDING, source: "llm", confidence: 70 };
+    const gated = await runWithMocks({ failLevel: "high", llm: [high, warn] });
+    expect(gated.exitCode).toBe(1);
+    expect(gated.reviews[0].event).toBe("REQUEST_CHANGES");
+    const warned = await runWithMocks({ failLevel: "warning", llm: [warn] });
+    expect(warned.exitCode).toBe(2);
+    expect(warned.reviews[0].event).toBe("COMMENT");
+  });
+
+  it("publication counts are unchanged with provenance present", async () => {
+    const a: Finding = { ...LLM_FINDING, source: "semgrep", confidence: 90 };
+    const b: Finding = { severity: "warning", file: "src/b.ts", rule: "r2", message: "second", source: "llm", confidence: 70 };
+    const r = await runWithMocks({ maxFindings: 1, llm: [a, b] });
+    expect(r.body ?? "").toContain("> Omitted: 1 finding(s) omitted to fit the 1-finding publication limit.");
   });
 });

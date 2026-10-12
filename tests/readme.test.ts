@@ -114,3 +114,20 @@ describe("README", () => {
     );
   });
 });
+
+describe("README finding provenance (Q04)", () => {
+  it("documents the provenance section: fields, values, display-only gates, conf-50-on-high policy", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    expect(r).toContain("## Finding provenance");
+    expect(r).toContain("`source` names the producer");
+    expect(r).toContain("`confidence` is an integer 0-100");
+    expect(r).toContain("`evidence` names the analyzer");
+    expect(r).toContain(
+      "Deterministic analyzer output reports confidence 90; heuristic text matches report confidence 50; the LLM reports its own 0-100 (absent when unmarked).",
+    );
+    expect(r).toContain("Provenance is display-only: it never changes gates or severity.");
+    expect(r).toContain(
+      "Policy note: heuristic fastpath matches report confidence 50 even when they are high severity",
+    );
+  });
+});

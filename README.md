@@ -154,6 +154,18 @@ The findings and the gate are separate. The review event and the exit code follo
 - Docker scanners mount the checkout at `/src`, so SARIF reports absolute `/src/<path>` (or `file:///src/<path>`) artifact URIs. These are normalized back to repo-relative paths before findings are mapped, so inline comments still land on the right file.
 - **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate, the summary head/counts, and the dry-run event/high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
 
+## Finding provenance
+
+Every finding may carry where it came from, what proves it, and how confident the claimant is:
+
+- `source` names the producer (`semgrep`, `trivy`, `gitleaks`, `osv-scanner`, `gofmt`, `fastpath`, `sbom`, `l2`, `llm`). Absent means a legacy finding.
+- `confidence` is an integer 0-100. Deterministic analyzer output reports confidence 90; heuristic text matches report confidence 50; the LLM reports its own 0-100 (absent when unmarked).
+- `evidence` names the analyzer and carries the flagged snippet (the snippet is reserved in v1 and assigned by no producer).
+
+Provenance is display-only: it never changes gates or severity. It renders as an inline `` `src:<source> · conf <n>` `` trailer, `- Source:` / `- Confidence:` / `- Evidence:` fallback rows, and SARIF `properties`.
+
+Policy note: heuristic fastpath matches report confidence 50 even when they are high severity (for example sensitive-path findings), because a path match is not proof.
+
 ## Dry-run: `post_comment: false`
 
 With `post_comment: false` the action runs the whole pipeline, writes the summary and the artifact, and logs the event and the finding counts it would have posted (event, inline, general and high). The review body is not logged. Nothing is posted to the PR. Use it to tune the prompt, the model, or `max_diff_chars` before you enable posting.

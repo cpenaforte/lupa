@@ -918,6 +918,16 @@ export function toSarif(findings: Finding[]): unknown {
           },
         },
       ],
+      // Provenance (Q04, display-only): each field independently iff present;
+      // omitted entirely when both are absent. `message.text` is unchanged.
+      ...((f.source !== undefined || f.confidence !== undefined
+        ? {
+            properties: {
+              ...(f.source !== undefined ? { source: f.source } : {}),
+              ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+            },
+          }
+        : {})),
     }));
   return {
     $schema: "https://json.schemastore.org/sarif-2.1.0.json",

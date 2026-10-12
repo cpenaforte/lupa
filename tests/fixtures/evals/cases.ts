@@ -103,12 +103,20 @@ const mergeL2Note = {
   message: "Synthetic L2 note.",
 } as const;
 
-function summaryForMany(findings: readonly { severity: string; file: string; line?: number; rule: string; message: string }[]): string {
+function summaryForMany(findings: readonly { severity: string; file: string; line?: number; rule: string; message: string; source?: string; confidence?: number; evidence?: { snippet?: string; analyzer?: string } }[]): string {
   return [`lupa: ${findings.length} finding(s).`, ...findings.flatMap((finding, index) => [
     "", `### Finding ${index + 1}`, "", `- Severity: ${finding.severity}`, "- Location:", "```text",
     finding.file === "" ? "(repository)" : `${finding.file}${finding.line === undefined ? "" : `:${finding.line}`}`,
     "```", "- Rule:", "```text", finding.rule, "```", "- Message/evidence:", "```text", finding.message,
-    "```", "- Suggested remediation (advice only):", "```text", "No remediation supplied", "```",
+    "```",
+    ...(finding.source !== undefined ? ["- Source:", "```text", finding.source, "```"] : []),
+    ...(finding.confidence !== undefined ? ["- Confidence:", "```text", String(finding.confidence), "```"] : []),
+    ...(finding.evidence !== undefined && (finding.evidence.analyzer !== undefined || finding.evidence.snippet !== undefined)
+      ? ["- Evidence:",
+        ...(finding.evidence.analyzer !== undefined ? ["```text", `analyzer: ${finding.evidence.analyzer}`, "```"] : []),
+        ...(finding.evidence.snippet !== undefined ? ["```text", finding.evidence.snippet, "```"] : [])]
+      : []),
+    "- Suggested remediation (advice only):", "```text", "No remediation supplied", "```",
   ])].join("\n");
 }
 

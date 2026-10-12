@@ -27562,6 +27562,16 @@ function fenceFor(suggestion) {
     longest = Math.max(longest, run2[0].length);
   return "`".repeat(Math.max(3, longest + 1));
 }
+function provenanceTrailer(f) {
+  const parts = [];
+  if (f.source !== void 0)
+    parts.push(`src:${f.source}`);
+  if (f.confidence !== void 0)
+    parts.push(`conf ${f.confidence}`);
+  return parts.length === 0 ? "" : `
+
+\`${parts.join(" \xB7 ")}\``;
+}
 function formatBody(f, side) {
   let body = `**${f.severity}** [${f.rule}] ${f.message}`;
   if (hasSuggestion(f)) {
@@ -27578,7 +27588,7 @@ ${fence}`;
 Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
     }
   }
-  return body;
+  return body + provenanceTrailer(f);
 }
 function mapToComments(findings, hunks) {
   const index = /* @__PURE__ */ new Map();
@@ -27665,6 +27675,22 @@ ${value}
 ${fence}`;
     };
     const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
+    const provenance = [];
+    if (f.source !== void 0)
+      provenance.push(`- Source:
+${field(f.source)}`);
+    if (f.confidence !== void 0)
+      provenance.push(`- Confidence:
+${field(String(f.confidence))}`);
+    if (f.evidence !== void 0 && (f.evidence.analyzer !== void 0 || f.evidence.snippet !== void 0)) {
+      const parts = [];
+      if (f.evidence.analyzer !== void 0)
+        parts.push(field(`analyzer: ${f.evidence.analyzer}`));
+      if (f.evidence.snippet !== void 0)
+        parts.push(field(f.evidence.snippet));
+      provenance.push(`- Evidence:
+${parts.join("\n")}`);
+    }
     return [
       `### Finding ${index + 1}`,
       "",
@@ -27675,6 +27701,7 @@ ${field(locate(f))}`,
 ${field(f.rule)}`,
       `- Message/evidence:
 ${field(f.message)}`,
+      ...provenance,
       `- Suggested remediation (advice only):
 ${field(suggestion)}`
     ].join("\n");
@@ -27738,7 +27765,7 @@ function buildBody(general, summary2) {
     if (hasSuggestion(f))
       item += `
   Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
-    return item;
+    return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
   });
   return `${head}
 
@@ -27784,6 +27811,38 @@ function survivor(members) {
       out.suggestion = m.suggestion;
       break;
     }
+  }
+  const sources = [];
+  for (const m of members) {
+    if (m.source !== void 0 && !sources.includes(m.source))
+      sources.push(m.source);
+  }
+  if (sources.length > 0)
+    out.source = capText(sources.join("+"), RULE_CAP);
+  let confidence;
+  for (const m of members) {
+    if (m.confidence !== void 0 && (confidence === void 0 || m.confidence > confidence)) {
+      confidence = m.confidence;
+    }
+  }
+  if (confidence !== void 0)
+    out.confidence = confidence;
+  let snippet;
+  const analyzers = [];
+  for (const m of members) {
+    if (m.evidence === void 0)
+      continue;
+    if (snippet === void 0 && m.evidence.snippet !== void 0)
+      snippet = m.evidence.snippet;
+    if (m.evidence.analyzer !== void 0 && !analyzers.includes(m.evidence.analyzer)) {
+      analyzers.push(m.evidence.analyzer);
+    }
+  }
+  if (snippet !== void 0 || analyzers.length > 0) {
+    out.evidence = {
+      ...analyzers.length > 0 ? { analyzer: capText(analyzers.join("+"), RULE_CAP) } : {},
+      ...snippet !== void 0 ? { snippet } : {}
+    };
   }
   return out;
 }
@@ -29261,7 +29320,15 @@ function toSarif(findings) {
           ...f.line !== void 0 ? { region: { startLine: f.line } } : {}
         }
       }
-    ]
+    ],
+    // Provenance (Q04, display-only): each field independently iff present;
+    // omitted entirely when both are absent. `message.text` is unchanged.
+    ...f.source !== void 0 || f.confidence !== void 0 ? {
+      properties: {
+        ...f.source !== void 0 ? { source: f.source } : {},
+        ...f.confidence !== void 0 ? { confidence: f.confidence } : {}
+      }
+    } : {}
   }));
   return {
     $schema: "https://json.schemastore.org/sarif-2.1.0.json",
