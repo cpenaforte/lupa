@@ -38,6 +38,19 @@ const TODO_RE = /\b(TODO|FIXME|XXX)\b/;
 /** Committed templates of env files. They hold placeholders, not secrets, so they are not flagged. */
 const ENV_TEMPLATES: ReadonlySet<string> = new Set([".env.example", ".env.sample", ".env.template"]);
 
+/**
+ * Removes provenance fields (`source`/`confidence`/`evidence`) in place and
+ * returns the finding. Agent-mode findings carry no provenance (Q04): applied
+ * at both agent exit points — after `agent.ts`'s `toFindings` call and on the
+ * single-shot probe-memo branch in `llm.ts` (verdicts kept there).
+ */
+export function stripProvenance(f: Finding): Finding {
+  delete f.source;
+  delete f.confidence;
+  delete f.evidence;
+  return f;
+}
+
 function isSensitivePath(file: string): boolean {
   const name = basename(file);
   if (ENV_TEMPLATES.has(name)) return false;

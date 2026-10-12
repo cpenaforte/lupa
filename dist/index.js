@@ -24807,6 +24807,12 @@ function capText(s, cap) {
 var LARGE_FILE_BYTES = 500 * 1024;
 var TODO_RE = /\b(TODO|FIXME|XXX)\b/;
 var ENV_TEMPLATES = /* @__PURE__ */ new Set([".env.example", ".env.sample", ".env.template"]);
+function stripProvenance(f) {
+  delete f.source;
+  delete f.confidence;
+  delete f.evidence;
+  return f;
+}
 function isSensitivePath(file) {
   const name = basename2(file);
   if (ENV_TEMPLATES.has(name))
@@ -25692,7 +25698,7 @@ function agentAddendum(maxTurns) {
     `Tool budget: up to ${maxTurns} tool-call rounds. When you have enough evidence, respond with ONLY the JSON findings object matching the schema; no prose, no tool calls.`
   ].join("\n");
 }
-var DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null).`;
+var DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null). Set "confidence" to your 0-100 integer confidence in each new finding; otherwise use null.`;
 function buildMessages(fast, diffText, issueBody, skipped = [], agent, omitted = 0, opts) {
   const withIds = opts?.withIds === true && agent === void 0;
   const system = agent ? `${SYSTEM}
@@ -25736,7 +25742,7 @@ var PR_REVIEW_SCHEMA = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"],
+          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"],
           properties: {
             severity: { type: "string", enum: ["info", "warning", "high"] },
             file: { type: "string" },
@@ -25744,7 +25750,8 @@ var PR_REVIEW_SCHEMA = {
             rule: { type: "string" },
             message: { type: "string" },
             suggestion: { type: ["string", "null"] },
-            duplicateOf: { type: ["integer", "null"] }
+            duplicateOf: { type: ["integer", "null"] },
+            confidence: { type: ["integer", "null"] }
           }
         }
       },
@@ -26746,7 +26753,7 @@ function tryParseFinal(text) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings: findings.map(stripProvenance) };
 }
 function capToolResult(output, maxBytes) {
   try {
@@ -27085,12 +27092,16 @@ function toFindings(v) {
       severity: i.severity,
       file: i.file,
       rule: i.rule,
-      message: i.message
+      message: i.message,
+      source: "llm"
     };
     if (Number.isInteger(i.line) && i.line >= 1)
       f.line = i.line;
     if (typeof i.suggestion === "string")
       f.suggestion = i.suggestion;
+    if (typeof i.confidence === "number" && Number.isSafeInteger(i.confidence) && i.confidence >= 0 && i.confidence <= 100) {
+      f.confidence = i.confidence;
+    }
     out.push(f);
   }
   return out;
@@ -27421,7 +27432,11 @@ async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolC
   const memoKey = `${provider}:${model}`;
   if (TOOLS_MEMO.get(memoKey) === false) {
     info("agent tools unsupported for this model: using single-shot");
-    return callWithProbe(provider, model, baseUrl2, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+    const out = await callWithProbe(provider, model, baseUrl2, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+    if (out.result.ok) {
+      out.result.findings = out.result.findings.map(stripProvenance);
+    }
+    return out;
   }
   const agentOpts = {
     model,

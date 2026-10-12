@@ -3,6 +3,7 @@ import type { Conversation, ToolCall } from "./agent-types.js";
 import { executeTool } from "./agent-tools.js";
 import type { ToolContext } from "./agent-tools.js";
 import { parseContent, toFindings } from "./llm.js";
+import { stripProvenance } from "./fastpath.js";
 import type { AgentReply, LlmResult } from "./llm.js";
 
 export interface AgentBudget {
@@ -63,7 +64,9 @@ function tryParseFinal(text: string): LlmResult {
   if (findings === undefined) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  // Agent-mode findings carry no provenance (Q04): the model may echo
+  // single-shot fields, so strip them at this agent exit point.
+  return { ok: true, findings: findings.map(stripProvenance) };
 }
 
 /**

@@ -144,6 +144,35 @@ describe("callWithProbeAgent", () => {
     expect(vi.mocked(core.info)).toHaveBeenCalledWith("agent tools unsupported for this model: using single-shot");
   });
 
+  it("memo single-shot path strips provenance from findings but keeps verdicts", async () => {
+    const provenanced = JSON.stringify({
+      findings: [{ ...FINDING, confidence: 80, duplicateOf: null }],
+      duplicates: null,
+    });
+    const provenancedChat = { choices: [{ finish_reason: "stop", message: { content: provenanced } }] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL, init?: unknown) => {
+        const body = String(((init as RequestInit | undefined)?.body ?? "") as unknown as string);
+        if (body.includes('"tools"')) return new Response("bad tools", { status: 400 });
+        return new Response(JSON.stringify(provenancedChat), { status: 200 });
+      }),
+    );
+    // Seed TOOLS_MEMO via the tools-unsupported fallback…
+    const r = await callWithProbeAgent("opencode-zen", "ap2b-model", ZEN, "k", conv(), AGENT_O, TOOL_CTX);
+    expect(r.result).toEqual({ ok: true, findings: [FINDING] });
+    // …then the memoized single-shot strips provenance while keeping verdicts.
+    vi.mocked(fetch).mockClear();
+    const r2 = await callWithProbeAgent("opencode-zen", "ap2b-model", ZEN, "k", conv(), AGENT_O, TOOL_CTX);
+    expect(r2.result).toEqual({
+      ok: true,
+      findings: [FINDING],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+    expect(JSON.stringify(r2.result)).not.toContain("confidence");
+    expect(JSON.stringify(r2.result)).not.toContain("llm");
+  });
+
   it("400 with tools then no-tools retry 400 → advances to the next style", async () => {
     vi.stubGlobal(
       "fetch",

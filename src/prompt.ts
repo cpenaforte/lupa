@@ -47,7 +47,7 @@ function agentAddendum(maxTurns: number): string {
  * into the sent fast-findings list, and pair arrays — the full verdict shape
  * for providers that never see the JSON schema.
  */
-export const DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null).`;
+export const DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null). Set "confidence" to your 0-100 integer confidence in each new finding; otherwise use null.`;
 
 export function buildMessages(
   fast: Finding[],
@@ -103,7 +103,7 @@ export const PR_REVIEW_SCHEMA = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"],
+          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"],
           properties: {
             severity: { type: "string", enum: ["info", "warning", "high"] },
             file: { type: "string" },
@@ -112,6 +112,7 @@ export const PR_REVIEW_SCHEMA = {
             message: { type: "string" },
             suggestion: { type: ["string", "null"] },
             duplicateOf: { type: ["integer", "null"] },
+            confidence: { type: ["integer", "null"] },
           },
         },
       },

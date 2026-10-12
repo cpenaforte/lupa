@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runL0 } from "../src/fastpath.js";
+import { runL0, stripProvenance } from "../src/fastpath.js";
 import { isLockfile } from "../src/diff.js";
 
 describe("isLockfile", () => {
@@ -167,5 +167,32 @@ describe("runL0 provenance (Q04)", () => {
       expect(x.confidence).toBe(50);
       expect(x.evidence).toBeUndefined();
     }
+  });
+});
+
+describe("stripProvenance (Q04 agent path)", () => {
+  const base = { severity: "warning" as const, file: "a.ts", rule: "r", message: "m" };
+
+  it("deletes source, confidence, and evidence, returning the finding", () => {
+    const f = { ...base, source: "llm", confidence: 75, evidence: { analyzer: "llm" } };
+    expect(stripProvenance(f)).toBe(f);
+    expect(f).toEqual(base);
+  });
+
+  it("is a no-op when no provenance is present", () => {
+    const f = { ...base };
+    expect(stripProvenance(f)).toBe(f);
+    expect(f).toEqual(base);
+  });
+
+  it("strips partial provenance (source-only, confidence-only, evidence-only)", () => {
+    expect(stripProvenance({ ...base, source: "llm" })).toEqual(base);
+    expect(stripProvenance({ ...base, confidence: 50 })).toEqual(base);
+    expect(stripProvenance({ ...base, evidence: { snippet: "x" } })).toEqual(base);
+  });
+
+  it("keeps every other field (line, suggestion) intact", () => {
+    const f = { ...base, line: 3, suggestion: "s", source: "llm", confidence: 0 };
+    expect(stripProvenance(f)).toEqual({ ...base, line: 3, suggestion: "s" });
   });
 });

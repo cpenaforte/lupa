@@ -143,15 +143,16 @@ describe("buildMessages agent variant", () => {
 });
 
 describe("PR_REVIEW_SCHEMA", () => {
-  it("requires findings with strict item shape and all seven keys", () => {
+  it("requires findings with strict item shape and all eight keys", () => {
     const item = (PR_REVIEW_SCHEMA.schema.properties.findings as any).items;
-    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"]);
+    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"]);
     expect(Object.keys(item.properties).sort()).toEqual(
-      ["duplicateOf", "file", "line", "message", "rule", "severity", "suggestion"],
+      ["confidence", "duplicateOf", "file", "line", "message", "rule", "severity", "suggestion"],
     );
     expect(item.additionalProperties).toBe(false);
     expect(item.properties.severity.enum).toEqual(["info", "warning", "high"]);
     expect(item.properties.duplicateOf).toEqual({ type: ["integer", "null"] });
+    expect(item.properties.confidence).toEqual({ type: ["integer", "null"] });
     expect(PR_REVIEW_SCHEMA.schema.additionalProperties).toBe(false);
     expect(PR_REVIEW_SCHEMA.schema.required).toEqual(["findings", "duplicates"]);
   });
@@ -265,5 +266,13 @@ describe("DEDUP_INSTRUCTIONS", () => {
     for (const token of ["duplicates", "duplicateOf", "0-based", "pair"]) {
       expect(DEDUP_INSTRUCTIONS).toContain(token);
     }
+  });
+
+  it("names the confidence field for the single-shot path only (agent prompts stay clean)", async () => {
+    const { buildMessages, DEDUP_INSTRUCTIONS } = await import("../src/prompt.js");
+    expect(DEDUP_INSTRUCTIONS).toContain("confidence");
+    expect(buildMessages([], "D", undefined, [], undefined, 0, { withIds: true }).system).toContain("confidence");
+    expect(buildMessages([], "D", undefined, [], { maxTurns: 10 }).system).not.toContain("confidence");
+    expect(buildMessages([], "D").system).not.toContain("confidence");
   });
 });

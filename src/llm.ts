@@ -1,4 +1,5 @@
 import type { Finding } from "./fastpath.js";
+import { stripProvenance } from "./fastpath.js";
 import type { Conversation, ToolCall } from "./agent-types.js";
 import { PR_REVIEW_SCHEMA } from "./prompt.js";
 import { buildEndpointForStyle } from "./providers.js";
@@ -199,6 +200,9 @@ export function parseVerdicts(parsed: unknown): DedupVerdicts {
  * Hand-written structural check against PR_REVIEW_SCHEMA's required fields.
  * Returns undefined when the response is invalid. Line is coerced rather than
  * rejected: only an integer >= 1 is kept, anything else becomes undefined.
+ * Single-shot provenance (Q04): every finding gains `source: "llm"`; a
+ * safe-integer 0..100 `confidence` is carried, anything else drops the FIELD
+ * (never the finding — verdict-index alignment is preserved).
  */
 export function toFindings(v: unknown): Finding[] | undefined {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
@@ -216,9 +220,18 @@ export function toFindings(v: unknown): Finding[] | undefined {
       file: i.file,
       rule: i.rule,
       message: i.message,
+      source: "llm",
     };
     if (Number.isInteger(i.line) && (i.line as number) >= 1) f.line = i.line as number;
     if (typeof i.suggestion === "string") f.suggestion = i.suggestion;
+    if (
+      typeof i.confidence === "number" &&
+      Number.isSafeInteger(i.confidence) &&
+      i.confidence >= 0 &&
+      i.confidence <= 100
+    ) {
+      f.confidence = i.confidence;
+    }
     out.push(f);
   }
   return out;
@@ -852,9 +865,15 @@ export async function callWithProbeAgent(
 
   // A model that already proved it rejects tools skips the loop entirely.
   // The conversation has no turns at this point, so this is single-shot.
+  // Agent-mode findings carry no provenance (Q04): strip them here while
+  // keeping the genuine single-shot `verdicts` judgment.
   if (TOOLS_MEMO.get(memoKey) === false) {
     core.info("agent tools unsupported for this model: using single-shot");
-    return callWithProbe(provider, model, baseUrl, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+    const out = await callWithProbe(provider, model, baseUrl, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+    if (out.result.ok) {
+      out.result.findings = out.result.findings.map(stripProvenance);
+    }
+    return out;
   }
 
   const agentOpts: AgentCallOptions = {

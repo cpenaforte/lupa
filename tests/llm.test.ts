@@ -298,7 +298,7 @@ describe("callLlm response handling", () => {
     });
   });
 
-  it("maps findings to exactly {severity,file,line?,rule,message,suggestion?}, null to undefined", async () => {
+  it("maps findings to exactly {severity,file,line?,rule,message,suggestion?} plus source llm, null to undefined", async () => {
     const content = JSON.stringify({
       findings: [
         { severity: "high", file: "a.ts", line: null, rule: "r1", message: "m1", suggestion: null },
@@ -310,8 +310,8 @@ describe("callLlm response handling", () => {
     expect(r).toEqual({
       ok: true,
       findings: [
-        { severity: "high", file: "a.ts", rule: "r1", message: "m1" },
-        { severity: "warning", file: "b.ts", line: 7, rule: "r2", message: "m2", suggestion: "fix" },
+        { severity: "high", file: "a.ts", rule: "r1", message: "m1", source: "llm" },
+        { severity: "warning", file: "b.ts", line: 7, rule: "r2", message: "m2", suggestion: "fix", source: "llm" },
       ],
       verdicts: { pairs: [], links: [], malformed: 0 },
     });
@@ -356,7 +356,7 @@ describe("dedup verdicts (parseVerdicts via callLlm)", () => {
     suggestion: null,
     ...extra,
   });
-  const CLEAN = { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m" };
+  const CLEAN = { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm" };
 
   it("extracts duplicates pairs and duplicateOf pointers (toFindings ignores the new keys)", async () => {
     const content = JSON.stringify({
@@ -406,6 +406,62 @@ describe("dedup verdicts (parseVerdicts via callLlm)", () => {
       ok: true,
       findings: [],
       verdicts: { pairs: [], links: [], malformed: 3 },
+    });
+  });
+});
+
+describe("LLM structured confidence (toFindings via callLlm)", () => {
+  const F = (extra: Record<string, unknown> = {}) => ({
+    severity: "warning",
+    file: "a.ts",
+    line: 1,
+    rule: "r",
+    message: "m",
+    suggestion: null,
+    ...extra,
+  });
+
+  it("carries a valid confidence and assigns source llm", async () => {
+    const content = JSON.stringify({ findings: [F({ confidence: 75 })] });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [{ severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm", confidence: 75 }],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+  });
+
+  it("absent or null confidence stays absent (source still assigned)", async () => {
+    const content = JSON.stringify({ findings: [F(), F({ confidence: null })] });
+    stubFetch(() => json(200, okChat(content)));
+    const clean = { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm" };
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [clean, clean],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+  });
+
+  it.each([150, -1, 1.5, "high", true, NaN])("drops malformed confidence %p (field only, finding kept)", async (bad) => {
+    const content = JSON.stringify({ findings: [F({ confidence: bad })] });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [{ severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm" }],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+  });
+
+  it("keeps boundary values 0 and 100", async () => {
+    const content = JSON.stringify({ findings: [F({ confidence: 0 }), F({ confidence: 100 })] });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [
+        { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm", confidence: 0 },
+        { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm", confidence: 100 },
+      ],
+      verdicts: { pairs: [], links: [], malformed: 0 },
     });
   });
 });

@@ -45,7 +45,7 @@ const EXPECTED_GOOGLE_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"],
+        required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"],
         properties: {
           severity: { type: "string", enum: ["info", "warning", "high"] },
           file: { type: "string" },
@@ -54,6 +54,7 @@ const EXPECTED_GOOGLE_SCHEMA = {
           message: { type: "string" },
           suggestion: { type: "string", nullable: true },
           duplicateOf: { type: "integer", nullable: true },
+          confidence: { type: "integer", nullable: true },
         },
       },
     },
@@ -547,10 +548,11 @@ describe("googleSchema", () => {
     const items = out.properties.findings.items;
     expect(out.properties.findings.type).toBe("array");
     expect(out.required).toEqual(["findings", "duplicates"]);
-    expect(items.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"]);
+    expect(items.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"]);
     expect(items.properties.line).toEqual({ type: "integer", nullable: true });
     expect(items.properties.severity).toEqual({ type: "string", enum: ["info", "warning", "high"] });
     expect(items.properties.duplicateOf).toEqual({ type: "integer", nullable: true });
+    expect(items.properties.confidence).toEqual({ type: "integer", nullable: true });
   });
 
   it("converts nullable duplicates with minItems/maxItems passed through", () => {
