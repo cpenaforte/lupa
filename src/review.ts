@@ -129,9 +129,11 @@ export function exitFor(failLevel: FailLevel, findings: Finding[]): number {
 const FALLBACK_SUMMARY = "lupa: review complete.";
 
 /**
- * Replaces every non-empty secret in `message`, `suggestion`, `file` and
- * `rule` with the redaction marker. Empty secrets are skipped: redacting
- * with an empty key would interleave markers between every character.
+ * Replaces every non-empty secret in `message`, `suggestion`, `file`,
+ * `rule`, and `evidence.*` with the redaction marker. Empty secrets are
+ * skipped: redacting with an empty key would interleave markers between
+ * every character. The `evidence` object is always copied fresh, so mutating
+ * the input afterwards never alters the redacted output.
  */
 export function redactFindings(findings: Finding[], secrets: readonly string[]): Finding[] {
   const keys = secrets.filter((s) => s !== "");
@@ -144,7 +146,21 @@ export function redactFindings(findings: Finding[], secrets: readonly string[]):
         file: redact(out.file, key),
         rule: redact(out.rule, key),
         ...(out.suggestion !== undefined ? { suggestion: redact(out.suggestion, key) } : {}),
+        ...(out.evidence !== undefined
+          ? {
+              evidence: {
+                ...(out.evidence.analyzer !== undefined ? { analyzer: redact(out.evidence.analyzer, key) } : {}),
+                ...(out.evidence.snippet !== undefined ? { snippet: redact(out.evidence.snippet, key) } : {}),
+              },
+            }
+          : {}),
       };
+    }
+    // Copy-on-write: the spread above shares the input's evidence object when
+    // no key touched it (or no secrets were given) — always hand out a fresh
+    // object so later input mutation cannot leak into redacted output.
+    if (out.evidence !== undefined && out.evidence === f.evidence) {
+      out = { ...out, evidence: { ...out.evidence } };
     }
     return out;
   });

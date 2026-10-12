@@ -23,6 +23,7 @@ import {
   SEMGREP_VERSION,
   runExec,
   fromStdout,
+  warning,
   TOOL_TIMEOUT_MS,
 } from "../src/scanners.js";
 
@@ -326,7 +327,7 @@ describe("runScanners", () => {
       docker: FAKE_DOCKER,
     });
     const { findings } = await runScanners({ dir: tmp, baselineSha: "abc" });
-    expect(findings).toContainEqual({ severity: "high", file: "a.ts", line: 3, rule: "S1", message: "sg" });
+    expect(findings).toContainEqual({ severity: "high", file: "a.ts", line: 3, rule: "S1", message: "sg", source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } });
     expect(findings.some((f) => f.rule === "scanner-failed")).toBe(false);
   });
 
@@ -341,6 +342,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "semgrep exited 2 without parseable SARIF",
+      source: "semgrep",
     });
   });
 
@@ -364,7 +366,7 @@ describe("runScanners", () => {
   it("gitleaks reads its report file, parses it and removes the temp dir", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
     const { findings } = await runScanners({ dir: tmp, baselineSha: "abc" });
-    expect(findings).toContainEqual({ severity: "high", file: "x.env", line: 2, rule: "G1", message: "secret" });
+    expect(findings).toContainEqual({ severity: "high", file: "x.env", line: 2, rule: "G1", message: "secret", source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" } });
     const reportDir = readFileSync(`${log}.reportdirs`, "utf8").trim();
     expect(reportDir).not.toBe("");
     expect(existsSync(reportDir)).toBe(false);
@@ -383,6 +385,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "gitleaks exited 3 with no report",
+      source: "gitleaks",
     });
   });
 
@@ -420,6 +423,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "sbom exited 0 without a CycloneDX document",
+      source: "sbom",
     });
   });
 
@@ -433,6 +437,7 @@ describe("runScanners", () => {
       file: "",
       rule: "sbom-write",
       message: "could not write SBOM: disk full",
+      source: "sbom",
     });
     expect(readdirSync(tmp).filter((n) => n.startsWith("sbom-"))).toEqual([]);
   });
@@ -447,6 +452,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "sbom exited 4 without a CycloneDX document",
+      source: "sbom",
     });
   });
 
@@ -460,6 +466,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "sbom exited 0 without a CycloneDX document",
+      source: "sbom",
     });
   });
 
@@ -479,6 +486,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "trivy exited 5 without parseable SARIF",
+      source: "trivy",
     });
   });
 
@@ -491,6 +499,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-failed",
       message: "osv-scanner (a/package-lock.json) exited 6 without parseable SARIF",
+      source: "osv-scanner",
     });
   });
 
@@ -502,6 +511,7 @@ describe("runScanners", () => {
       file: "",
       rule: "scanner-missing",
       message: "gitleaks unavailable: docker not found",
+      source: "gitleaks",
     });
   });
 
@@ -522,6 +532,7 @@ exit 0
       file: "",
       rule: "scanner-failed",
       message: "gitleaks timed out after 0.3s",
+      source: "gitleaks",
     });
     const reportDir = readFileSync(`${log}.reportdirs`, "utf8").trim();
     expect(reportDir).not.toBe("");
@@ -580,7 +591,7 @@ describe("per-tool timeout (M8)", () => {
       300,
     );
     expect(f).toEqual([
-      { severity: "warning", file: "", rule: "scanner-failed", message: "semgrep timed out after 0.3s" },
+      { severity: "warning", file: "", rule: "scanner-failed", message: "semgrep timed out after 0.3s", source: "semgrep" },
     ]);
   });
 });
@@ -679,6 +690,68 @@ describe("failed scanner invocations (F08)", () => {
   });
 });
 
+describe("finding provenance (Q04)", () => {
+  function sarifResult(): string {
+    return JSON.stringify({
+      runs: [
+        {
+          results: [
+            {
+              ruleId: "R1",
+              level: "error",
+              message: { text: "bad" },
+              locations: [
+                { physicalLocation: { artifactLocation: { uri: "a.ts" }, region: { startLine: 1 } } },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("warning() carries an explicit source and compiles unchanged without one", () => {
+    expect(warning("r", "m", "semgrep")).toEqual({
+      severity: "warning",
+      file: "",
+      rule: "r",
+      message: "m",
+      source: "semgrep",
+    });
+    expect(warning("r", "m")).toEqual({ severity: "warning", file: "", rule: "r", message: "m" });
+  });
+
+  it("parsed scanner findings carry confidence 90 with the mapped source and analyzer", () => {
+    const semgrep = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout: sarifResult(), timedOut: false });
+    expect(semgrep).toEqual([
+      { severity: "high", file: "a.ts", line: 1, rule: "R1", message: "bad", source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } },
+    ]);
+    const osv = fromStdout("docker", "osv-scanner (package-lock.json)", { missing: false, code: 1, stdout: sarifResult(), timedOut: false });
+    expect(osv).toEqual([
+      { severity: "high", file: "a.ts", line: 1, rule: "R1", message: "bad", source: "osv-scanner", confidence: 90, evidence: { analyzer: "osv-scanner" } },
+    ]);
+  });
+
+  it("tool-health warnings carry the mapped source with no confidence and no evidence", () => {
+    const missing = fromStdout("docker", "osv-scanner (a/package-lock.json)", { missing: true, code: null, stdout: "", timedOut: false });
+    expect(missing).toEqual([
+      { severity: "warning", file: "", rule: "scanner-missing", message: "osv-scanner (a/package-lock.json) unavailable: docker not found", source: "osv-scanner" },
+    ]);
+    expect(missing[0].confidence).toBeUndefined();
+    expect(missing[0].evidence).toBeUndefined();
+    const failed = fromStdout("docker", "trivy", { missing: false, code: 5, stdout: "", timedOut: false });
+    expect(failed).toEqual([
+      { severity: "warning", file: "", rule: "scanner-failed", message: "trivy exited 5 without parseable SARIF", source: "trivy" },
+    ]);
+    expect(failed[0].confidence).toBeUndefined();
+  });
+
+  it("evidence.snippet is assigned by nobody", () => {
+    const findings = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout: sarifResult(), timedOut: false });
+    for (const f of findings) expect(f.evidence?.snippet).toBeUndefined();
+  });
+});
+
 describe("artifact byte caps (F15)", () => {
   function sarifFinding(): string {
     return JSON.stringify({
@@ -701,12 +774,12 @@ describe("artifact byte caps (F15)", () => {
 
   it("missing still reports scanner-missing even with a tiny cap", () => {
     const f = fromStdout("semgrep", "semgrep", { missing: true, code: null, stdout: "", timedOut: false }, TOOL_TIMEOUT_MS, 1);
-    expect(f).toEqual([{ severity: "warning", file: "", rule: "scanner-missing", message: "semgrep unavailable: semgrep not found" }]);
+    expect(f).toEqual([{ severity: "warning", file: "", rule: "scanner-missing", message: "semgrep unavailable: semgrep not found", source: "semgrep" }]);
   });
 
   it("timedOut still reports the timeout even with a tiny cap", () => {
     const f = fromStdout("semgrep", "semgrep", { missing: false, code: null, stdout: "", timedOut: true }, 300, 1);
-    expect(f).toEqual([{ severity: "warning", file: "", rule: "scanner-failed", message: "semgrep timed out after 0.3s" }]);
+    expect(f).toEqual([{ severity: "warning", file: "", rule: "scanner-failed", message: "semgrep timed out after 0.3s", source: "semgrep" }]);
   });
 
   it("oversize semgrep stdout warns with the label and never parses", () => {
@@ -714,7 +787,7 @@ describe("artifact byte caps (F15)", () => {
     const max = Buffer.byteLength(stdout, "utf8") - 1;
     const f = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout, timedOut: false }, TOOL_TIMEOUT_MS, max);
     expect(f).toEqual([
-      { severity: "warning", file: "", rule: "scanner-failed", message: `semgrep output exceeds the artifact read limit (${max} bytes); results dropped` },
+      { severity: "warning", file: "", rule: "scanner-failed", message: `semgrep output exceeds the artifact read limit (${max} bytes); results dropped`, source: "semgrep" },
     ]);
   });
 
@@ -723,7 +796,7 @@ describe("artifact byte caps (F15)", () => {
     const max = Buffer.byteLength(stdout, "utf8") - 1;
     const f = fromStdout("docker", "osv-scanner (package-lock.json)", { missing: false, code: 1, stdout, timedOut: false }, TOOL_TIMEOUT_MS, max);
     expect(f).toHaveLength(1);
-    expect(f[0]).toMatchObject({ severity: "warning", rule: "scanner-failed" });
+    expect(f[0]).toMatchObject({ severity: "warning", rule: "scanner-failed", source: "osv-scanner" });
     expect(f[0].message).toBe(
       `osv-scanner (package-lock.json) output exceeds the artifact read limit (${max} bytes); results dropped`,
     );
@@ -733,7 +806,7 @@ describe("artifact byte caps (F15)", () => {
     const stdout = sarifFinding();
     const max = Buffer.byteLength(stdout, "utf8");
     const f = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout, timedOut: false }, TOOL_TIMEOUT_MS, max);
-    expect(f).toEqual([{ severity: "high", file: "a.ts", line: 1, rule: "R1", message: "bad" }]);
+    expect(f).toEqual([{ severity: "high", file: "a.ts", line: 1, rule: "R1", message: "bad", source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } }]);
   });
 
   it("gitleaks oversize report holding valid SARIF with findings + exit 0 warns with zero findings", async () => {
@@ -744,7 +817,7 @@ describe("artifact byte caps (F15)", () => {
       process.env.SCAN_LOG = join(tmp, "calls.log");
       const { findings } = await runScanners({ dir: tmp, baselineSha: "abc", maxArtifactBytes: 20 });
       expect(findings).toEqual([
-        { severity: "warning", file: "", rule: "scanner-failed", message: "gitleaks output exceeds the artifact read limit (20 bytes); results dropped" },
+        { severity: "warning", file: "", rule: "scanner-failed", message: "gitleaks output exceeds the artifact read limit (20 bytes); results dropped", source: "gitleaks" },
       ]);
     } finally {
       if (savedPath === undefined) delete process.env.PATH;
@@ -768,6 +841,7 @@ describe("artifact byte caps (F15)", () => {
         file: "",
         rule: "scanner-failed",
         message: "sbom output exceeds the artifact read limit (10 bytes); results dropped",
+        source: "sbom",
       });
     } finally {
       if (savedPath === undefined) delete process.env.PATH;

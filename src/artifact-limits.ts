@@ -38,10 +38,20 @@ export function oversizeMessage(source: string, max: number): string {
 }
 
 /**
+ * Maps a scanner label to its fixed contract source id: `label.split(" (")[0]`.
+ * Identity for paren-free labels; `"osv-scanner (lock)"` → `"osv-scanner"`,
+ * so lockfile paths never reach the contract.
+ */
+export function sourceForLabel(label: string): string {
+  return label.split(" (")[0]!;
+}
+
+/**
  * Byte pre-check for in-memory artifact texts. `[warning]` when oversize,
  * `undefined` when it fits. Finding objects are built literally.
+ * The message keeps the full label; the warning source is the mapped id.
  */
 export function byteCheck(text: string, max: number, source: string): Finding[] | undefined {
   if (Buffer.byteLength(text, "utf8") <= max) return undefined;
-  return [{ severity: "warning", file: "", rule: "scanner-failed", message: oversizeMessage(source, max) }];
+  return [{ severity: "warning", file: "", rule: "scanner-failed", message: oversizeMessage(source, max), source: sourceForLabel(source) }];
 }

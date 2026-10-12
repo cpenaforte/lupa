@@ -1319,6 +1319,72 @@ describe("Fluxo B bindings and sanitizing", () => {
   });
 });
 
+describe("finding provenance contract (Q04)", () => {
+  it("readFindings accepts valid provenance shapes", () => {
+    const dir = scratch();
+    const valid = [
+      { ...LLM_FINDING },
+      { ...LLM_FINDING, source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } },
+      { ...LLM_FINDING, source: "fastpath", confidence: 50 },
+      { ...LLM_FINDING, confidence: 0 },
+      { ...LLM_FINDING, evidence: {} },
+    ];
+    writeFileSync(join(dir, "findings.json"), JSON.stringify(valid), "utf8");
+    expect(readFindings(dir)).toEqual(valid);
+  });
+
+  it.each([
+    ["overlong source", { source: "x".repeat(101) }],
+    ["confidence 101", { confidence: 101 }],
+    ["confidence -1", { confidence: -1 }],
+    ["non-integer confidence", { confidence: 1.5 }],
+    ["string confidence", { confidence: "90" }],
+    ["non-object evidence", { evidence: "semgrep" }],
+    ["non-string analyzer", { evidence: { analyzer: 42 } }],
+    ["empty source", { source: "" }],
+  ])("readFindings rejects %s", (_label, extra) => {
+    const dir = scratch();
+    writeFileSync(join(dir, "findings.json"), JSON.stringify([{ ...LLM_FINDING, ...extra }]), "utf8");
+    expect(() => readFindings(dir)).toThrow("lupa: findings.json does not match the finding contract");
+  });
+
+  it("sanitizeFinding carries source, confidence and evidence with caps, absent stays absent", () => {
+    const carried = sanitizeFinding({
+      ...LLM_FINDING,
+      source: "semgrep",
+      confidence: 90,
+      evidence: { analyzer: "semgrep", snippet: "line" },
+    });
+    expect(carried.source).toBe("semgrep");
+    expect(carried.confidence).toBe(90);
+    expect(carried.evidence).toEqual({ analyzer: "semgrep", snippet: "line" });
+    const absent = sanitizeFinding({ ...LLM_FINDING });
+    expect(absent.source).toBeUndefined();
+    expect(absent.confidence).toBeUndefined();
+    expect(absent.evidence).toBeUndefined();
+    const capped = sanitizeFinding({
+      ...LLM_FINDING,
+      source: `s${"\0".repeat(5)}${"x".repeat(200)}`,
+      evidence: { analyzer: `a${"\u007f".repeat(5)}${"y".repeat(200)}`, snippet: `s${"\0".repeat(3)}${"z".repeat(3000)}` },
+    });
+    expect(capped.source).toBe(`s${"x".repeat(200)}`.slice(0, 100 - TRUNC.length) + TRUNC);
+    expect(Array.from(capped.source!)).toHaveLength(100);
+    expect(Array.from(capped.evidence!.analyzer!)).toHaveLength(100);
+    expect(capped.evidence!.analyzer).toContain(TRUNC);
+    expect(Array.from(capped.evidence!.snippet!)).toHaveLength(2000);
+    expect(capped.evidence!.snippet).toContain(TRUNC);
+  });
+
+  it("L2_SKIPPED carries source l2 with no confidence (fork path)", async () => {
+    const r = await runWithMocks({ comment: true, forkReadonly: true, tokenType: "app" });
+    const staged = JSON.parse(readFileSync(join(r.artifactDir, "findings.json"), "utf8")) as Finding[];
+    const skipped = staged.find((f) => f.rule === "l2-skipped");
+    expect(skipped).toBeDefined();
+    expect(skipped!.source).toBe("l2");
+    expect(skipped!.confidence).toBeUndefined();
+  });
+});
+
 describe("findings from binaries, renames and skip paths", () => {
   it("a binary over 500 KB on disk triggers large-file (real stat, not hunk length)", async () => {
     const big = 'diff --git a/big.bin b/big.bin\nBinary files a/big.bin and b/big.bin differ\n';

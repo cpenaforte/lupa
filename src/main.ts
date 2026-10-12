@@ -160,6 +160,7 @@ const L2_SKIPPED: Finding = {
   rule: "l2-skipped",
   message:
     "L2 native toolchains were not executed: fork PR with secrets in scope. Semgrep, gitleaks and trivy still ran.",
+  source: "l2",
 };
 
 /** Lockfile basename to the manifest that must change with it. Unmapped lockfiles are not flagged. */
@@ -340,7 +341,18 @@ function isFinding(v: unknown): v is Finding {
     typeof f.rule === "string" &&
     typeof f.message === "string" &&
     (f.line === undefined || (typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1)) &&
-    (f.suggestion === undefined || typeof f.suggestion === "string")
+    (f.suggestion === undefined || typeof f.suggestion === "string") &&
+    (f.source === undefined || (typeof f.source === "string" && f.source.length > 0 && f.source.length <= 100)) &&
+    (f.confidence === undefined ||
+      (typeof f.confidence === "number" && Number.isSafeInteger(f.confidence) && f.confidence >= 0 && f.confidence <= 100)) &&
+    (f.evidence === undefined ||
+      (typeof f.evidence === "object" &&
+        f.evidence !== null &&
+        !Array.isArray(f.evidence) &&
+        ((f.evidence as Record<string, unknown>).snippet === undefined ||
+          typeof (f.evidence as Record<string, unknown>).snippet === "string") &&
+        ((f.evidence as Record<string, unknown>).analyzer === undefined ||
+          typeof (f.evidence as Record<string, unknown>).analyzer === "string")))
   );
 }
 
@@ -409,6 +421,21 @@ export function sanitizeFinding(f: Finding): Finding {
   if (line !== undefined) out.line = line;
   if (f.suggestion !== undefined) {
     out.suggestion = capText(f.suggestion.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
+  }
+  if (f.source !== undefined) {
+    const stripped = f.source.replace(CONTROL_ALL, "");
+    if (stripped !== "") out.source = capText(stripped, RULE_CAP);
+  }
+  if (f.confidence !== undefined) out.confidence = f.confidence;
+  if (f.evidence !== undefined) {
+    const evidence: NonNullable<Finding["evidence"]> = {};
+    if (f.evidence.analyzer !== undefined) {
+      evidence.analyzer = capText(f.evidence.analyzer.replace(CONTROL_ALL, ""), RULE_CAP);
+    }
+    if (f.evidence.snippet !== undefined) {
+      evidence.snippet = capText(f.evidence.snippet.replace(CONTROL_KEEP_TEXT, ""), MSG_CAP);
+    }
+    out.evidence = evidence;
   }
   return out;
 }

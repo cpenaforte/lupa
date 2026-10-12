@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import type { Finding } from "./fastpath.js";
 import type { PrMeta } from "./diff.js";
-import { byteCheck, oversizeMessage, readCappedFileSync } from "./artifact-limits.js";
+import { byteCheck, oversizeMessage, readCappedFileSync, sourceForLabel } from "./artifact-limits.js";
 import { DEFAULT_MAX_ARTIFACT_BYTES } from "./inputs.js";
 
 // ---- pins ----------------------------------------------------------------
@@ -222,8 +222,10 @@ export function runExec(
   });
 }
 
-function warning(rule: string, message: string): Finding {
-  return { severity: "warning", file: "", rule, message };
+export function warning(rule: string, message: string, source?: string): Finding {
+  return source === undefined
+    ? { severity: "warning", file: "", rule, message }
+    : { severity: "warning", file: "", rule, message, source };
 }
 
 /**
@@ -282,24 +284,26 @@ function findingsExitCodes(label: string): number[] {
  * exit code; code 0 with no invocation info stays quiet.
  */
 export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Finding[] {
-  if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`)];
-  if (r.timedOut) return [warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`)];
+  const source = sourceForLabel(label);
+  if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`, source)];
+  if (r.timedOut) return [warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`, source)];
   const over = byteCheck(r.stdout, maxBytes, label);
   if (over !== undefined) return over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : undefined;
   if (!parsed) {
-    return [warning("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`)];
+    return [warning("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`, source)];
   }
+  const provenanced = parsed.map((f) => ({ ...f, source, confidence: 90, evidence: { analyzer: source } }));
   const health = invocationFailed(r.stdout);
   if (health === true) {
-    return [...parsed, warning("scanner-failed", `${label} reported an unsuccessful run`)];
+    return [...provenanced, warning("scanner-failed", `${label} reported an unsuccessful run`, source)];
   }
-  if (health === false) return parsed;
-  if (r.code === 0) return parsed;
+  if (health === false) return provenanced;
+  if (r.code === 0) return provenanced;
   if (r.code === null || !findingsExitCodes(label).includes(r.code)) {
-    return [...parsed, warning("scanner-failed", `${label} reported an unsuccessful run`)];
+    return [...provenanced, warning("scanner-failed", `${label} reported an unsuccessful run`, source)];
   }
-  return parsed;
+  return provenanced;
 }
 
 /**
@@ -375,7 +379,7 @@ export async function runScanners(o: {
   if (o.sbom) {
     const sb = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv(".")), dir, undefined, timeoutMs);
     if (sb.missing) {
-      findings.push(warning("scanner-missing", "sbom unavailable: docker not found"));
+      findings.push(warning("scanner-missing", "sbom unavailable: docker not found", "sbom"));
     } else {
       const over = byteCheck(sb.stdout, maxArtifactBytes, "sbom");
       if (over !== undefined) {
@@ -383,7 +387,7 @@ export async function runScanners(o: {
       } else if (!isCycloneDx(sb.stdout)) {
         // The exit code is not decisive: a valid CycloneDX document is accepted even on non-zero
         // exit (scanners exit non-zero when they report findings), matching the SARIF rule.
-        findings.push(warning("scanner-failed", `sbom exited ${sb.code ?? "abnormally"} without a CycloneDX document`));
+        findings.push(warning("scanner-failed", `sbom exited ${sb.code ?? "abnormally"} without a CycloneDX document`, "sbom"));
       } else {
         let sbomDir: string | undefined;
         try {
@@ -394,7 +398,7 @@ export async function runScanners(o: {
         } catch (e) {
           // A failed write must not leave a half-created dir behind: remove it best-effort.
           if (sbomDir) await rm(sbomDir, { recursive: true, force: true }).catch(() => undefined);
-          findings.push(warning("sbom-write", `could not write SBOM: ${(e as Error).message}`));
+          findings.push(warning("sbom-write", `could not write SBOM: ${(e as Error).message}`, "sbom"));
         }
       }
     }
@@ -424,7 +428,7 @@ async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, max
   try {
     reportDir = await mkdtemp(join(os.tmpdir(), "gitleaks-"));
   } catch (e) {
-    return [warning("scanner-failed", `gitleaks temp dir unavailable: ${(e as Error).message}`)];
+    return [warning("scanner-failed", `gitleaks temp dir unavailable: ${(e as Error).message}`, "gitleaks")];
   }
   const hostReport = join(reportDir, "report.sarif");
   try {
@@ -437,29 +441,30 @@ async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, max
       undefined,
       timeoutMs,
     );
-    if (gl.missing) return [warning("scanner-missing", "gitleaks unavailable: docker not found")];
-    if (gl.timedOut) return [warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`)];
+    if (gl.missing) return [warning("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
+    if (gl.timedOut) return [warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`, "gitleaks")];
     let text: string | undefined;
     try {
       const capped = readCappedFileSync(hostReport, maxBytes);
       if (!capped.ok) {
-        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes))];
+        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks")];
       }
       text = capped.text;
     } catch {
       text = undefined;
     }
     if (text === undefined) {
-      return gl.code === 0 ? [] : [warning("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`)];
+      return gl.code === 0 ? [] : [warning("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`, "gitleaks")];
     }
     const parsed = parseSarif(text);
-    if (!parsed) return [warning("scanner-failed", "gitleaks report is not parseable SARIF")];
+    if (!parsed) return [warning("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
+    const provenanced = parsed.map((f) => ({ ...f, source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" } }));
     // Exit codes do not apply here (this path parses a report file, not a process
     // result), but invocation health still does when the SARIF carries it.
     if (invocationFailed(text) === true) {
-      return [...parsed, warning("scanner-failed", "gitleaks reported an unsuccessful run")];
+      return [...provenanced, warning("scanner-failed", "gitleaks reported an unsuccessful run", "gitleaks")];
     }
-    return parsed;
+    return provenanced;
   } finally {
     await rm(reportDir, { recursive: true, force: true }).catch(() => undefined);
   }

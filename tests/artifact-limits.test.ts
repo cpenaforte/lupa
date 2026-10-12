@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { byteCheck, oversizeMessage, readCappedFileSync } from "../src/artifact-limits.js";
+import { byteCheck, oversizeMessage, readCappedFileSync, sourceForLabel } from "../src/artifact-limits.js";
 
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "art-"));
@@ -93,7 +93,35 @@ describe("byteCheck", () => {
         file: "",
         rule: "scanner-failed",
         message: "semgrep output exceeds the artifact read limit (3 bytes); results dropped",
+        source: "semgrep",
       },
     ]);
+  });
+
+  it("oversize with a lockfile label keeps the full label in the message but maps the source", () => {
+    expect(byteCheck("abcd", 3, "osv-scanner (package-lock.json)")).toEqual([
+      {
+        severity: "warning",
+        file: "",
+        rule: "scanner-failed",
+        message: "osv-scanner (package-lock.json) output exceeds the artifact read limit (3 bytes); results dropped",
+        source: "osv-scanner",
+      },
+    ]);
+  });
+});
+
+describe("sourceForLabel", () => {
+  it("is identity for paren-free labels", () => {
+    expect(sourceForLabel("semgrep")).toBe("semgrep");
+    expect(sourceForLabel("trivy")).toBe("trivy");
+    expect(sourceForLabel("gitleaks")).toBe("gitleaks");
+    expect(sourceForLabel("sbom")).toBe("sbom");
+    expect(sourceForLabel("gofmt")).toBe("gofmt");
+  });
+
+  it("strips the lockfile suffix from osv-scanner labels", () => {
+    expect(sourceForLabel("osv-scanner (package-lock.json)")).toBe("osv-scanner");
+    expect(sourceForLabel("osv-scanner (a/b/Cargo.lock)")).toBe("osv-scanner");
   });
 });

@@ -176,6 +176,7 @@ function interpretDefault(
       file: "",
       rule: name,
       message: `${describeFailure(name, failure, timeoutMs)}${detail ? `:\n${detail}` : ""}`,
+      source: name,
     },
   ];
 }
@@ -209,6 +210,9 @@ export function interpretGofmt(
       file,
       rule: "gofmt",
       message: `gofmt: ${file} is not formatted (run gofmt -w ${file})`,
+      source: "gofmt",
+      confidence: 90,
+      evidence: { analyzer: "gofmt" },
     }));
   }
   if (failure) return interpretDefault(name, failure, stdout, changed, timeoutMs);

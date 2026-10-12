@@ -293,6 +293,54 @@ describe("redactFindings", () => {
     expect(redactFindings(findings, [""])).toEqual(findings);
     expect(redactFindings(findings, [])).toEqual(findings);
   });
+
+  it("redactFindings redacts evidence snippet and analyzer secrets", () => {
+    const out = redactFindings(
+      [
+        {
+          severity: "warning",
+          file: "a.ts",
+          line: 1,
+          rule: "r",
+          message: "clean",
+          source: "semgrep",
+          confidence: 90,
+          evidence: { analyzer: "semgrep sk-secret-1", snippet: "token sk-secret-1 here" },
+        },
+      ],
+      ["sk-secret-1"],
+    );
+    expect(out).toEqual([
+      {
+        severity: "warning",
+        file: "a.ts",
+        line: 1,
+        rule: "r",
+        message: "clean",
+        source: "semgrep",
+        confidence: 90,
+        evidence: { analyzer: "semgrep [REDACTED]", snippet: "token [REDACTED] here" },
+      },
+    ]);
+  });
+
+  it("redactFindings creates fresh evidence objects (mutating the input afterwards leaves output unchanged)", () => {
+    const input: Finding[] = [
+      {
+        severity: "warning",
+        file: "a.ts",
+        rule: "r",
+        message: "m",
+        evidence: { analyzer: "semgrep", snippet: "code" },
+      },
+    ];
+    const out = redactFindings(input, ["zzz"]);
+    expect(out[0].evidence).toEqual({ analyzer: "semgrep", snippet: "code" });
+    expect(out[0].evidence).not.toBe(input[0].evidence);
+    input[0].evidence!.analyzer = "mutated";
+    input[0].evidence!.snippet = "mutated";
+    expect(out[0].evidence).toEqual({ analyzer: "semgrep", snippet: "code" });
+  });
 });
 
 describe("eventFor", () => {

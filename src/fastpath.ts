@@ -8,6 +8,12 @@ export interface Finding {
   rule: string;
   message: string;
   suggestion?: string;
+  /** Short producer id (e.g. "fastpath", "semgrep", "llm"). Absent = legacy finding. */
+  source?: string;
+  /** Claimant confidence, integer 0..100. Absent = unmarked (never defaulted). */
+  confidence?: number;
+  /** What proves the claim. `snippet` is reserved: assigned by no producer in v1. */
+  evidence?: { snippet?: string; analyzer?: string };
 }
 
 /** Finding-text caps (finding-contract home; imported by main.ts and review.ts — behavior unchanged). */
@@ -60,6 +66,8 @@ export function runL0(
         file: f.file,
         rule: "sensitive-path",
         message: `Sensitive file path changed: ${f.file}`,
+        source: "fastpath",
+        confidence: 50,
       });
     }
 
@@ -69,6 +77,8 @@ export function runL0(
         file: f.file,
         rule: "large-file",
         message: `File larger than 500KB: ${f.file}`,
+        source: "fastpath",
+        confidence: 50,
       });
     }
 
@@ -78,6 +88,8 @@ export function runL0(
         file: f.file,
         rule: "binary-note",
         message: `Binary or non-text change, not reviewed: ${f.file}`,
+        source: "fastpath",
+        confidence: 50,
       });
     }
 
@@ -87,6 +99,8 @@ export function runL0(
         file: f.file,
         rule: "lockfile-without-manifest",
         message: `Lockfile changed without its manifest: ${f.file}`,
+        source: "fastpath",
+        confidence: 50,
       });
     }
 
@@ -97,6 +111,8 @@ export function runL0(
         line,
         rule: "todo-marker",
         message: `TODO/FIXME/XXX marker: ${text.trim()}`,
+        source: "fastpath",
+        confidence: 50,
       });
     }
   }

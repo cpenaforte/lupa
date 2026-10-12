@@ -148,8 +148,8 @@ describe("runL2 behavior", () => {
     const spawn = async () => ({ failure: undefined, stdout: "a.go\nsub/b.go\nc.go\n" });
     const findings = await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go", "sub/b.go"]));
     expect(findings).toEqual([
-      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
-      { severity: "warning", file: "sub/b.go", rule: "gofmt", message: "gofmt: sub/b.go is not formatted (run gofmt -w sub/b.go)" },
+      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)", source: "gofmt", confidence: 90, evidence: { analyzer: "gofmt" } },
+      { severity: "warning", file: "sub/b.go", rule: "gofmt", message: "gofmt: sub/b.go is not formatted (run gofmt -w sub/b.go)", source: "gofmt", confidence: 90, evidence: { analyzer: "gofmt" } },
     ]);
   });
   it("gofmt ignores unchanged files, empty output, and ./ prefixes", async () => {
@@ -159,7 +159,7 @@ describe("runL2 behavior", () => {
     expect(await runL2("tests/fixtures/go", empty, 1000, new Set(["a.go"]))).toEqual([]);
     const dotted = async () => ({ failure: undefined, stdout: "./a.go\n" });
     expect(await runL2("tests/fixtures/go", dotted, 1000, new Set(["a.go"]))).toEqual([
-      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)", source: "gofmt", confidence: 90, evidence: { analyzer: "gofmt" } },
     ]);
     // Omitted changedFiles defaults to an empty set: silence, never a whole-repo dump.
     const listed = async () => ({ failure: undefined, stdout: "a.go\nsub/b.go\n" });
@@ -171,7 +171,7 @@ describe("runL2 behavior", () => {
         ? { failure: { code: 2, signal: null, output: "boom" }, stdout: "a.go\n" }
         : { failure: undefined, stdout: "" };
     expect(await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go"]))).toEqual([
-      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)", source: "gofmt", confidence: 90, evidence: { analyzer: "gofmt" } },
     ]);
   });
   it("gofmt timeout with partial stdout still reports only the timeout warning", async () => {
@@ -181,7 +181,7 @@ describe("runL2 behavior", () => {
         : { failure: undefined, stdout: "" };
     const findings = await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go"]));
     expect(findings).toEqual([
-      { severity: "warning", file: "", rule: "gofmt", message: expect.stringContaining("timed out") },
+      { severity: "warning", file: "", rule: "gofmt", message: expect.stringContaining("timed out"), source: "gofmt" },
     ]);
   });
   it("real execTool captures success stdout (shell stub, no Go toolchain)", async () => {
@@ -191,11 +191,23 @@ describe("runL2 behavior", () => {
     process.env.PATH = bin; // `go` is absent here → ENOENT → skipped
     try {
       expect(await runL2("tests/fixtures/go", execTool, 10000, new Set(["a.go"]))).toEqual([
-        { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+        { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)", source: "gofmt", confidence: 90, evidence: { analyzer: "gofmt" } },
       ]);
     } finally {
       process.env.PATH = oldPath;
     }
+  });
+
+  it("L2 failure warnings are tool-health: source set, confidence absent", async () => {
+    const spawn = async (cmd: string) =>
+      cmd === "gofmt"
+        ? { failure: { code: null, signal: null, output: "", timedOut: true }, stdout: "" }
+        : { failure: undefined, stdout: "" };
+    const findings = await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go"]));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].source).toBe("gofmt");
+    expect(findings[0].confidence).toBeUndefined();
+    expect(findings[0].evidence).toBeUndefined();
   });
 });
 

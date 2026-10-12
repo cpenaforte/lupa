@@ -94,7 +94,7 @@ const forkFinding = {
   message: "The new default enables an unsafe mode.",
 } as const;
 const forkL2Skipped = {
-  severity: "info", file: "", rule: "l2-skipped",
+  severity: "info", file: "", rule: "l2-skipped", source: "l2",
   message: "L2 native toolchains were not executed: fork PR with secrets in scope. Semgrep, gitleaks and trivy still ran.",
 } as const;
 

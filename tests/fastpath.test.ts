@@ -148,3 +148,24 @@ describe("runL0", () => {
     });
   });
 });
+
+describe("runL0 provenance (Q04)", () => {
+  it("every L0 finding carries source fastpath and confidence 50", () => {
+    const f = runL0(
+      [
+        { file: "id_rsa", hunks: "key", truncated: false },
+        { file: "big.bin", hunks: "", truncated: false, size: 600 * 1024 },
+        { file: "img.png", hunks: "", truncated: false, size: 1024 },
+        { file: "package-lock.json", hunks: "{}", truncated: false },
+        { file: "a.ts", hunks: "// TODO fix", truncated: false },
+      ],
+      { hasManifestFor: () => false },
+    );
+    expect(f.length).toBeGreaterThan(0);
+    for (const x of f) {
+      expect(x.source).toBe("fastpath");
+      expect(x.confidence).toBe(50);
+      expect(x.evidence).toBeUndefined();
+    }
+  });
+});
