@@ -64,9 +64,10 @@ export interface WalkSkipped {
   // when its listing was never read (for (b)) + 1 per remaining stacked directory
   // at the moment a walk limit fired; pruned/.git/symlink/non-regular entries are
   // excluded (they are deliberately skipped, not limit-cut). 0 unless a limit fired —
-  // a limit fires only when an unexamined entry remains, and end of walk with a
-  // non-empty stack also stops as truncated (a pushed-but-unlisted directory may hold
-  // unseen files), so exact fit with an empty stack yields `truncated: false`.
+  // a limit fires only when an unexamined entry remains (checked before each entry and
+  // at the top of each loop iteration after pop, so a pushed-but-unlisted directory
+  // fires check (b) when popped — there is no separate end-of-walk path, the loop
+  // itself reaches it), so exact fit with an empty stack yields `truncated: false`.
   // `overLimit` is exact for loop remainders and a conservative placeholder (one unit
   // per unlisted directory) when check (b) fires — stated explicitly, not silently exact.
   overLimit: number;
