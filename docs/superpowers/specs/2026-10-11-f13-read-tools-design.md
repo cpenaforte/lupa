@@ -76,17 +76,23 @@ export interface WalkSkipped {
   counts. `grepInRoot(root, args, timeoutMs?, limits?)` threads the optional limits
   to its walk, ORs walk truncation into its `truncated` flag and adds the
   `skipped` object to its response: `{matches, truncated, files_scanned, skipped}`.
+  The `glob` argument filters after the walk, so `skipped.oversized`/`binary` count
+  walk-excluded files even when they would not have matched the glob — the counts
+  describe the walk, not the filter (intended: exclusions stay visible regardless of
+  the pattern).
   `files_scanned` keeps today's meaning (files the worker attempted to read — the
   counter increments before the read, so read failures count).
 
 ### read_file line metadata
 
 `end_line` must describe only *fully visible* lines: after the byte-budget cut, back
-the cut up to the last `\n` (`idx = cut.lastIndexOf("\n"); visible = idx < 0 ? cut : cut.slice(0, idx)`)
+the cut up to the last `\n` (`idx = cut.lastIndexOf("\n"); visible = idx < 0 ? "" : cut.slice(0, idx)`)
 — a partial tail line still shows characters the metadata would disown, and paging
-from `end_line + 1` would drop them. First-line fallback: when the cut contains no
-`\n` (a single line exceeds the whole budget), `visible` is the partial first line
-and `end_line = start` (nothing better is representable).
+from `end_line + 1` would drop them. No-newline case: when the cut contains no
+`\n` (a single line exceeds the whole budget), `visible` is empty and
+`end_line = start - 1` — no complete line is visible, so resuming at `start`
+re-reads (overlap) rather than skipping, matching the existing `actualEnd`
+convention (`start - 1` when nothing is selected).
 `visibleLines = visible === "" ? 0 : visible.split("\n").length` (the backed-up cut
 never ends with `\n`, so no boundary over-count), counted over the backed-up portion
 only (excluding the appended `\n[truncated]` marker), and
@@ -99,9 +105,11 @@ re-reads at worst (overlap), never skips.
 
 `node_modules`, `vendor`, `target`, `.venv`, `venv`, `__pycache__` — matched as
 exact entry names (file or directory, any depth), same mechanism as the existing
-`.git` entry check. Case-sensitive except `.git`, which keeps its case-insensitive
-rule. Non-regular nodes (fifos, sockets, and anything that is neither file, dir,
-nor symlink) are skipped: never recursed, never listed.
+`.git` entry check. The prune applies to child entries under the walk start; the
+start path itself is never pruned (`path: "vendor"` still searches). Case-sensitive
+except `.git`, which keeps its case-insensitive rule. Non-regular nodes (fifos,
+sockets, and anything that is neither file, dir, nor symlink) are skipped: never
+recursed, never listed.
 
 ## 3. Tests
 
