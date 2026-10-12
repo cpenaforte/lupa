@@ -84,7 +84,8 @@ export interface WalkSkipped {
   pattern matches exceed the cap OR the walk hit a limit.
 - `walkFiles(root, startAbs, limits?)`: as today (size + binary eligibility) plus
   prune set, `maxFiles`, and `deadlineMs`. `statSync`- and `readdirSync`-failure skips
-  count in no bucket. A file start path counts as one examined unit, goes through
+  count in no bucket (the counter increments when classification is attempted, before
+  stat — failures consume a slot). A file start path counts as one examined unit, goes through
   eligibility, and records its exclusion reason (`skipped.oversized`/`binary`)
   instead of returning all-zero silence. The limit check precedes eligibility
   everywhere including file-start (an oversized file with `maxFiles: 0` reports
