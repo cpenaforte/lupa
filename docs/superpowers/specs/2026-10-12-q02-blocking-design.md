@@ -24,17 +24,22 @@ diff-only without reopen (drops the policy exception).
 ## 3. Interfaces
 
 ```ts
-// review.ts — hunk index extracted from mapToComments (behavior unchanged)
+// review.ts — hunk index extracted from mapToComments (display behavior unchanged)
 export function indexHunks(hunks: ParsedHunk[]): Map<string, Map<string, HunkLine>>;
-// review.ts — blocking partition over the merged set (input order preserved)
-export function blockingSet(
+// review.ts — gate partition over the merged set (input order preserved).
+// introduced = TOUCHED lines only (RIGHT hit with kind === "add" — context and
+// LEFT/deletion hits stay display-inline but never gate) PLUS lineless findings
+// whose file is in the diff (file-level membership; file "" never matches).
+// general = everything else. Display split (mapToComments) is untouched:
+// placement ≠ blocking.
+export function partitionGate(
   findings: Finding[],
   hunks: ParsedHunk[],
-  reopened: ReadonlySet<string>,
-): Finding[];
+): { introduced: Finding[]; general: Finding[] };
 // review.ts — stable identity for thread matching (rule, file, line)
 export function reopenedKey(f: Finding): string; // `${rule}\0${file}\0${String(line)}`
-// review.ts — pure reopen match (no I/O; threads supplied by the caller)
+// review.ts — pure reopen match (no I/O; threads supplied by the caller;
+// general = the gate-path general list, i.e. PRE-CAP merged off-diff)
 export function resolveReopened(
   general: Finding[],
   threads: ReviewThread[],
@@ -44,101 +49,144 @@ export function resolveReopened(
 export function buildBody(general: Finding[], summary: string, reopened?: ReadonlySet<string>): string;
 // github.ts — thread read (REST stays as-is; graphql rides the same client)
 export interface ReviewThread {
-  authorLogin: string; isResolved: boolean;
+  authorLogin: string | null; // null (deleted account) never matches self
+  isResolved: boolean;
   path: string; line?: number; originalLine?: number;
   rule: string | null; // parsed from the first comment body, else null (never matches)
 }
 export async function listReviewThreads(
   octokit: Octokit, owner: string, repo: string, pr: number,
 ): Promise<ReviewThread[]>;
-// main.ts — Deps.gh gains two methods (mocked in tests per runWithMocks pattern)
+// main.ts — Deps.gh gains two methods (harness.ts gateway fake + runWithMocks updated)
 listReviewThreads(owner: string, repo: string, pr: number): Promise<ReviewThread[]>;
 getActor(): Promise<string | undefined>;
-// main.ts — publishReview returns the blocking set (additive; callers use it for exits)
+// main.ts — publishReview computes the blocking set BEFORE all early returns
+// (dry-run, fork-readonly, stale-head) and returns it for the exits
 async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
 ```
 
 ## 4. Exact behavior
 
-- **Blocking set.** `blockingSet` = findings with a diff hit under the SAME
-  hit rule as `mapToComments` (RIGHT-then-LEFT on the shared index) PLUS
-  general findings whose `reopenedKey` is in `reopened`. Computed on the
-  MERGED set (post-dedup): exact, because `mergeable` requires same file AND
-  same line (or both lineless), so blocking-ness is merge-invariant — no flag
-  needs to ride through `survivor`.
+- **Blocking set.** `partitionGate` over the MERGED set (post-dedup): exact,
+  because `mergeable` requires same file AND same line (or both lineless), so
+  gate-membership is merge-invariant — no flag rides through `survivor`.
+  A lined finding is `introduced` iff its file+line hits a RIGHT-side hunk
+  line with `kind === "add"` (touched lines only: `ctx` context lines and
+  `LEFT` deletion fallbacks keep their inline display but never gate). A
+  lineless finding is `introduced` iff its file is in the diff file set
+  (file-level membership — `sensitive-path`/`lockfile-without-manifest` on
+  PR-touched files keep blocking; `file: ""` repo notes never match).
+  `blocking = introduced + general members whose key is reopened` (order
+  preserved). Internally `mapToComments` is refactored onto the shared
+  `indexHunks` + hit helper with byte-identical display behavior.
 - **Gates read the blocking set.** `eventFor(failLevel, blocking)` in the
   `publishReview` payload; `exitFor(failLevel, blocking)` in `runFlowA`/
-  `runFlowB` (replacing `all`/`findings`). `eventFor`/`exitFor` signatures
-  unchanged. Everything else keeps today's sets: SARIF/`findings.json`/F15
-  counts on the full merged set; funnel (top-N, inline cap, body cap,
-  omission) unchanged; `staleSkipped` short-circuit unchanged.
-- **Reopen match (pure).** Keep a thread iff `isResolved && authorLogin ===
-  selfLogin && rule !== null`; match on exact rule+file+line against the
-  PRE-CAP merged general list (top-N must not hide reopen candidates), where
-  the thread line is `line ?? originalLine` (both absent → no match).
-  Anything else → no reopen (fail-safe toward non-blocking). Reopened
-  findings keep their general-body placement with a marker (never promoted
-  inline — off-diff lines are uncommentable). Dedup equivalence holds: gates
-  move from the pre-merge full set to the blocking subset of the merged set
-  with identical outcomes, because members share file+line while survivor
-  severity is the max — any high member yields a high survivor at the same
-  position.
+  `runFlowB` (replacing `all`/`findings`). The blocking set (including the
+  thread read) is computed BEFORE all early returns (dry-run, fork-readonly,
+  stale-head) so the dry-run log's `event` and every exit path see it; the
+  dry-run `high` count stays on the full set (informational only).
+  `eventFor`/`exitFor` signatures unchanged. Everything else keeps today's
+  sets: SARIF/`findings.json`/F15 counts on the full merged set; funnel
+  (top-N, inline cap, body cap, omission) unchanged; `staleSkipped`
+  short-circuit unchanged. Dedup equivalence holds: any high member yields a
+  high survivor (severity max) at the same file+line, so pre-merge-full-set
+  outcomes equal blocking-subset-of-merged outcomes on the touched-line rule.
+- **Reopen match (pure).** Keep a thread iff `isResolved &&
+  normalizeBot(authorLogin) === normalizeBot(selfLogin) && rule !== null`
+  (`normalizeBot` strips one trailing `[bot]` on each side, covering both API
+  conventions; null authors never match). Rule match is INTERSECTION, not
+  equality: `thread.rule.split("+")` ∩ `finding.rule.split("+")` ≠ ∅ —
+  required because the posted thread rule is the `+`-joined survivor while
+  the next run may see unmerged members (same persisting issue at the same
+  file+line must still reopen; literal-`+` rules don't exist in any producer,
+  accepted). File+line exact, thread line = `line ?? originalLine` (both
+  absent → no match). Anything else → no reopen (fail-safe toward
+  non-blocking). Reopened findings keep general-body placement with a marker
+  (never promoted inline — off-diff lines are uncommentable).
 - **Thread fetch.** Single GraphQL query per `publishReview`:
-  `repository.pullRequest.reviewThreads(first:100)` with
+  `repository.pullRequest.reviewThreads(last:100)` with
   `nodes { isResolved path line originalLine comments(first:1) { nodes {
-  author { login } body } } }`. Rule from the first-comment body via
-  `/^\*\*(\w+)\*\* \[(.+?)\]/` (the exact `formatBody` head shape); unparseable
-  bodies → `rule: null`. `hasNextPage` → warn (`lupa:` prefix) and use the
-  first 100 (fail-open). Any fetch error → warn + empty set (never blocks on
-  infra failure). No token (dry-run) → skip silently (no warn; expected path).
+  author { login } body } } } pageInfo { hasPreviousPage }` (`last` keeps the
+  NEWEST 100 — recent resolves are the relevant ones). Rule from the
+  first-comment body via `/^\*\*(\w+)\*\* \[(.+?)\]/` (the exact `formatBody`
+  head shape; lazy by design — a rule containing `]` mismatches fail-safe to
+  null). `hasPreviousPage` → warn (`lupa:` prefix) and use the 100. Any fetch
+  error → warn + empty set (never blocks on infra failure). No token
+  (dry-run without token) → skip silently (expected path; with a token,
+  dry-run computes the identical reopen as live).
 - **Self identity.** `octokit.rest.users.getAuthenticated()` login, called
   with the same token that posts. Failure → `undefined` → skip reopen with a
-  warning. Residual: threads posted under a different token identity (e.g.
-  repo switched GITHUB_TOKEN → App) won't match — documented, not handled.
-- **Display.** `buildBody`: a reopened general item renders
-  `- **<sev>** **reopened** <locate> [<rule>] <msg> ...` (marker directly
-  after the severity token; suggestion/trailer rendering otherwise unchanged).
-  After the items, when at least one general finding is NOT reopened:
-  `\n\n<n> backlog finding(s) above are pre-existing and non-blocking.`
-  (`n` = non-reopened general count; omitted entirely when zero.)
-  `summaryFor`, `buildFallbackReport`, SARIF, and artifact shapes unchanged —
-  the fallback is a degraded path that already shows everything and carries
-  no gate role.
-- **"Worsened" scope.** A finding on a PR-touched line is in-diff and blocks —
-  that is the v1 worsened rule. Off-diff severity drift with no touched line
-  stays non-blocking (true baseline diffing deferred as an accepted residual).
+  warning. Failure mode is fail-OPEN (feature inert, never a false block).
+  Residual: threads posted under a different token identity (e.g. repo
+  switched GITHUB_TOKEN → App) won't match — documented, not handled. The
+  installation-token behavior MUST be proven on a live canary (test-lupa:
+  resolve a posted thread, re-run, observe re-block) before merge — required
+  verification, §5.
+- **Display.** `buildBody(general, summary, reopened?)`: a reopened general
+  item renders `- **<sev>** **reopened** <locate> [<rule>] <msg> ...`
+  (marker directly after the severity token; suggestion/trailer otherwise
+  unchanged). When at least one general finding is NOT reopened, a header
+  note precedes the list (header placement, so later-folded excess-inline
+  items never land under it):
+  `**Note:** <n> finding(s) below are outside the PR diff and do not block.`
+  (`n` = non-reopened general count; omitted entirely when zero; "outside
+  the PR diff" is accurate for off-diff, file-not-in-diff, and repo-level
+  notes alike.) `summaryFor`, `buildFallbackReport`, SARIF, and artifact
+  shapes unchanged — the fallback is a degraded path that already shows
+  everything and carries no gate role.
+- **"Worsened" scope (explicit narrowing disclosure).** A finding on a
+  PR-touched line (added line, or added file for lineless) is in-diff and
+  blocks — that is the v1 introduced/worsened rule. Off-diff severity drift
+  with no touched line stays non-blocking (true baseline diffing deferred as
+  an accepted residual). This narrows the policy's "or worsened" to
+  touched-line worsening; ratification happens at spec approval.
 
 ## 5. Tests
 
-- New units: `indexHunks` hit parity with `mapToComments` (RIGHT-wins,
-  LEFT-fallback, lineless/fileless → general); `blockingSet` (in-diff in,
-  off-diff out, reopened back in, order preserved); `reopenedKey` shape;
-  `resolveReopened` (resolved+self+rule+exact-match → key; each negation —
-  unresolved, foreign author, null rule, line mismatch, originalLine match —
-  pinned).
-- Fetch units (mocked graphql): 100-thread page, hasNextPage warn-truncate,
-  error → empty, body-parse incl. unparseable → null.
-- Gate flips: README-only diff + high in untouched file → COMMENT + exit 0
-  with the finding still in the body AND the backlog line; new in-diff high →
-  REQUEST_CHANGES + exit 1 (unchanged); resolved-thread-persists → re-blocks
-  with marker; resolved-thread-gone → stays resolved; thread-API failure →
+- New units: `indexHunks` hit parity with `mapToComments` display behavior
+  (RIGHT-wins, LEFT-fallback, lineless/fileless → general — display byte-identical);
+  `partitionGate` (add-line in, ctx-line out, LEFT-only out, lineless-in-diff-file
+  in, lineless-file-absent/`""` out, order preserved); `reopenedKey` shape;
+  `resolveReopened` (resolved+self+rule+exact-file+line → key; negations:
+  unresolved, foreign author, null author, null rule, line mismatch,
+  `]`-in-rule mismatch, both-thread-lines-absent; `originalLine`-only match).
+- Fetch units (mocked graphql): last-100 newest, hasPreviousPage warn-truncate,
+  error → empty, body-parse incl. unparseable → null, `[bot]`-normalization both sides.
+- Gate pins: README-only diff + high in untouched file (incl. high on a ctx
+  line of a touched file, and LEFT-only match) → COMMENT + exit 0 with the
+  finding still in the body AND the header note; lineless `sensitive-path` on
+  an added file → still REQUEST_CHANGES + exit 1; new in-diff high →
+  REQUEST_CHANGES + exit 1 (unchanged); resolved-thread-persists (incl.
+  joined-rule thread vs unmerged members) → re-blocks with marker;
+  resolved-thread-gone → stays resolved; thread-API failure / no token →
   diff-only gating.
+- Live canary (REQUIRED before merge): on test-lupa, post a review with a
+  high, Resolve its thread without fixing, re-run → re-blocks with marker;
+  fix the issue, re-run → stays resolved. Proves identity derivation
+  end-to-end on the real API. Without it, the reopen path ships unverified.
 - Updated pins: `tests/review.test.ts` `buildBody` expectations gain the
-  backlog line wherever general is non-empty; `tests/main.test.ts` gate tests
-  with off-diff highs flip to non-blocking; `tests/fixtures/evals/cases.ts`
-  summaries with general findings gain the backlog line (finding literals
-  unchanged); `eventFor`/`exitFor` unit tests unchanged (signatures same).
+  header note wherever non-reopened general is non-empty (+ marker cases);
+  `tests/main.test.ts` gate tests with off-diff/ctx/LEFT highs flip to
+  non-blocking; `tests/evals/harness.ts` gateway fake + `runWithMocks` gain
+  the two new methods (default: no threads / actor set); `tests/fixtures/evals/cases.ts`
+  bodies with general findings gain the header note (finding literals unchanged);
+  `README.md` gate table (blocking = in-diff-or-reopened highs), dedup-paragraph
+  gate sentence (blocking subset of merged, was "full pre-merge set"), dry-run
+  paragraph (event from blocking set), new backlog-note + reopen documentation;
+  `tests/readme.test.ts` pins updated ("high-severity finding exists" →
+  blocking wording). `eventFor`/`exitFor` unit tests unchanged (signatures same).
 - Full suite + evals green; `failLevel` warning/none semantics follow the same
   swap (gates read blocking set at every level).
 
 ## 6. Implementation split (plan preview)
 
-Two sequential tasks: (i) blocking set + gate swap + body display
-(`indexHunks`, `blockingSet`, `reopenedKey`, `buildBody` marker + backlog
-line, `publishReview` return, Flow A/B exits, pin updates); (ii) reopen check
-(`ReviewThread`, `resolveReopened`, `listReviewThreads`, `Deps.gh` additions,
-publishReview wiring, fetch/match/gate tests). Task (ii) consumes (i)'s
-plumbing; no parallel work.
+Two sequential tasks: (i) gate partition + gate swap + body display
+(`indexHunks`, `partitionGate`, `reopenedKey`, `buildBody` marker + header
+note, `publishReview` return, Flow A/B exits incl. pre-early-return
+computation, README gate docs, pin updates); (ii) reopen check
+(`normalizeBot`, `ReviewThread`, `resolveReopened`, `listReviewThreads`,
+`Deps.gh` + fakes, publishReview wiring, fetch/match/gate tests, live
+canary). Task (ii) consumes (i)'s plumbing; no parallel work.
 
 ## 7. Constraints and residuals
 No new runtime dependencies, no new action inputs, stable namespace
