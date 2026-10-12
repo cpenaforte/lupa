@@ -28426,14 +28426,14 @@ function budgetPrompt(fast, promptText, issueBody, skipped, budget) {
   let kept = [...fast];
   let omitted = 0;
   if (Buffer.byteLength(render(kept, curIssue, 0), "utf8") <= budget) {
-    return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: 0, issueDropped: false };
+    return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped: skipped.map(neutralise), findingsOmitted: 0, issueDropped: false };
   }
   if (curIssue !== void 0) {
     const noIssueBytes = Buffer.byteLength(render(kept, void 0, 0), "utf8");
     const markerBytes = Buffer.byteLength(ISSUE_TRUNCATION_MARKER, "utf8");
     const issueOverhead = Buffer.byteLength(render(kept, ISSUE_TRUNCATION_MARKER, 0), "utf8") - noIssueBytes - markerBytes;
     const allowance = budget - noIssueBytes - issueOverhead;
-    if (allowance < 0) {
+    if (allowance < markerBytes) {
       curIssue = void 0;
       issueDropped = true;
     } else if (Buffer.byteLength(curIssue, "utf8") > allowance) {
@@ -28444,7 +28444,7 @@ function budgetPrompt(fast, promptText, issueBody, skipped, budget) {
     kept = kept.slice(0, -1);
     omitted += 1;
   }
-  return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: omitted, issueDropped };
+  return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped: skipped.map(neutralise), findingsOmitted: omitted, issueDropped };
 }
 function fields(env) {
   return env.payload;

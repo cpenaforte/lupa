@@ -9,7 +9,8 @@ vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
   return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
-import { cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { budgetPrompt, cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
@@ -1406,8 +1407,6 @@ describe("prompt budget", () => {
 
   // ~2,900 B single-line hunk, DIFF format.
   const DIFF_2900 = diffWithHunk("x".repeat(2900));
-  // DIFF_2700 per the brief: constructed at 2,900 B.
-  const DIFF_2700 = diffWithHunk("x".repeat(2900));
   // ~2,000 B hunk (the default 141 B DIFF never reaches any budget).
   const DIFF_2000 = diffWithHunk("x".repeat(2000));
 
@@ -1440,7 +1439,7 @@ describe("prompt budget", () => {
     const r = await runWithMocks({ maxPromptChars: 4000, issueBody: "x".repeat(5000), prBody: "Fixes #7" });
     const user = r.prompts!.user;
     expect(user).toContain("…[issue context truncated to fit the prompt budget]");
-    expect(countRealTags(user, "linked-issue")).toBe(2); // balanced (inline the prompt.test.ts regex or import the helper pattern)
+    expect(countRealTags(user, "linked-issue")).toBe(2);
     expect(Buffer.byteLength(user, "utf8")).toBeLessThanOrEqual(4000);
     expect(r.llmCalled).toBe(1);
   });
@@ -1450,6 +1449,28 @@ describe("prompt budget", () => {
     const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2900, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
     expect(r.prompts!.user).not.toContain("## Linked issue");
     expect(r.llmCalled).toBe(1);
+  });
+  it("drops the issue when the allowance is smaller than the marker", () => {
+    // Allowance = 10 B, in [0, markerBytes): a marker-only cut (53 B) would
+    // overflow and force a finding drop, so the issue block is dropped instead.
+    const markerBytes = Buffer.byteLength(ISSUE_TRUNCATION_MARKER, "utf8");
+    expect(10).toBeLessThan(markerBytes);
+    const fast = [SCAN_FINDING];
+    const promptText = "diff text";
+    const nPrompt = neutralise(promptText);
+    const noIssueBytes = Buffer.byteLength(buildMessages(fast, nPrompt, undefined, [], undefined, 0).user, "utf8");
+    const overhead =
+      Buffer.byteLength(buildMessages(fast, nPrompt, ISSUE_TRUNCATION_MARKER, [], undefined, 0).user, "utf8") -
+      noIssueBytes -
+      markerBytes;
+    const r = budgetPrompt(fast, promptText, "hello issue", [], noIssueBytes + overhead + 10);
+    expect(r.issueDropped).toBe(true);
+    expect(r.issueBody).toBeUndefined();
+    expect(r.findingsOmitted).toBe(0);
+    expect(r.fast).toEqual(fast);
+    const user = buildMessages(r.fast, r.promptText, r.issueBody, r.skipped, undefined, r.findingsOmitted).user;
+    expect(user).not.toContain(ISSUE_TRUNCATION_MARKER);
+    expect(Buffer.byteLength(user, "utf8")).toBeLessThanOrEqual(noIssueBytes + overhead + 10);
   });
   it("drops whole findings with an exact omitted count", async () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
@@ -1509,7 +1530,7 @@ describe("prompt budget", () => {
     expect(r.llmCalled).toBe(1);
   });
   it("logs the issue-dropped signal", async () => {
-    const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
+    const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2900, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
     expect(vi.mocked(core.info).mock.calls.map(String).join("\n")).toContain("linked issue context dropped to fit the 3200-byte prompt budget");
     expect(r.llmCalled).toBe(1);
   });

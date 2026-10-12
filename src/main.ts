@@ -469,7 +469,7 @@ export function budgetPrompt(
   let omitted = 0;
 
   if (Buffer.byteLength(render(kept, curIssue, 0), "utf8") <= budget) {
-    return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: 0, issueDropped: false };
+    return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped: skipped.map(neutralise), findingsOmitted: 0, issueDropped: false };
   }
 
   // Step 1: linked-issue context. The allowance is sized once against the full
@@ -482,7 +482,7 @@ export function budgetPrompt(
     const issueOverhead =
       Buffer.byteLength(render(kept, ISSUE_TRUNCATION_MARKER, 0), "utf8") - noIssueBytes - markerBytes;
     const allowance = budget - noIssueBytes - issueOverhead;
-    if (allowance < 0) {
+    if (allowance < markerBytes) {
       curIssue = undefined;
       issueDropped = true;
     } else if (Buffer.byteLength(curIssue, "utf8") > allowance) {
@@ -497,7 +497,7 @@ export function budgetPrompt(
     omitted += 1;
   }
 
-  return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: omitted, issueDropped };
+  return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped: skipped.map(neutralise), findingsOmitted: omitted, issueDropped };
 }
 
 // ---------------------------------------------------------------------------
