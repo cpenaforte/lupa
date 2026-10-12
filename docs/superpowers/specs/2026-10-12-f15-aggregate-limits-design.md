@@ -59,9 +59,9 @@ max_artifact_bytes: 8388608    # read cap for SARIF/SBOM/findings.json/pr-meta.j
 (Action/inputs convention is snake_case: `max_diff_chars` → fields
 `maxFindings`, `maxInlineComments`, `maxReviewBodyChars`, `maxArtifactBytes`.
 `max_review_body_chars` uses `min = 1000` at input time; the other three use
-`min = 1`. The 1000 floor guarantees the §2 markers (~120 B worst case) always
-fit, so the `RangeError` below is an unreachable backstop, and "invalid input
-throws before any work" holds.)
+`min = 1`. The 1000 floor guarantees the §2 markers (~175 B worst case at
+16-digit counts, measured) always fit, so the `RangeError` below is an
+unreachable backstop, and "invalid input throws before any work" holds.)
 
 ### Ingestion gate (byte caps, no count cap)
 
@@ -81,16 +81,20 @@ publication by the funnel.)
   oversize without ever holding the whole file. (`diff.patch` is explicitly
   excluded: F10 owns diff sizing and its truncation fixtures pin whole-file
   reads.)
-- In-memory texts (semgrep stdout at `src/scanners.ts:284`, SBOM stdout at `:371`,
-  gitleaks report text at `:438`): `Buffer.byteLength(text) > max` means
-  oversize, checked once at the top of `fromStdout`/the SBOM branch and
-  returned early (single warning — the `invocationFailed` re-parses at `:288`
-  and `:442` only run on texts that passed).
+- In-memory texts (semgrep stdout at `src/scanners.ts:284`, SBOM stdout — checked
+  at the top of the SBOM branch, before `isCycloneDx` at `:371`, gitleaks
+  report text at `:438`): `Buffer.byteLength(text) > max` means oversize,
+  returned early with the single warning (the `invocationFailed` re-parses at
+  `:288` and `:442` only run on texts that passed).
 - Scanner artifacts (semgrep/gitleaks/trivy stdout, gitleaks report file, SBOM
   docs — including untrusted fork content): oversize →
   `warning("scanner-failed", \`<source> output exceeds the artifact read limit (${max} bytes); results dropped\`)`
-  (exact shape; `<source>` is the scanner name). That scanner's results are
-  dropped; the run continues visibly degraded — the F08 pattern.
+  (exact shape; `<source>` is the `fromStdout` label where one exists —
+  `semgrep`, `trivy`, `` `osv-scanner (${lock})` `` — else `sbom` or `gitleaks`).
+  That scanner's results are dropped; the run continues visibly degraded — the
+  F08 pattern. The gitleaks file read is a distinct oversize branch (not the
+  read-error `undefined` path): oversize returns the warning before the
+  exit-code check, so it can never read as clean.
 - `findings.json` (required main input in both flows): oversize → throw
   `lupa: findings.json exceeds the artifact read limit (${max} bytes)`
   (exact text, mirroring the existing `lupa: findings.json …` throws). Loud,
@@ -129,14 +133,22 @@ Input: the full redacted set (gates already computed or computed from it —
    `general` — published in the body, just not inline
    (same fold shape as the existing off-diff fallback).
 3. **Body char cap** (units: Unicode code points — `Array.from` length, same
-   "chars" as `capText`). Shared helper, exported for tests:
+   "chars" as `capText`; the 60000 default leaves headroom over GitHub's 65535
+   ceiling under either code-point or UTF-16 counting for realistic text).
+   `summaryFor` reports the FULL set count (`lupa: 500 finding(s).` for 500 in,
+   200 retained — coherent with gates and artifact). Shared helper, exported
+   for tests:
    ```ts
    // review.ts:
    capBody(body: string, maxChars: number, markers: string[]): string
    ```
-   Whole-line cuts only (cut backs to the last `\n`, F13 pattern),
-   code-point-safe (never splits a surrogate pair); fence-balance is
-   best-effort with the trunc-note as witness. `body = buildBody(general,
+   Whole-line cuts only (cut backs to the last `\n`, F13 pattern);
+   a body with no `\n` in budget, or a single over-long line, is cut mid-line
+   code-point-safely (never splits a surrogate pair). Fence-aware: if the
+   retained portion contains an unclosed ```` ``` ```` fence, cut back to
+   before its opening line (fence lines are short whole lines, so this always
+   terminates); the trunc-note is plain text and always last. Truncation drops
+   are witnessed by the note only (no per-item count — stated). `body = buildBody(general,
    summary)`; then markers, then cap (markers are always inside the cap):
    - `omitted > 0` → `> Omitted: ${omitted} finding(s) omitted to fit the ${max}-finding publication limit.` (exact)
    - body over `maxChars` → cut content to fit, append `> Note: review body truncated to the ${max}-character limit.` (exact)
@@ -153,24 +165,42 @@ at the existing call sites.
 ### Off-diff fold stays under the cap
 
 `postReview` folds inline comments into the body on a 422 off-diff retry —
-after the cap above. So `PostReviewOptions` gains `maxBodyChars?: number`,
-and the fold path re-runs the shared `capBody` (cut + trunc-note) after
-folding. Pre-existing markers stay where they are; the trunc-note (if added)
-is last. Without this, ~30 folded comments (~6 KB each at full field caps)
-could post a ~180 KB body and a retry-exhausted 422 would rethrow with no
-issue fallback. The `main.ts` `createReview` closure forwards the input.
+after the cap above. So `PostReviewOptions.maxBodyChars` is REQUIRED (an
+omitted cap would silently disable the re-cap), `Gateway.createReview`'s opts
+gain it (interface at `src/main.ts:81`, call site `:774`, `realGateway`
+forwards it at `:1030-1031`, test fakes updated — named per task), and the
+fold path re-runs the shared `capBody` after folding: strip lines matching
+the trunc-note template (`^> Note: review body truncated to the \d+-character
+limit\.$` — stale notes from the pre-fold cap, never the `> Omitted:` count
+markers), cut fence-aware, append a fresh trunc-note last. Without this, ~30
+folded comments (~6 KB each at full field caps) could post a ~180 KB body and
+a retry-exhausted 422 would rethrow with no issue fallback. The `main.ts`
+`createReview` closure forwards the input.
+Inline comments carry no aggregate char bound beyond the count cap: per-field
+caps already bound each comment to ~6.4 KB, request-body limits are MB-scale,
+and a pathological-payload 422 fails loudly (existing rethrow), never
+silently — stated residual.
 
 ### Report/fallback surfaces
 
-- `summaryPath` artifact (`GITHUB_STEP_SUMMARY`): capped at `SUMMARY_MAX_BYTES
-  = 1048576` (the 1 MiB platform ceiling — uploads above it abort), with
-  `\n\n> Note: summary truncated to the 1048576-byte platform limit.` (exact)
-  This is a platform bound, not an owner input.
+- `summaryPath` artifact (`GITHUB_STEP_SUMMARY`): written through
+  `buildFallbackReport(findings, { maxBytes: remaining })` where `remaining =
+  1048576 − bytes already in the file` (`statSync`, missing → 0 — the 1 MiB
+  platform ceiling; uploads above it abort). Whole-record cuts only (no split
+  UTF-8, no open fences — inherited from F07); its `> Omitted:` marker is the
+  truncation signal, no extra note. `remaining` too small for even the heading
+  (F07 throws): catch, `core.warning`, skip the write — observability degrades
+  loudly in logs while the posted review is unaffected.
 - Issue-fallback body (`postIssueFallback`, a publication surface with the same
-  65535 ceiling): capped through `buildFallbackReport(findings, { maxBytes:
-  maxReviewBodyChars })` (bytes, existing helper — conservative: the code-point
-  value as a byte cap is stricter for multibyte text, never looser) with its
-  existing omission marker. Wired at the F07 call site in `main.ts`.
+  65535 ceiling): published from the RETAINED set (priority-ordered,
+  publication-capped — the same findings the review shows), with the
+  publication `> Omitted:` marker prepended when `omitted > 0`:
+  `buildFallbackReport(retained, { maxBytes: maxReviewBodyChars − markerBytes
+  − 2 })`, marker first, then the report (its native marker covers any further
+  byte overflow). Same set, same marker vocabulary as the review.
+  (bytes, existing helper — conservative: the code-point
+  value as a byte cap is stricter for multibyte text, never looser). Wired at
+  the F07 call site in `main.ts`.
 - Flow B gets every bound automatically (same `readFindings`, same
   `publishReview`).
 
@@ -182,23 +212,29 @@ issue fallback. The `main.ts` `createReview` closure forwards the input.
 no live GitHub, no docker). Small limits ride on constructed inputs objects
 (e.g. `maxArtifactBytes: 100`) — no env needed:
 
-- Oversized SARIF/SBOM fixtures (over the read cap): `scanner-failed` warning
-  with the exact text, that scanner's results dropped, parse never attempted
-  (assert via the warning shape, not timing).
+- Oversized SARIF/SBOM fixtures (over the read cap): a valid-but-oversize SARIF
+  carrying findings yields ZERO findings plus the exact `scanner-failed`
+  warning (proves parse was never attempted — shape and count, not timing).
 - Oversized `findings.json` / `pr-meta.json`: exact throw texts.
 - Many-finding fixture (`N > max_findings`): top-N retained in priority order
   (highs first, stable rest), exact `> Omitted:` marker with the count,
   artifact keeps all N, `eventFor`/`exitFor` still see all N.
+  (Constructed inputs carry small limits, e.g. `maxArtifactBytes: 100`.)
 - Inline-overflow fixture: excess folds to general (mapping order; retention
   order asserted on the retained set).
-- Body-char fixtures: whole-line cuts, code-point-safe (emoji shutdown case),
-  truncation marker inside the cap; marker-too-big throws (unit-level on
-  `capBody`, since inputs floor it away).
+- Body-char fixtures: whole-line cuts, code-point-safe (emoji case), fence
+  case (cut inside a folded fence block backs up before the opening fence);
+  no-newline case (mid-line code-point cut); truncation marker inside the cap;
+  marker-too-big throws (unit-level on `capBody`, since inputs floor it away).
+- Off-diff fold fixture: folded body re-capped, exactly one trunc-note, last;
+  stale pre-fold note stripped (two-note output fails the test).
 - Off-diff fold fixture: folded body re-capped, trunc-note last.
-- Issue-fallback cap + summary 1 MiB cap + Flow B bounds (same funnel via
+- Issue-fallback funnel (retained set + publication marker + byte reservation),
+  summary 1 MiB cap (oversized fixture → capped report + native marker, write
+  skipped with warning when nothing fits) + Flow B bounds (same funnel via
   shared `publishReview`/`readFindings`) + dry-run `omitted=` log.
 - Gitleaks report-file read + in-memory `byteLength` checks (semgrep/SBOM/
-  gitleaks texts).
+  gitleaks texts) via constructed small `maxArtifactBytes`.
 - Invalid inputs (zero/negative/non-integer/garbage, body-chars < 1000):
   input validation error before any work.
 - README documents the four inputs (extends the `readme.test.ts` agent-inputs
