@@ -1,7 +1,7 @@
 # Sub-project F10: complete inference-prompt budget — design
 
 Date: 2026-10-12
-Status: design approved (2026-10-12); review rounds 1-7 applied, round 8 pending
+Status: design approved (2026-10-12); review rounds 1-8 applied, round 9 pending
 Source: Codex audit `PROJECT_FINDINGS.md` (F10), local HEAD `885adea`
 Goal: bound the variable user-message portion of the single-shot inference request — fast findings, linked-issue
 context, and diff together — with sanitized evidence, separate allowances, and
@@ -115,7 +115,7 @@ Omitted <M> fast finding(s) to fit the prompt budget.
 
 Cut order, each leaving its explicit record:
 
-1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + issueOverhead)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count) and `issueOverhead` is the whole fixed cost of carrying any issue text (`## Linked issue…` header + `\n\n` separators + `<linked-issue>` tags + marker, all as exact `Buffer.byteLength` values — nothing estimated, nothing double-counted). `budgetPrompt` neutralises the issue text FIRST (idempotent — `buildMessages` re-neutralising at render is a no-op), and every measurement and cut operates on the neutralised text; the returned `issueBody` is already neutralised. If the full block fits, it is kept uncut (no marker). Otherwise truncate to the allowance with the marker (balanced tags); when the allowance is negative, drop the block entirely (`issueBody: undefined`, `issueDropped: true`). No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget. Truncate the neutralised issue text to the allowance with a trailing `…[issue context truncated to fit the prompt budget]` marker, keeping the `<linked-issue>` tags balanced (marker inside the block). When the allowance cannot fit marker + tags (computed byte lengths, not an estimate), drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling).
+1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + issueOverhead)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count — step 1 sizes with `omitted = 0`, step 2 re-computes with the running count) and `issueOverhead` is the whole fixed cost of carrying any issue text (`## Linked issue…` header + `\n\n` separators + `<linked-issue>` tags + marker, all as exact `Buffer.byteLength` values computed in code, ≈145 bytes total — nothing estimated, nothing double-counted). `budgetPrompt` neutralises every region FIRST — issue text, diff text, and the findings-JSON `<`→`\\u003c` escaping, identical to `buildMessages` (`prompt.ts:50,59,62`) — which requires exporting `neutralise` plus the issue header/tags/marker as constants from `src/prompt.ts` (listed as plan change sites; neutralise is idempotent so `buildMessages` re-rendering is a no-op). Every measurement and cut operates on the neutralised regions; the returned regions are already neutralised. If the full block fits, it is kept uncut (no marker). Otherwise truncate to the allowance with the marker (balanced tags); when the allowance is negative, drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling). No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget.
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
@@ -133,7 +133,7 @@ Cut order, each leaving its explicit record:
 because the single 6-arg `buildMessages` call needs all regions in one place; the caller
 logs `linked issue context dropped to fit the <budget>-byte prompt budget` when
 `issueDropped` is true. The agent-mode linked-repos `conv.turns` user
-message (`:589`) sits outside the budget (agent-turn context, F11).
+message (`:584`) sits outside the budget (agent-turn context, F11).
 
 The cut affects model context only: posting and artifacts use the full `fast`
 array (`all` at `:822`), so omitted findings still reach the review.
@@ -165,7 +165,7 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 `MSG_CAP` bounds each finding and the overflow needs many findings or a small budget):
 
 - Oversized issue body truncates with the marker; tags stay balanced; rest intact.
-- Issue block dropped when the allowance is negative: budget 3,200 with a ~2,900-byte diff, one small finding (~200 B), and a ~5,000-byte issue → allowance = 3200 − (2900 + 200 + framing ~165 + overhead ~147) < 0 → `issueDropped`, `issueBody` undefined, review proceeds without issue context (diff + framing ≈ 3,065 < budget — deterministic; the finding pins the allowance so a zero-finding fixture cannot silently truncate instead).
+- Issue block dropped when the allowance is negative: budget 3,200 with a ~2,900-byte diff, one small finding (~200 B), and a ~5,000-byte issue → allowance = 3200 − (2900 + 200 + framing ~165 + overhead ~147) < 0 → `issueDropped`, `issueBody` undefined; step 2 then drops the finding too (`findingsOmitted = 1`, total ≈ 3,065 + 51 omission line < budget) and the review proceeds without issue context — deterministic; the finding pins the allowance so a zero-finding fixture cannot silently truncate instead.
 - Fast-findings overflow drops whole tail findings with an exact omitted count rendered
   as the prose line after the findings JSON; the surviving JSON parses.
 - Diff is never cut below `maxDiffChars` (over-budget fixture with maxed diff →
