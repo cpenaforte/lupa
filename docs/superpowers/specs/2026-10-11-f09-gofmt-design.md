@@ -104,10 +104,10 @@ paths, matching `gofmt -l .` output relative to `workDir`). An empty or omitted
 - exit 0 with `a.go\nsub/b.go\n` on stdout and changed `{a.go, sub/b.go, c.go}` →
   exactly two findings, `{severity:"warning", file:"a.go", rule:"gofmt"}` and the
   `sub/b.go` twin, messages `gofmt: <path> is not formatted (run gofmt -w <path>)`.
-- real-`execTool` success stdout is captured: a shell-stub `gofmt` that prints a
-  filename and exits 0 (same stub pattern as the `:101-110` test — no Go toolchain
-  needed) yields the per-file finding through the real runner, pinning the
-  `execTool` success path that is the actual defect.
+- real-`execTool` success stdout is captured: a shell-stub `gofmt` that prints
+  `a.go` and exits 0 (same stub pattern as the `:101-110` test — no Go toolchain
+  needed), run with `changedFiles` `{a.go}`, yields the per-file finding through
+  the real runner, pinning the `execTool` success path that is the actual defect.
 - exit 0 with stdout listing only unchanged files → no findings.
 - exit 0 with empty stdout → no findings.
 - nonzero exit WITH filenames on stdout → per-file findings (pins the
