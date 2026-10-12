@@ -43,10 +43,14 @@ and bound traversal before the worker runs.
 
 ```ts
 export interface WalkLimits {
-  maxFiles?: number;    // default 10_000 — files examined (not just returned)
-  deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked per directory
-  // (known granularity: one synchronous directory read plus its entry loop cannot be
-  // preempted, so the walk can overshoot the bound by one directory's processing time)
+  maxFiles?: number;    // default 10_000 — entries examined (each dequeued entry,
+  // files and directories alike; pruned/.git/symlink entries are never examined
+  // and never counted), not just returned
+  deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked at the
+  // top of each directory iteration including the first (a non-positive deadline
+  // fires immediately — test-seam use); known granularity: one synchronous directory
+  // read plus its entry loop cannot be preempted, so the walk can overshoot the bound
+  // by one directory's processing time
 }
 export interface WalkSkipped {
   oversized: number;  // > 1 MiB, content walk only
@@ -66,23 +70,30 @@ export interface WalkSkipped {
   `GLOB_MAX_PATHS` (200), keeps `{paths, truncated}`; `truncated` is true when the
   pattern matches exceed the cap OR the walk hit a limit.
 - `walkFiles(root, startAbs, limits?)`: as today (size + binary eligibility) plus
-  prune set, `maxFiles`, and `deadlineMs`. Returns
+  prune set, `maxFiles`, and `deadlineMs`. `statSync`-failure skips count in no
+  bucket. Returns
   `{ files: WalkFile[], truncated: boolean, skipped: WalkSkipped }` with real
-  counts. `grepInRoot` ORs walk truncation into its `truncated` flag and adds the
+  counts. `grepInRoot(root, args, timeoutMs?, limits?)` threads the optional limits
+  to its walk, ORs walk truncation into its `truncated` flag and adds the
   `skipped` object to its response: `{matches, truncated, files_scanned, skipped}`.
-  `files_scanned` keeps today's meaning (files the worker actually read).
+  `files_scanned` keeps today's meaning (files the worker attempted to read — the
+  counter increments before the read, so read failures count).
 
 ### read_file line metadata
 
-`end_line` must describe the *visible* content: after the byte-budget cut, split the
-cut portion on `\n` and drop one trailing empty segment when the cut ends exactly
-on a line boundary (a raw prefix can end with `\n`, which would otherwise over-count
-by one and let a paging agent skip a line):
-`parts = cut.split("\n"); visibleLines = cut === "" ? 0 : parts.length - (parts[parts.length - 1] === "" ? 1 : 0)`,
-counted over the cut portion only (excluding the appended `\n[truncated]` marker), and
+`end_line` must describe only *fully visible* lines: after the byte-budget cut, back
+the cut up to the last `\n` (`idx = cut.lastIndexOf("\n"); visible = idx < 0 ? cut : cut.slice(0, idx)`)
+— a partial tail line still shows characters the metadata would disown, and paging
+from `end_line + 1` would drop them. First-line fallback: when the cut contains no
+`\n` (a single line exceeds the whole budget), `visible` is the partial first line
+and `end_line = start` (nothing better is representable).
+`visibleLines = visible === "" ? 0 : visible.split("\n").length` (the backed-up cut
+never ends with `\n`, so no boundary over-count), counted over the backed-up portion
+only (excluding the appended `\n[truncated]` marker), and
 `end_line = visibleLines ? start + visibleLines - 1 : start - 1`.
 `start_line`, `total_lines`, and `truncated` are unchanged. A truncated response
-therefore never claims lines the agent cannot see.
+therefore never claims a line the agent cannot fully see; resuming at `end_line + 1`
+re-reads at worst (overlap), never skips.
 
 ### Prune set
 
@@ -107,9 +118,8 @@ nor symlink) are skipped: never recursed, never listed.
 - `grep` on a tree with an oversized + a binary file: response carries
   `skipped: { oversized: 1, binary: 1, overLimit: 0 }`, `files_scanned` counts only
   scanned files.
-- Walk file-count limit: a tree exceeding `maxFiles` (via a small `limits`
-  override through `grepInRoot`'s exported seam or a direct walk test) stops,
-  reports `truncated: true` with `overLimit > 0`, and completes promptly.
+- Walk file-count limit: a tree exceeding `maxFiles` stops,
+  reports `truncated: true` with `overLimit > 0`.
 - Existing tests keep passing: `read_file` 1 MiB boundary (`:91-106`), grep
   `.git`/binary skip (`:244`), `matchGlob`, worker timeout/injection,
   symlink tests.
