@@ -25132,58 +25132,112 @@ function isBinaryFile(p) {
 function relPath(root, abs) {
   return relative(root, abs).split(sep2).join("/");
 }
-function includeFile(root, abs, size) {
-  if (size > GREP_MAX_FILE_BYTES)
-    return null;
-  if (isBinaryFile(abs))
-    return null;
-  return { abs, rel: relPath(root, abs) };
+var WALK_DEFAULT_MAX_FILES = 1e4;
+var WALK_DEFAULT_DEADLINE_MS = 1e4;
+var PRUNE_DIR_NAMES = /* @__PURE__ */ new Set(["node_modules", "vendor", "target", ".venv", "venv", "__pycache__"]);
+function zeroSkipped() {
+  return { oversized: 0, binary: 0, overLimit: 0 };
 }
-function walkFiles(root, startAbs) {
+function isWalkSkippedEntry(d) {
+  if (d.name.toLowerCase() === ".git")
+    return true;
+  if (d.isSymbolicLink())
+    return true;
+  if (d.isDirectory())
+    return PRUNE_DIR_NAMES.has(d.name);
+  return !d.isFile();
+}
+function countQueuedRemainder(dirents, from) {
+  let n = 0;
+  for (let i = from; i < dirents.length; i++) {
+    if (isWalkSkippedEntry(dirents[i]))
+      continue;
+    n += 1;
+  }
+  return n;
+}
+function walkCore(root, startAbs, limits, visitFile) {
+  const skipped = zeroSkipped();
+  const maxFiles = limits?.maxFiles ?? WALK_DEFAULT_MAX_FILES;
+  const deadlineMs = limits?.deadlineMs ?? WALK_DEFAULT_DEADLINE_MS;
+  const startTime = Date.now();
   let startStat;
   try {
     startStat = statSync2(startAbs);
   } catch {
-    return [];
+    return { truncated: false, skipped };
   }
   if (startStat.isFile()) {
-    const f = includeFile(root, startAbs, startStat.size);
-    return f ? [f] : [];
+    if (0 >= maxFiles) {
+      skipped.overLimit = 1;
+      return { truncated: true, skipped };
+    }
+    visitFile(startAbs, skipped);
+    return { truncated: false, skipped };
   }
   if (!startStat.isDirectory())
-    return [];
-  const files = [];
+    return { truncated: false, skipped };
+  let examined = 0;
   const stack = [startAbs];
-  while (stack.length) {
+  while (stack.length > 0) {
     const dir = stack.pop();
+    if (examined >= maxFiles || Date.now() - startTime >= deadlineMs) {
+      skipped.overLimit = 1 + stack.length;
+      return { truncated: true, skipped };
+    }
     let dirents;
     try {
       dirents = readdirSync2(dir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const d of dirents) {
-      if (d.name.toLowerCase() === ".git")
+    for (let i = 0; i < dirents.length; i++) {
+      const d = dirents[i];
+      if (isWalkSkippedEntry(d))
         continue;
-      if (d.isSymbolicLink())
-        continue;
+      if (examined >= maxFiles) {
+        skipped.overLimit = countQueuedRemainder(dirents, i) + stack.length;
+        return { truncated: true, skipped };
+      }
+      examined++;
       const childAbs = join3(dir, d.name);
       if (d.isDirectory()) {
         stack.push(childAbs);
-      } else if (d.isFile()) {
-        let size;
-        try {
-          size = statSync2(childAbs).size;
-        } catch {
-          continue;
-        }
-        const f = includeFile(root, childAbs, size);
-        if (f)
-          files.push(f);
+      } else {
+        visitFile(childAbs, skipped);
       }
     }
   }
-  return files;
+  return { truncated: false, skipped };
+}
+function walkPaths(root, startAbs, limits) {
+  const paths = [];
+  const result = walkCore(root, startAbs, limits, (childAbs) => {
+    paths.push(relPath(root, childAbs));
+  });
+  paths.sort();
+  return { paths, truncated: result.truncated, skipped: result.skipped };
+}
+function walkFiles(root, startAbs, limits) {
+  const files = [];
+  const result = walkCore(root, startAbs, limits, (childAbs, skipped) => {
+    let size;
+    try {
+      size = statSync2(childAbs).size;
+    } catch {
+      return;
+    }
+    if (size > GREP_MAX_FILE_BYTES) {
+      skipped.oversized++;
+      return;
+    }
+    if (isBinaryFile(childAbs)) {
+      skipped.binary++;
+      return;
+    }
+    files.push({ abs: childAbs, rel: relPath(root, childAbs) });
+  });
+  return { files, truncated: result.truncated, skipped: result.skipped };
 }
 var GREP_WORKER_SRC = [
   'const { parentPort, workerData } = require("node:worker_threads");',
@@ -25240,7 +25294,7 @@ function runGrepWorker(pattern, files, limit, timeoutMs) {
     });
   });
 }
-async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS) {
+async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits) {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
     new RegExp(pattern);
@@ -25251,7 +25305,8 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS) {
   const startAbs = resolveWithinRoot(root, rel);
   if (!startAbs)
     return errorResult(`path not accessible: ${rel}`);
-  let files = walkFiles(root, startAbs);
+  const walked = walkFiles(root, startAbs, limits);
+  let files = walked.files;
   if (args.glob)
     files = files.filter((f) => matchGlob(f.rel, args.glob));
   const requested = args.max_results === void 0 ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
@@ -25265,7 +25320,7 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS) {
     line: m.line,
     text: codePointSafeCut(m.text, GREP_LINE_CHARS)
   }));
-  const serialize = (list, truncated2) => JSON.stringify({ matches: list, truncated: truncated2, files_scanned: filesScanned });
+  const serialize = (list, truncated2) => JSON.stringify({ matches: list, truncated: truncated2, files_scanned: filesScanned, skipped: walked.skipped });
   let lo = 0;
   let hi = capped.length;
   while (lo < hi) {
@@ -25275,7 +25330,7 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS) {
     else
       hi = mid - 1;
   }
-  const truncated = hitLimit || lo < capped.length;
+  const truncated = hitLimit || walked.truncated || lo < capped.length;
   return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
 }
 async function grep(args, ctx) {
@@ -25294,8 +25349,9 @@ async function glob(args, ctx) {
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
-  const paths = walkFiles(resolvedRoot.root, resolvedRoot.root).map((f) => f.rel).filter((p) => matchGlob(p, pattern)).sort();
-  const truncated = paths.length > GLOB_MAX_PATHS;
+  const walked = walkPaths(resolvedRoot.root, resolvedRoot.root);
+  const paths = walked.paths.filter((p) => matchGlob(p, pattern)).sort();
+  const truncated = paths.length > GLOB_MAX_PATHS || walked.truncated;
   return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
 }
 var TOOL_DEFS = [

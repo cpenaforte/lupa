@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AGENT_LIMITS } from "../src/agent-types.js";
-import { TOOL_DEFS, executeTool, grepInRoot, matchGlob, resolveWithinRoot } from "../src/agent-tools.js";
+import { TOOL_DEFS, executeTool, grepInRoot, isBinaryFile, matchGlob, resolveWithinRoot, walkFiles, walkPaths } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 
 const created: string[] = [];
@@ -336,5 +336,297 @@ describe("grep and glob symlinks", () => {
     const gl = await executeTool("glob", { pattern: "**/*.txt" }, ctxFor(root));
     expect(gl.isError).toBe(false);
     expect(JSON.parse(gl.output).paths).toEqual(["real/a.txt"]);
+  });
+});
+
+describe("glob pure discovery", () => {
+  it("glob lists oversized and binary files (pure path discovery)", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "small.ts"), "export {};\n");
+    writeFileSync(join(root, "big.ts"), "x".repeat(1024 * 1024 + 1));
+    writeFileSync(join(root, "blob.dat"), Buffer.concat([Buffer.from("hello"), Buffer.from([0]), Buffer.from("world")]));
+    const ctx = ctxFor(root);
+
+    const ts = await executeTool("glob", { pattern: "**/*.ts" }, ctx);
+    expect(ts.isError).toBe(false);
+    const tsParsed = JSON.parse(ts.output);
+    expect(tsParsed.paths).toContain("small.ts");
+    expect(tsParsed.paths).toContain("big.ts");
+    expect(tsParsed.truncated).toBe(false);
+
+    const dat = await executeTool("glob", { pattern: "**/*.dat" }, ctx);
+    expect(dat.isError).toBe(false);
+    const datParsed = JSON.parse(dat.output);
+    expect(datParsed.paths).toContain("blob.dat");
+    expect(datParsed.truncated).toBe(false);
+  });
+
+  it("glob and grep prune vendor subtrees", async () => {
+    const root = tempRoot();
+    const w = (rel: string, content: string): void => {
+      mkdirSync(join(root, dirname(rel)), { recursive: true });
+      writeFileSync(join(root, rel), content);
+    };
+    w("src/keep.ts", "export function keepAlive() {}\n");
+    w("src/dist/out.js", "nothing to see here\n");
+    w("src/build/out.js", "nothing to see here\n");
+    w("src/target", "nothing to see here\n");
+    w("src/VENDOR/w.js", "nothing to see here\n");
+    w("src/.GIT/z", "nothing to see here\n");
+    w("src/nested/node_modules/y", "nothing to see here\n");
+    w("node_modules/dep/evil.ts", "export const evil = 1;\n");
+    w("node_modules/dep/evil.js", "nothing to see here\n");
+    w("vendor/evil.ts", "export const evil = 1;\n");
+    w("target/x", "nothing to see here\n");
+    w(".venv/x", "nothing to see here\n");
+    w("venv/x", "nothing to see here\n");
+    w("__pycache__/x", "nothing to see here\n");
+    const ctx = ctxFor(root);
+
+    const ts = JSON.parse((await executeTool("glob", { pattern: "**/*.ts" }, ctx)).output);
+    expect(ts.paths).toEqual(["src/keep.ts"]);
+
+    const all = JSON.parse((await executeTool("glob", { pattern: "**/*" }, ctx)).output);
+    expect(all.paths).toContain("src/keep.ts");
+    expect(all.paths).toContain("src/target");
+    expect(all.paths).toContain("src/VENDOR/w.js");
+    for (const bad of [
+      "node_modules/dep/evil.ts",
+      "node_modules/dep/evil.js",
+      "vendor/evil.ts",
+      "target/x",
+      ".venv/x",
+      "venv/x",
+      "__pycache__/x",
+      "src/nested/node_modules/y",
+      "src/.GIT/z",
+    ]) {
+      expect(all.paths, bad).not.toContain(bad);
+    }
+
+    const js = JSON.parse((await executeTool("glob", { pattern: "**/*.js" }, ctx)).output);
+    expect(js.paths).toContain("src/dist/out.js");
+    expect(js.paths).toContain("src/build/out.js");
+    expect(js.paths).toContain("src/VENDOR/w.js");
+    expect(js.paths).not.toContain("node_modules/dep/evil.js");
+
+    const evil = JSON.parse((await executeTool("grep", { pattern: "evil", path: "vendor" }, ctx)).output);
+    expect(evil.matches.map((m: { file: string }) => m.file)).toContain("vendor/evil.ts");
+
+    const keep = JSON.parse((await executeTool("grep", { pattern: "keep" }, ctx)).output);
+    expect(keep.matches.map((m: { file: string }) => m.file)).toContain("src/keep.ts");
+    expect(keep.files_scanned).toBe(5);
+    expect(keep.skipped).toEqual({ oversized: 0, binary: 0, overLimit: 0 });
+  });
+
+  it("glob caps at 200 paths", async () => {
+    const root = tempRoot();
+    for (let i = 0; i < 205; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+    const r = await executeTool("glob", { pattern: "**/*" }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.paths).toHaveLength(200);
+    expect(parsed.truncated).toBe(true);
+  });
+});
+
+describe("grep skips and bounded walks", () => {
+  it("grep reports eligibility skips explicitly", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "ok.ts"), "marker here\n");
+    writeFileSync(join(root, "big.ts"), "marker " + "x".repeat(1024 * 1024));
+    writeFileSync(join(root, "blob.dat"), Buffer.concat([Buffer.from("marker"), Buffer.from([0, 1, 2]), Buffer.from("tail")]));
+    const r = await executeTool("grep", { pattern: "marker" }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.skipped).toEqual({ oversized: 1, binary: 1, overLimit: 0 });
+    expect(parsed.files_scanned).toBe(1);
+  });
+
+  it("walk stops at maxFiles and reports overLimit", async () => {
+    // Flat 30 files, maxFiles 10: exact file remainder through both walks.
+    {
+      const root = tempRoot();
+      for (let i = 0; i < 30; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+      const wf = walkFiles(root, root, { maxFiles: 10 });
+      expect(wf.files).toHaveLength(10);
+      expect(wf.truncated).toBe(true);
+      expect(wf.skipped.overLimit).toBe(20);
+      const wp = walkPaths(root, root, { maxFiles: 10 });
+      expect(wp.paths).toHaveLength(10);
+      expect(wp.truncated).toBe(true);
+      expect(wp.skipped.overLimit).toBe(20);
+    }
+    // Fire-case exclusion: pruned entries never counted in the remainder.
+    {
+      const root = tempRoot();
+      for (let i = 0; i < 30; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+      mkdirSync(join(root, "node_modules", "dep"), { recursive: true });
+      for (let i = 0; i < 5; i++) writeFileSync(join(root, "node_modules", "dep", `e${i}.js`), "evil\n");
+      const wf = walkFiles(root, root, { maxFiles: 10 });
+      expect(wf.truncated).toBe(true);
+      expect(wf.skipped.overLimit).toBe(20);
+    }
+    // Stacked check-(a): root holding only a/ and b/ (10 files each), maxFiles 1.
+    {
+      const root = tempRoot();
+      for (const d of ["a", "b"]) {
+        mkdirSync(join(root, d));
+        for (let i = 0; i < 10; i++) writeFileSync(join(root, d, `f${i}.txt`), "x\n");
+      }
+      const wf = walkFiles(root, root, { maxFiles: 1 });
+      expect(wf.truncated).toBe(true);
+      expect(wf.skipped.overLimit).toBe(2);
+      // walkPaths returns files only: directories are traversed, never listed.
+      const wp = walkPaths(root, root);
+      expect(wp.paths).toHaveLength(20);
+      expect(wp.paths).not.toContain("a");
+      expect(wp.paths).not.toContain("b");
+    }
+    // Exact fit: flat 30 files, maxFiles 30.
+    {
+      const root = tempRoot();
+      for (let i = 0; i < 30; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+      const wf = walkFiles(root, root, { maxFiles: 30 });
+      expect(wf.files).toHaveLength(30);
+      expect(wf.truncated).toBe(false);
+      expect(wf.skipped.overLimit).toBe(0);
+    }
+    // Pruned exclusion: node_modules (20 files) + src/ (5 files), maxFiles 6.
+    {
+      const root = tempRoot();
+      mkdirSync(join(root, "node_modules", "dep"), { recursive: true });
+      for (let i = 0; i < 20; i++) writeFileSync(join(root, "node_modules", "dep", `e${i}.js`), "evil\n");
+      mkdirSync(join(root, "src"));
+      for (let i = 0; i < 5; i++) writeFileSync(join(root, "src", `f${i}.txt`), "x\n");
+      const wf = walkFiles(root, root, { maxFiles: 6 });
+      expect(wf.truncated).toBe(false);
+      expect(wf.skipped.overLimit).toBe(0);
+    }
+    // Prune-filter-first: root holding ONLY node_modules/ (20 files), maxFiles 1.
+    {
+      const root = tempRoot();
+      mkdirSync(join(root, "node_modules", "dep"), { recursive: true });
+      for (let i = 0; i < 20; i++) writeFileSync(join(root, "node_modules", "dep", `e${i}.js`), "evil\n");
+      const wf = walkFiles(root, root, { maxFiles: 1 });
+      expect(wf.truncated).toBe(false);
+      expect(wf.skipped.overLimit).toBe(0);
+    }
+    // Remainder coverage: .git/ + symlink + src/ (2 files), maxFiles 3.
+    {
+      const root = tempRoot();
+      mkdirSync(join(root, ".git"));
+      writeFileSync(join(root, ".git", "secret.txt"), "secret\n");
+      symlinkSync(join(root, "nonexistent"), join(root, "link"));
+      mkdirSync(join(root, "src"));
+      writeFileSync(join(root, "src", "a.txt"), "x\n");
+      writeFileSync(join(root, "src", "b.txt"), "x\n");
+      const wf = walkFiles(root, root, { maxFiles: 3 });
+      expect(wf.truncated).toBe(false);
+      expect(wf.skipped.overLimit).toBe(0);
+    }
+    // Trailing dir: root holding only an empty subdir.
+    {
+      const root = tempRoot();
+      mkdirSync(join(root, "sub"));
+      const zero = walkFiles(root, root, { maxFiles: 0 });
+      expect(zero.truncated).toBe(true);
+      expect(zero.skipped.overLimit).toBe(1);
+      const one = walkFiles(root, root, { maxFiles: 1 });
+      expect(one.truncated).toBe(true);
+      expect(one.skipped.overLimit).toBe(1);
+    }
+    // Stacked dir: root holding only subdir/ with 20 files, maxFiles 1.
+    {
+      const root = tempRoot();
+      mkdirSync(join(root, "sub"));
+      for (let i = 0; i < 20; i++) writeFileSync(join(root, "sub", `f${i}.txt`), "x\n");
+      const wf = walkFiles(root, root, { maxFiles: 1 });
+      expect(wf.truncated).toBe(true);
+      expect(wf.skipped.overLimit).toBe(1);
+    }
+    // Multi-stack: root holding only a/ and b/ (10 files each), maxFiles 2.
+    {
+      const root = tempRoot();
+      for (const d of ["a", "b"]) {
+        mkdirSync(join(root, d));
+        for (let i = 0; i < 10; i++) writeFileSync(join(root, d, `f${i}.txt`), "x\n");
+      }
+      const wf = walkFiles(root, root, { maxFiles: 2 });
+      expect(wf.truncated).toBe(true);
+      expect(wf.skipped.overLimit).toBe(2);
+    }
+  });
+
+  it("grepInRoot honors walk limits and an expired deadline", async () => {
+    const root = tempRoot();
+    for (let i = 0; i < 30; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+
+    const limited = await grepInRoot(root, { pattern: "x" }, 5000, { maxFiles: 5 });
+    expect(limited.isError).toBe(false);
+    const lp = JSON.parse(limited.output);
+    expect(lp.truncated).toBe(true);
+    expect(lp.files_scanned).toBe(5);
+
+    const expired = await grepInRoot(root, { pattern: "x" }, 5000, { deadlineMs: 0 });
+    expect(expired.isError).toBe(false);
+    const ep = JSON.parse(expired.output);
+    expect(ep.truncated).toBe(true);
+    expect(ep.skipped.overLimit).toBe(1);
+
+    const wp = walkPaths(root, root, { deadlineMs: 0 });
+    expect(wp.truncated).toBe(true);
+    expect(wp.skipped.overLimit).toBe(1);
+
+    const empty = tempRoot();
+    const zero = walkFiles(empty, empty, { maxFiles: 0 });
+    expect(zero.truncated).toBe(true);
+    expect(zero.skipped.overLimit).toBe(1);
+    const one = walkFiles(empty, empty, { maxFiles: 1 });
+    expect(one.truncated).toBe(false);
+    expect(one.skipped.overLimit).toBe(0);
+  });
+
+  it("single-file start paths count eligibility skips", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "big.ts"), "x".repeat(1024 * 1024 + 1));
+    writeFileSync(join(root, "blob.dat"), Buffer.concat([Buffer.from("abc"), Buffer.from([0]), Buffer.from("def")]));
+    writeFileSync(join(root, "ok.ts"), "hello\n");
+
+    const big = await grepInRoot(root, { pattern: "x", path: "big.ts" }, 5000);
+    expect(big.isError).toBe(false);
+    const bp = JSON.parse(big.output);
+    expect(bp.matches).toEqual([]);
+    expect(bp.files_scanned).toBe(0);
+    expect(bp.skipped.oversized).toBe(1);
+
+    const bin = await grepInRoot(root, { pattern: "b", path: "blob.dat" }, 5000);
+    expect(bin.isError).toBe(false);
+    expect(JSON.parse(bin.output).skipped.binary).toBe(1);
+
+    const fileAbs = join(root, "ok.ts");
+    const zp = walkPaths(root, fileAbs, { maxFiles: 0 });
+    expect(zp.paths).toEqual([]);
+    expect(zp.truncated).toBe(true);
+    expect(zp.skipped.overLimit).toBe(1);
+    const op = walkPaths(root, fileAbs, { maxFiles: 1 });
+    expect(op.paths).toEqual(["ok.ts"]);
+    expect(op.truncated).toBe(false);
+    expect(op.skipped.overLimit).toBe(0);
+
+    const over = walkFiles(root, join(root, "big.ts"), { maxFiles: 0 });
+    expect(over.truncated).toBe(true);
+    expect(over.skipped).toEqual({ oversized: 0, binary: 0, overLimit: 1 });
+  });
+
+  it("isBinaryFile treats open failure as binary (unreadable fold)", async () => {
+    const root = tempRoot();
+    const text = join(root, "a.txt");
+    writeFileSync(text, "hello\n");
+    expect(isBinaryFile(text)).toBe(false);
+    const bin = join(root, "b.dat");
+    writeFileSync(bin, Buffer.from([0x68, 0x00, 0x69]));
+    expect(isBinaryFile(bin)).toBe(true);
+    expect(isBinaryFile("xx\0xx")).toBe(true);
   });
 });

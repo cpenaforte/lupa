@@ -287,7 +287,7 @@ interface WalkFile {
 }
 
 /** True when the first 8KB of `p` contain a NUL byte (or `p` cannot be read). */
-function isBinaryFile(p: string): boolean {
+export function isBinaryFile(p: string): boolean {
   let fd: number | undefined;
   try {
     fd = openSync(p, "r");
@@ -312,61 +312,194 @@ function relPath(root: string, abs: string): string {
   return relative(root, abs).split(sep).join("/");
 }
 
-function includeFile(root: string, abs: string, size: number): WalkFile | null {
-  if (size > GREP_MAX_FILE_BYTES) return null;
-  if (isBinaryFile(abs)) return null;
-  return { abs, rel: relPath(root, abs) };
+export interface WalkLimits {
+  maxFiles?: number;
+  deadlineMs?: number;
+}
+
+export interface WalkSkipped {
+  oversized: number;
+  binary: number;
+  overLimit: number;
+}
+
+const WALK_DEFAULT_MAX_FILES = 10_000;
+const WALK_DEFAULT_DEADLINE_MS = 10_000;
+
+/**
+ * Dependency/vendor directory names pruned from walks. Matched as exact,
+ * case-sensitive DIRECTORY entry names at any depth; `.git` keeps its own
+ * case-insensitive entry check. `dist/` and `build/` are explicitly NOT
+ * pruned (project outputs, sometimes reviewed).
+ */
+const PRUNE_DIR_NAMES = new Set(["node_modules", "vendor", "target", ".venv", "venv", "__pycache__"]);
+
+function zeroSkipped(): WalkSkipped {
+  return { oversized: 0, binary: 0, overLimit: 0 };
+}
+
+interface DirentLike {
+  name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+  isSymbolicLink(): boolean;
+}
+
+/** True for entries the walk deliberately skips without touching the counter. */
+function isWalkSkippedEntry(d: DirentLike): boolean {
+  if (d.name.toLowerCase() === ".git") return true;
+  if (d.isSymbolicLink()) return true;
+  if (d.isDirectory()) return PRUNE_DIR_NAMES.has(d.name);
+  return !d.isFile();
 }
 
 /**
- * Collect candidate files under `startAbs` (a directory or a single file),
- * skipping `.git` segments, symlinks, files larger than 1MB, and files whose
- * first 8KB contain a NUL byte. Paths are reported relative to `root` with
- * forward slashes.
+ * Entries still queued in the current directory listing at the moment the
+ * per-entry limit check fired. Deliberately-skipped entries (prune set,
+ * `.git`, symlinks, non-regular nodes) are excluded — never limit-cut.
+ * Surviving files count 1 each (exact); surviving directories count 1 each,
+ * a conservative placeholder since their contents are unknowable without
+ * listing.
  */
-function walkFiles(root: string, startAbs: string): WalkFile[] {
+function countQueuedRemainder(dirents: DirentLike[], from: number): number {
+  let n = 0;
+  for (let i = from; i < dirents.length; i++) {
+    if (isWalkSkippedEntry(dirents[i])) continue;
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * Shared bounded walk under `startAbs` (a directory or a single file),
+ * skipping `.git` entries, symlinks, non-regular nodes, and the prune set.
+ * `maxFiles` counts entries examined: each dirent classified in a directory
+ * loop counts 1, files and directories alike (the counter increments when
+ * classification is attempted, before stat — stat failures consume a slot
+ * but land in no skip bucket). The prune filter runs BEFORE the limit check.
+ * The limit is checked in two places: (a) before classifying each entry;
+ * (b) at the top of each loop iteration after pop, before readdir — together
+ * with the deadline (`elapsed >= deadlineMs` against `Date.now()`), so a
+ * pushed-but-unlisted directory fires check (b) when popped. A limit fires
+ * only when an unexamined entry remains; `overLimit` is exact for file
+ * remainders and a conservative placeholder (one unit per unlisted
+ * directory) otherwise. Applies to child entries under the walk start; the
+ * start path itself is never pruned. A file start counts as one examined
+ * unit, goes through `visitFile`, and never sees the deadline (no directory
+ * iteration).
+ */
+function walkCore(
+  root: string,
+  startAbs: string,
+  limits: WalkLimits | undefined,
+  visitFile: (childAbs: string, skipped: WalkSkipped) => void,
+): { truncated: boolean; skipped: WalkSkipped } {
+  const skipped = zeroSkipped();
+  const maxFiles = limits?.maxFiles ?? WALK_DEFAULT_MAX_FILES;
+  const deadlineMs = limits?.deadlineMs ?? WALK_DEFAULT_DEADLINE_MS;
+  const startTime = Date.now();
+
   let startStat;
   try {
     startStat = statSync(startAbs);
   } catch {
-    return [];
+    return { truncated: false, skipped };
   }
 
   if (startStat.isFile()) {
-    const f = includeFile(root, startAbs, startStat.size);
-    return f ? [f] : [];
+    if (0 >= maxFiles) {
+      skipped.overLimit = 1;
+      return { truncated: true, skipped };
+    }
+    visitFile(startAbs, skipped);
+    return { truncated: false, skipped };
   }
-  if (!startStat.isDirectory()) return [];
+  if (!startStat.isDirectory()) return { truncated: false, skipped };
 
-  const files: WalkFile[] = [];
+  let examined = 0;
   const stack: string[] = [startAbs];
-  while (stack.length) {
+  while (stack.length > 0) {
     const dir = stack.pop()!;
+    if (examined >= maxFiles || Date.now() - startTime >= deadlineMs) {
+      skipped.overLimit = 1 + stack.length;
+      return { truncated: true, skipped };
+    }
     let dirents;
     try {
       dirents = readdirSync(dir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const d of dirents) {
-      if (d.name.toLowerCase() === ".git") continue;
-      if (d.isSymbolicLink()) continue;
+    // One synchronous directory read plus its entry loop cannot be preempted,
+    // so the walk can overshoot the deadline by one directory's processing time.
+    for (let i = 0; i < dirents.length; i++) {
+      const d = dirents[i];
+      if (isWalkSkippedEntry(d)) continue;
+      if (examined >= maxFiles) {
+        skipped.overLimit = countQueuedRemainder(dirents, i) + stack.length;
+        return { truncated: true, skipped };
+      }
+      examined++;
       const childAbs = join(dir, d.name);
       if (d.isDirectory()) {
         stack.push(childAbs);
-      } else if (d.isFile()) {
-        let size: number;
-        try {
-          size = statSync(childAbs).size;
-        } catch {
-          continue;
-        }
-        const f = includeFile(root, childAbs, size);
-        if (f) files.push(f);
+      } else {
+        visitFile(childAbs, skipped);
       }
     }
   }
-  return files;
+  return { truncated: false, skipped };
+}
+
+/**
+ * Names-only walk: files only (directories are traversed, never listed), no
+ * stat size checks, no binary scan. Returns `{ paths (rel, sorted),
+ * truncated, skipped }` with `oversized`/`binary` always 0.
+ */
+export function walkPaths(
+  root: string,
+  startAbs: string,
+  limits?: WalkLimits,
+): { paths: string[]; truncated: boolean; skipped: WalkSkipped } {
+  const paths: string[] = [];
+  const result = walkCore(root, startAbs, limits, (childAbs) => {
+    paths.push(relPath(root, childAbs));
+  });
+  paths.sort();
+  return { paths, truncated: result.truncated, skipped: result.skipped };
+}
+
+/**
+ * Content-eligibility walk: as `walkPaths` plus size (> 1 MiB folds into
+ * `skipped.oversized`) and binary (`skipped.binary`; unreadable files fold
+ * into `binary` since the eligibility check treats open failure as binary)
+ * filtering. `statSync`- and `readdirSync`-failure skips count in no bucket.
+ * Paths are reported relative to `root` with forward slashes.
+ */
+export function walkFiles(
+  root: string,
+  startAbs: string,
+  limits?: WalkLimits,
+): { files: WalkFile[]; truncated: boolean; skipped: WalkSkipped } {
+  const files: WalkFile[] = [];
+  const result = walkCore(root, startAbs, limits, (childAbs, skipped) => {
+    let size: number;
+    try {
+      size = statSync(childAbs).size;
+    } catch {
+      return;
+    }
+    if (size > GREP_MAX_FILE_BYTES) {
+      skipped.oversized++;
+      return;
+    }
+    if (isBinaryFile(childAbs)) {
+      skipped.binary++;
+      return;
+    }
+    files.push({ abs: childAbs, rel: relPath(root, childAbs) });
+  });
+  return { files, truncated: result.truncated, skipped: result.skipped };
 }
 
 interface GrepMatch {
@@ -450,6 +583,7 @@ export async function grepInRoot(
   root: string,
   args: { pattern: string; path?: string; glob?: string; max_results?: number },
   timeoutMs: number = GREP_TIMEOUT_MS,
+  limits?: WalkLimits,
 ): Promise<{ output: string; isError: boolean }> {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
@@ -462,7 +596,8 @@ export async function grepInRoot(
   const startAbs = resolveWithinRoot(root, rel);
   if (!startAbs) return errorResult(`path not accessible: ${rel}`);
 
-  let files = walkFiles(root, startAbs);
+  const walked = walkFiles(root, startAbs, limits);
+  let files = walked.files;
   if (args.glob) files = files.filter((f) => matchGlob(f.rel, args.glob!));
 
   const requested = args.max_results === undefined ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
@@ -478,7 +613,7 @@ export async function grepInRoot(
     text: codePointSafeCut(m.text, GREP_LINE_CHARS),
   }));
   const serialize = (list: GrepMatch[], truncated: boolean): string =>
-    JSON.stringify({ matches: list, truncated, files_scanned: filesScanned });
+    JSON.stringify({ matches: list, truncated, files_scanned: filesScanned, skipped: walked.skipped });
 
   let lo = 0;
   let hi = capped.length;
@@ -487,7 +622,7 @@ export async function grepInRoot(
     if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
     else hi = mid - 1;
   }
-  const truncated = hitLimit || lo < capped.length;
+  const truncated = hitLimit || walked.truncated || lo < capped.length;
   return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
 }
 
@@ -507,12 +642,10 @@ async function glob(args: Record<string, unknown>, ctx: ToolContext): Promise<{ 
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
-  const paths = walkFiles(resolvedRoot.root, resolvedRoot.root)
-    .map((f) => f.rel)
-    .filter((p) => matchGlob(p, pattern))
-    .sort();
+  const walked = walkPaths(resolvedRoot.root, resolvedRoot.root);
+  const paths = walked.paths.filter((p) => matchGlob(p, pattern)).sort();
 
-  const truncated = paths.length > GLOB_MAX_PATHS;
+  const truncated = paths.length > GLOB_MAX_PATHS || walked.truncated;
   return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
 }
 
