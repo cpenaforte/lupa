@@ -133,7 +133,8 @@ importing them — behavior unchanged.
 Merge point: inside `publishReview`, AFTER gate inputs are fixed —
 `eventFor(fullSet)`, `summaryFor(fullSet)`, and the dry-run `high=` count
 keep the full pre-merge set (already order-free calls — no reordering
-needed); `mapToComments`/`buildBody` take the merged set. `exitFor` sites
+needed); the step-summary report (`buildFallbackReport`) also renders the
+full set — complete-record style, matching the artifact; `mapToComments`/`buildBody` take the merged set. `exitFor` sites
 outside (Flow A/B) are untouched. Gate outcomes are provably identical on
 either set, so the F15 "full set" tests stay green unchanged.
 
@@ -179,11 +180,13 @@ nothing, silently).
 - Flow A: `pr-meta.json` is (re)written with verdicts after the slow path
   (always written, even `{pairs: [], links: [], malformed: 0}` when there is
   no LLM — a missing verdicts key means "no judge ran").
-- Flow B: reads verdicts from `pr-meta.json` best-effort under the F15
-  artifact read cap (oversize/unparseable → warning + no merge) and
-  range-checks every index against `findings.length` (out-of-range =
-  malformed, dropped with the count); then merges in the same
-  `publishReview` point. Fork-PR comments dedup identically.
+- Flow B: reads verdicts from `pr-meta.json` via `readPrMeta` (F15-capped
+  read; oversize/malformed file or malformed verdicts shape throws like any
+  pr-meta violation — fail-closed, consistent; missing key means "no judge
+  ran" and merges nothing, silently) with index range-check vs
+  `findings.length` (out-of-range = malformed, dropped with the count at
+  merge); then merges in the same `publishReview` point. Fork-PR comments
+  dedup identically.
 
 ### Failure behavior
 
