@@ -28978,7 +28978,7 @@ async function publishReview(a) {
     info(`post_comment is false: dry-run, nothing posted (would post event=${payload.event}, inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, omitted=${omitted})`);
     return;
   }
-  const canWrite = !a.isFork || a.env.tokenIsApp;
+  const canWrite = !a.isFork || a.env.tokenType === "app" || a.env.tokenType === "workflow-run";
   if (!canWrite) {
     warning("fork PR with a read-only token: review not posted; summary and artifact only");
     return;
@@ -29071,7 +29071,7 @@ async function runFlowA(env, deps, out) {
     }
   });
   const lockfiles = files.filter((f) => isLockfile(f.file)).map((f) => f.file);
-  const forkWithSecrets = pull.isFork && (env.eventName !== "pull_request" || env.tokenIsApp || env.inputs.llmApiKey !== "");
+  const forkWithSecrets = pull.isFork && (env.eventName !== "pull_request" || env.tokenType === "app" || env.inputs.llmApiKey !== "");
   const { scan, l2 } = await withScrubbedEnv(async () => {
     const s = await deps.analysis.runScanners({
       dir: env.workDir,
@@ -29241,6 +29241,8 @@ function readRunEnv() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync5(eventPath, "utf8")) : {};
   const inputs = getInputs();
+  const value = process.env.PR_REVIEWER_TOKEN_TYPE;
+  const tokenType = value === "app" ? "app" : value === "workflow-run" ? "workflow-run" : "github-token";
   return {
     eventName: process.env.GITHUB_EVENT_NAME ?? "",
     payload,
@@ -29249,7 +29251,7 @@ function readRunEnv() {
     artifactDir: process.env.PR_REVIEWER_ARTIFACT_DIR ?? join6(process.env.RUNNER_TEMP ?? tmpdir(), "pr-reviewer-out"),
     baseSha: process.env.PR_REVIEWER_BASE_SHA ?? "",
     headSha: process.env.PR_REVIEWER_HEAD_SHA ?? "",
-    tokenIsApp: process.env.PR_REVIEWER_TOKEN_TYPE === "app",
+    tokenType,
     issueFallback: process.env.PR_REVIEWER_ISSUE_FALLBACK === "true",
     ...process.env.GITHUB_STEP_SUMMARY ? { summaryPath: process.env.GITHUB_STEP_SUMMARY } : {}
   };

@@ -205,7 +205,7 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     artifactDir,
     baseSha: BASE_SHA,
     headSha: HEAD_SHA,
-    tokenIsApp: false,
+    tokenType: "github-token",
     issueFallback: false,
     summaryPath,
     ...testCase.envOverrides,

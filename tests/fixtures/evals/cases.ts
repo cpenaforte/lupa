@@ -270,7 +270,7 @@ export const evalCases: readonly EvalCase[] = [
     id: "synthetic-fork-readonly-summary-only",
     categories: ["fork-readonly"], syntheticRationale: "Synthetic permission regression: a fork with a read-only token still emits its summary without writes.",
     patchFixture: "fork-readonly.patch", fakeGatewayMode: "isFork",
-    envOverrides: { tokenIsApp: false, issueFallback: true }, llmFindings: [forkFinding],
+    envOverrides: { tokenType: "github-token", issueFallback: true }, llmFindings: [forkFinding],
     expected: {
       promptDiffSnippet: "+  enabled = true;", findings: [forkL2Skipped, forkFinding], exitCode: 2,
       summary: summaryForMany([forkL2Skipped, forkFinding]), publication: { kind: "none" },

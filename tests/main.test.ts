@@ -9,7 +9,7 @@ vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
   return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
-import { budgetPrompt, cleanEnvForExec, main, readFindings, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
@@ -247,7 +247,7 @@ interface MockOpts {
   summaryPrefill?: string;
   /** Findings returned by the runScanners fake (default []). */
   scan?: Finding[];
-  tokenIsApp?: boolean;
+  tokenType?: "app" | "workflow-run" | "github-token";
   llmProvider?: LlmProvider;
   llmModel?: string;
   llmApiStyle?: LlmApiStyle;
@@ -287,7 +287,7 @@ async function runWithMocks(o: MockOpts = {}) {
     artifactDir,
     baseSha: SHA_BASE,
     headSha: SHA_HEAD,
-    tokenIsApp: o.tokenIsApp === true,
+    tokenType: o.tokenType ?? "github-token",
     issueFallback: o.issueFallback === true,
     summaryPath,
   };
@@ -413,6 +413,9 @@ interface PrivOpts {
   findings?: unknown[];
   staleDuringPost?: boolean;
   metaHead?: string;
+  /** Extra top-level keys merged into pr-meta.json (artifact-field tests). */
+  metaExtra?: Record<string, unknown>;
+  failLevel?: "none" | "warning" | "high";
   wrHead?: string;
   wrRepo?: string | null;
   wrBranch?: string;
@@ -439,6 +442,7 @@ async function runPrivileged(o: PrivOpts = {}) {
       base_sha: SHA_BASE,
       head_repo_full_name: "o/r",
       is_fork: false,
+      ...o.metaExtra,
     }),
   );
   writeFileSync(join(artifactDir, "findings.json"), JSON.stringify(o.findings ?? [LLM_FINDING]));
@@ -462,12 +466,13 @@ async function runPrivileged(o: PrivOpts = {}) {
       maxFindings: o.maxFindings,
       maxInlineComments: o.maxInlineComments,
       maxReviewBodyChars: o.maxReviewBodyChars,
+      ...(o.failLevel !== undefined ? { failLevel: o.failLevel } : {}),
     }),
     workDir: root,
     artifactDir,
     baseSha: SHA_BASE,
     headSha: SHA_HEAD,
-    tokenIsApp: false,
+    tokenType: "github-token",
     issueFallback: false,
     summaryPath,
   };
@@ -597,7 +602,7 @@ describe("run() orchestration", () => {
       artifactDir,
       baseSha: SHA_BASE,
       headSha: SHA_HEAD,
-      tokenIsApp: true,
+      tokenType: "app",
       issueFallback: false,
     };
     const deps: Deps = {
@@ -1124,7 +1129,7 @@ describe("run() orchestration", () => {
   });
 
   it("fork PR re-triggered by comment with an App token: L2 is skipped, a finding says so, the review still posts", async () => {
-    const r = await runWithMocks({ comment: true, forkReadonly: true, tokenIsApp: true });
+    const r = await runWithMocks({ comment: true, forkReadonly: true, tokenType: "app" });
     expect(r.l2Env).toBeUndefined();
     expect(r.body).toContain("l2-skipped");
     expect(r.posted).toBe(true);
@@ -1140,6 +1145,62 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({ diff: QUOTED_BINARY });
     expect(r.body).toContain("café.bin");
     expect(r.body).not.toContain("caf\\303");
+  });
+});
+
+describe("fork token type (F14)", () => {
+  it.each([
+    { tokenType: "app" as const, posts: true },
+    { tokenType: "workflow-run" as const, posts: true },
+    { tokenType: "github-token" as const, posts: false },
+  ])("fork PR with tokenType $tokenType posts=$posts", async ({ tokenType, posts }) => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ forkReadonly: true, tokenType });
+    expect(r.posted).toBe(posts);
+    if (posts) {
+      expect(r.reviewAttempts).toBe(1);
+    } else {
+      expect(r.reviewAttempts).toBe(0);
+      expect(r.summaryWritten).toBe(true);
+      expect(
+        vi.mocked(core.warning).mock.calls.some(([message]) => String(message).includes("read-only token")),
+      ).toBe(true);
+    }
+  });
+
+  it.each(["app", "workflow-run", "github-token"] as const)("non-fork PR with tokenType %s posts", async (tokenType) => {
+    const r = await runWithMocks({ tokenType });
+    expect(r.posted).toBe(true);
+  });
+
+  it("UNSET PR_REVIEWER_TOKEN_TYPE parses fail-closed to github-token", () => {
+    const saved = process.env.PR_REVIEWER_TOKEN_TYPE;
+    delete process.env.PR_REVIEWER_TOKEN_TYPE;
+    try {
+      expect(readRunEnv().tokenType).toBe("github-token");
+    } finally {
+      if (saved === undefined) delete process.env.PR_REVIEWER_TOKEN_TYPE;
+      else process.env.PR_REVIEWER_TOKEN_TYPE = saved;
+    }
+  });
+
+  it("unknown PR_REVIEWER_TOKEN_TYPE parses fail-closed to github-token", () => {
+    const saved = process.env.PR_REVIEWER_TOKEN_TYPE;
+    process.env.PR_REVIEWER_TOKEN_TYPE = "bogus-token-type";
+    try {
+      expect(readRunEnv().tokenType).toBe("github-token");
+    } finally {
+      if (saved === undefined) delete process.env.PR_REVIEWER_TOKEN_TYPE;
+      else process.env.PR_REVIEWER_TOKEN_TYPE = saved;
+    }
+  });
+
+  it("Flow B ignores planted fail_level-shaped artifact fields (event and exit follow inputs)", async () => {
+    const planted = { ...LLM_FINDING, severity: "high", fail_level: "none" };
+    const r = await runPrivileged({ failLevel: "high", findings: [planted], metaExtra: { fail_level: "none" } });
+    expect(r.posted).toBe(true);
+    expect(r.payloads[0].event).toBe("REQUEST_CHANGES");
+    expect(r.exitCode).toBe(1);
   });
 });
 
@@ -1312,7 +1373,7 @@ describe("findings from binaries, renames and skip paths", () => {
       artifactDir,
       baseSha: SHA_BASE,
       headSha: SHA_HEAD,
-      tokenIsApp: false,
+      tokenType: "github-token",
       issueFallback: false,
       // A directory: appendFileSync throws EISDIR. The skip path must absorb that.
       summaryPath: root,

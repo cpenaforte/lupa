@@ -19,7 +19,7 @@ export interface EvalCase {
   /** Replaces the harness default pull_request/synchronize event. */
   eventOverride?: { eventName: string; payload: unknown };
   inputOverrides?: Partial<ActionInputs>;
-  envOverrides?: Partial<Pick<RunEnv, "tokenIsApp" | "issueFallback">>;
+  envOverrides?: Partial<Pick<RunEnv, "tokenType" | "issueFallback">>;
   fakeGatewayMode?: "normal" | "headMovesBeforePost" | "isFork" | "refusedReview" | "staleOnPost" | "flowBPrs";
   scannerFindings?: Finding[];
   l2Findings?: Finding[];

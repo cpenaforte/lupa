@@ -55,8 +55,8 @@ export interface RunEnv {
   artifactDir: string;
   baseSha: string;
   headSha: string;
-  /** PR_REVIEWER_TOKEN_TYPE === "app". An App token may write on a fork PR. */
-  tokenIsApp: boolean;
+  /** PR_REVIEWER_TOKEN_TYPE: "app" or "workflow-run" may write on a fork PR; "github-token" (and unset/unknown) never posts on a fork. */
+  tokenType: "app" | "workflow-run" | "github-token";
   /** PR_REVIEWER_ISSUE_FALLBACK === "true". Only set when the template grants issues: write. */
   issueFallback: boolean;
   /** GITHUB_STEP_SUMMARY, when present. */
@@ -802,7 +802,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
     );
     return;
   }
-  const canWrite = !a.isFork || a.env.tokenIsApp;
+  const canWrite = !a.isFork || a.env.tokenType === "app" || a.env.tokenType === "workflow-run";
   if (!canWrite) {
     core.warning("fork PR with a read-only token: review not posted; summary and artifact only");
     return;
@@ -924,7 +924,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   // L2 toolchains (linters, build tooling) would execute PR-controlled config with secrets nearby,
   // so they are skipped. Trusted, data-driven scanners still run.
   const forkWithSecrets =
-    pull.isFork && (env.eventName !== "pull_request" || env.tokenIsApp || env.inputs.llmApiKey !== "");
+    pull.isFork && (env.eventName !== "pull_request" || env.tokenType === "app" || env.inputs.llmApiKey !== "");
   const { scan, l2 } = await withScrubbedEnv(async () => {
     const s = await deps.analysis.runScanners({
       dir: env.workDir,
@@ -1122,6 +1122,8 @@ export function readRunEnv(): RunEnv {
       ? (JSON.parse(readFileSync(eventPath, "utf8")) as Record<string, unknown>)
       : {};
   const inputs = getInputs();
+  const value = process.env.PR_REVIEWER_TOKEN_TYPE;
+  const tokenType = value === 'app' ? 'app' : value === 'workflow-run' ? 'workflow-run' : 'github-token';
   return {
     eventName: process.env.GITHUB_EVENT_NAME ?? "",
     payload,
@@ -1130,7 +1132,7 @@ export function readRunEnv(): RunEnv {
     artifactDir: process.env.PR_REVIEWER_ARTIFACT_DIR ?? join(process.env.RUNNER_TEMP ?? tmpdir(), "pr-reviewer-out"),
     baseSha: process.env.PR_REVIEWER_BASE_SHA ?? "",
     headSha: process.env.PR_REVIEWER_HEAD_SHA ?? "",
-    tokenIsApp: process.env.PR_REVIEWER_TOKEN_TYPE === "app",
+    tokenType,
     issueFallback: process.env.PR_REVIEWER_ISSUE_FALLBACK === "true",
     ...(process.env.GITHUB_STEP_SUMMARY ? { summaryPath: process.env.GITHUB_STEP_SUMMARY } : {}),
   };
