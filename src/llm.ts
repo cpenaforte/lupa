@@ -26,7 +26,7 @@ const MAX_RETRY_AFTER_MS = 5_000;
 export const SNIPPET_CHARS = 200;
 
 export type LlmResult =
-  | { ok: true; findings: Finding[] }
+  | { ok: true; findings: Finding[]; verdicts?: DedupVerdicts }
   | {
       ok: false;
       reason: "no-key" | "unsupported" | "timeout" | "content-filter" | "invalid-json";
@@ -131,6 +131,69 @@ export function parseContent(raw: string): unknown {
 }
 
 const SEVERITIES: ReadonlySet<unknown> = new Set(["info", "warning", "high"]);
+
+/**
+ * Dedup verdicts carried out-of-band alongside findings (positions stay
+ * aligned because every pipeline stage is order-preserving):
+ * - `pairs`: sent-list index pairs judged duplicates of each other.
+ * - `links`: `[responseIndex, sentIndex]` pointers from model findings
+ *   (which restate sent findings via `duplicateOf`) back to sent findings.
+ * - `malformed`: count of shape-bad entries dropped at parse.
+ */
+export interface DedupVerdicts {
+  pairs: Array<[number, number]>;
+  links: Array<[number, number]>;
+  malformed: number;
+}
+
+/**
+ * Extracts dedup verdicts from the ALREADY-PARSED response object (adapters
+ * parse once via `parseContent` — fence handling inherited, no double parse).
+ * Shape validation ONLY: drops negative/non-integer indices, self-pairs,
+ * non-pairs, and wrong-length pairs (each drop increments `malformed`).
+ * Referent checks (unknown sent indices, dangling pointers) belong to the
+ * caller holding the arrays — NOT here. Null and absent verdict keys both
+ * mean "no verdicts" (never malformed).
+ */
+export function parseVerdicts(parsed: unknown): DedupVerdicts {
+  const verdicts: DedupVerdicts = { pairs: [], links: [], malformed: 0 };
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return verdicts;
+  const root = parsed as Record<string, unknown>;
+  const dupes = root.duplicates;
+  if (dupes === undefined || dupes === null) {
+    // No verdicts — normal, not malformed.
+  } else if (!Array.isArray(dupes)) {
+    verdicts.malformed++;
+  } else {
+    for (const entry of dupes) {
+      if (!Array.isArray(entry) || entry.length !== 2) {
+        verdicts.malformed++;
+        continue;
+      }
+      const [a, b] = entry;
+      if (!Number.isInteger(a) || (a as number) < 0 || !Number.isInteger(b) || (b as number) < 0 || a === b) {
+        verdicts.malformed++;
+        continue;
+      }
+      verdicts.pairs.push([a as number, b as number]);
+    }
+  }
+  const findings = root.findings;
+  if (Array.isArray(findings)) {
+    for (let i = 0; i < findings.length; i++) {
+      const item = findings[i];
+      if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+      const target = (item as Record<string, unknown>).duplicateOf;
+      if (target === undefined || target === null) continue;
+      if (!Number.isInteger(target) || (target as number) < 0) {
+        verdicts.malformed++;
+        continue;
+      }
+      verdicts.links.push([i, target as number]);
+    }
+  }
+  return verdicts;
+}
 
 /**
  * Hand-written structural check against PR_REVIEW_SCHEMA's required fields.
@@ -406,7 +469,7 @@ export async function callLlm(
   if (findings === undefined) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
 }
 
 /**

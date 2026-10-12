@@ -80,14 +80,14 @@ export const PR_REVIEW_SCHEMA = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: ["findings"],
+    required: ["findings", "duplicates"],
     properties: {
       findings: {
         type: "array",
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion"],
+          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"],
           properties: {
             severity: { type: "string", enum: ["info", "warning", "high"] },
             file: { type: "string" },
@@ -95,8 +95,13 @@ export const PR_REVIEW_SCHEMA = {
             rule: { type: "string" },
             message: { type: "string" },
             suggestion: { type: ["string", "null"] },
+            duplicateOf: { type: ["integer", "null"] },
           },
         },
+      },
+      duplicates: {
+        type: ["array", "null"],
+        items: { type: "array", items: { type: "integer" }, minItems: 2, maxItems: 2 },
       },
     },
   },

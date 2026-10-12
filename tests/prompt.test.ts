@@ -143,16 +143,29 @@ describe("buildMessages agent variant", () => {
 });
 
 describe("PR_REVIEW_SCHEMA", () => {
-  it("requires findings with strict item shape and all six keys", () => {
+  it("requires findings with strict item shape and all seven keys", () => {
     const item = (PR_REVIEW_SCHEMA.schema.properties.findings as any).items;
-    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion"]);
+    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"]);
     expect(Object.keys(item.properties).sort()).toEqual(
-      ["file", "line", "message", "rule", "severity", "suggestion"],
+      ["duplicateOf", "file", "line", "message", "rule", "severity", "suggestion"],
     );
     expect(item.additionalProperties).toBe(false);
     expect(item.properties.severity.enum).toEqual(["info", "warning", "high"]);
+    expect(item.properties.duplicateOf).toEqual({ type: ["integer", "null"] });
     expect(PR_REVIEW_SCHEMA.schema.additionalProperties).toBe(false);
-    expect(PR_REVIEW_SCHEMA.schema.required).toEqual(["findings"]);
+    expect(PR_REVIEW_SCHEMA.schema.required).toEqual(["findings", "duplicates"]);
+  });
+
+  it("declares a nullable duplicates array of integer pairs with min/max length 2", () => {
+    const dupes = (PR_REVIEW_SCHEMA.schema.properties as any).duplicates;
+    expect(dupes.type).toEqual(["array", "null"]);
+    expect(dupes.items).toEqual({
+      type: "array",
+      items: { type: "integer" },
+      minItems: 2,
+      maxItems: 2,
+    });
+    expect(JSON.stringify(PR_REVIEW_SCHEMA.schema)).not.toContain("prefixItems");
   });
 });
 

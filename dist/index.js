@@ -25685,23 +25685,28 @@ var PR_REVIEW_SCHEMA = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: ["findings"],
+    required: ["findings", "duplicates"],
     properties: {
       findings: {
         type: "array",
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion"],
+          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"],
           properties: {
             severity: { type: "string", enum: ["info", "warning", "high"] },
             file: { type: "string" },
             line: { type: ["integer", "null"] },
             rule: { type: "string" },
             message: { type: "string" },
-            suggestion: { type: ["string", "null"] }
+            suggestion: { type: ["string", "null"] },
+            duplicateOf: { type: ["integer", "null"] }
           }
         }
+      },
+      duplicates: {
+        type: ["array", "null"],
+        items: { type: "array", items: { type: "integer" }, minItems: 2, maxItems: 2 }
       }
     }
   }
@@ -26193,7 +26198,7 @@ async function callGoogle(ep, modelId, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
 }
 async function callGoogleTurn(ep, modelId, conv, o, flags) {
   const key = o.apiKey;
@@ -26408,7 +26413,7 @@ async function callMessages(ep, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
 }
 async function callMessagesTurn(ep, conv, o, flags) {
   const key = o.apiKey;
@@ -26623,7 +26628,7 @@ async function callResponses(ep, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
 }
 async function callResponsesTurn(ep, conv, o, flags) {
   const key = o.apiKey;
@@ -26974,6 +26979,47 @@ function parseContent(raw) {
   }
 }
 var SEVERITIES = /* @__PURE__ */ new Set(["info", "warning", "high"]);
+function parseVerdicts(parsed) {
+  const verdicts = { pairs: [], links: [], malformed: 0 };
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return verdicts;
+  const root = parsed;
+  const dupes = root.duplicates;
+  if (dupes === void 0 || dupes === null) {
+  } else if (!Array.isArray(dupes)) {
+    verdicts.malformed++;
+  } else {
+    for (const entry of dupes) {
+      if (!Array.isArray(entry) || entry.length !== 2) {
+        verdicts.malformed++;
+        continue;
+      }
+      const [a, b] = entry;
+      if (!Number.isInteger(a) || a < 0 || !Number.isInteger(b) || b < 0 || a === b) {
+        verdicts.malformed++;
+        continue;
+      }
+      verdicts.pairs.push([a, b]);
+    }
+  }
+  const findings = root.findings;
+  if (Array.isArray(findings)) {
+    for (let i = 0; i < findings.length; i++) {
+      const item = findings[i];
+      if (typeof item !== "object" || item === null || Array.isArray(item))
+        continue;
+      const target = item.duplicateOf;
+      if (target === void 0 || target === null)
+        continue;
+      if (!Number.isInteger(target) || target < 0) {
+        verdicts.malformed++;
+        continue;
+      }
+      verdicts.links.push([i, target]);
+    }
+  }
+  return verdicts;
+}
 function toFindings(v) {
   if (typeof v !== "object" || v === null || Array.isArray(v))
     return void 0;
@@ -27179,7 +27225,7 @@ async function callLlm(ep, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
 }
 async function callChatTurn(ep, conv, o, flags) {
   const key = o.apiKey;

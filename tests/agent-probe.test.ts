@@ -133,7 +133,12 @@ describe("callWithProbeAgent", () => {
     // Next call for the same model: single-shot, no tools attached.
     vi.mocked(fetch).mockClear();
     const r2 = await callWithProbeAgent("opencode-zen", "ap2-model", ZEN, "k", conv(), AGENT_O, TOOL_CTX);
-    expect(r2.result).toEqual({ ok: true, findings: [FINDING] });
+    // Single-shot fallback goes through callLlm, so it carries verdicts (empty here).
+    expect(r2.result).toEqual({
+      ok: true,
+      findings: [FINDING],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(bodies()[0]).not.toContain('"tools"');
     expect(vi.mocked(core.info)).toHaveBeenCalledWith("agent tools unsupported for this model: using single-shot");

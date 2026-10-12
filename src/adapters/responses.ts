@@ -5,6 +5,7 @@ import {
   attempt,
   errMessage,
   parseContent,
+  parseVerdicts,
   redact,
   retryDelayMs,
   sleep,
@@ -243,7 +244,7 @@ export async function callResponses(
   if (findings === undefined) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings };
+  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
 }
 
 /**

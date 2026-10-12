@@ -39,13 +39,13 @@ function lastBody(): Record<string, unknown> {
 /** PR_REVIEW_SCHEMA.schema as Google's OpenAPI subset expects it (no additionalProperties, nullable flags). */
 const EXPECTED_GOOGLE_SCHEMA = {
   type: "object",
-  required: ["findings"],
+  required: ["findings", "duplicates"],
   properties: {
     findings: {
       type: "array",
       items: {
         type: "object",
-        required: ["severity", "file", "line", "rule", "message", "suggestion"],
+        required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"],
         properties: {
           severity: { type: "string", enum: ["info", "warning", "high"] },
           file: { type: "string" },
@@ -53,11 +53,25 @@ const EXPECTED_GOOGLE_SCHEMA = {
           rule: { type: "string" },
           message: { type: "string" },
           suggestion: { type: "string", nullable: true },
+          duplicateOf: { type: "integer", nullable: true },
         },
+      },
+    },
+    duplicates: {
+      type: "array",
+      nullable: true,
+      items: {
+        type: "array",
+        items: { type: "integer" },
+        minItems: 2,
+        maxItems: 2,
       },
     },
   },
 };
+
+/** Empty verdicts: the mocked replies below carry no verdict keys. */
+const EMPTY_VERDICTS = { pairs: [], links: [], malformed: 0 };
 
 /** Endpoint mirroring resolveEndpoint for the native Google path. */
 function fakeGoogleEp(key = "k"): ResolvedEndpoint {
@@ -94,7 +108,7 @@ afterEach(() => {
 describe("callGoogle", () => {
   it("posts exact {contents, systemInstruction, generationConfig} body to /models/<id>:generateContent", async () => {
     const r = await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts());
-    expect(r).toEqual({ ok: true, findings: [] });
+    expect(r).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
     // The endpoint path embeds the model id; the adapter posts to it as-is.
     expect(calls.at(-1)!.url).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
@@ -120,7 +134,7 @@ describe("callGoogle", () => {
       headers: { Authorization: "Bearer k", "User-Agent": "pr-reviewer/1.0" },
       apiStyle: "google-models",
     };
-    expect(await callGoogle(zenEp, MODEL, msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callGoogle(zenEp, MODEL, msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
     expect(calls.at(-1)!.url).toBe("https://opencode.ai/zen/v1/models/gemini-2.5-flash:generateContent");
     expect(lastBody().contents).toEqual([{ role: "user", parts: [{ text: '{"findings":[]}' }] }]);
   });
@@ -166,7 +180,7 @@ describe("callGoogle", () => {
       n === 1 ? json(400, { error: "responseSchema not supported" }) : json(200, okGoogle('{"findings":[]}')),
     );
     const r = await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts());
-    expect(r).toEqual({ ok: true, findings: [] });
+    expect(r).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
     expect(calls.length).toBe(2);
     const first = JSON.parse(String(calls[0]!.init.body)) as { generationConfig?: Record<string, unknown> };
     expect(first.generationConfig?.responseSchema).toBeDefined();
@@ -188,7 +202,7 @@ describe("callGoogle", () => {
         ],
       }),
     );
-    expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
   });
 
   it("finishReason STOP→ok; MAX_TOKENS→degrade; SAFETY/other→skip without retry", async () => {
@@ -214,7 +228,7 @@ describe("callGoogle", () => {
     expect(calls.length).toBe(1);
 
     stubFetch(() => json(200, okGoogle('{"findings":[]}')));
-    expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
   });
 
   it("promptFeedback.blockReason with empty candidates → content-filter skip, no retry", async () => {
@@ -232,7 +246,7 @@ describe("callGoogle", () => {
     stubFetch((_c, n) =>
       n === 1 ? json(429, { error: "rate limited" }, { "retry-after": "0" }) : json(200, okGoogle('{"findings":[]}')),
     );
-    expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
     expect(calls.length).toBe(2);
 
     // Persistent 5xx → exactly one retry (two calls, never three).
@@ -532,10 +546,20 @@ describe("googleSchema", () => {
     const out = googleSchema(PR_REVIEW_SCHEMA.schema) as typeof EXPECTED_GOOGLE_SCHEMA;
     const items = out.properties.findings.items;
     expect(out.properties.findings.type).toBe("array");
-    expect(out.required).toEqual(["findings"]);
-    expect(items.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion"]);
+    expect(out.required).toEqual(["findings", "duplicates"]);
+    expect(items.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf"]);
     expect(items.properties.line).toEqual({ type: "integer", nullable: true });
     expect(items.properties.severity).toEqual({ type: "string", enum: ["info", "warning", "high"] });
+    expect(items.properties.duplicateOf).toEqual({ type: "integer", nullable: true });
+  });
+
+  it("converts nullable duplicates with minItems/maxItems passed through", () => {
+    const out = googleSchema(PR_REVIEW_SCHEMA.schema) as typeof EXPECTED_GOOGLE_SCHEMA;
+    expect(out.properties.duplicates).toEqual({
+      type: "array",
+      nullable: true,
+      items: { type: "array", items: { type: "integer" }, minItems: 2, maxItems: 2 },
+    });
   });
 
   it("keeps a required array valid when it names a property the schema does not define", () => {

@@ -77,7 +77,7 @@ afterEach(() => {
 describe("callMessages", () => {
   it("posts exact {model, max_tokens, system, messages} body with x-api-key + anthropic-version headers", async () => {
     const r = await callMessages(fakeMessagesEp(), msgs(), opts());
-    expect(r).toEqual({ ok: true, findings: [] });
+    expect(r).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(calls.at(-1)!.url).toBe("https://api.anthropic.com/v1/messages");
     const headers = calls.at(-1)!.init.headers as Record<string, string>;
     expect(headers["x-api-key"]).toBe("k");
@@ -117,7 +117,7 @@ describe("callMessages", () => {
         stop_reason: "end_turn",
       }),
     );
-    expect(await callMessages(fakeMessagesEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callMessages(fakeMessagesEp(), msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it("stop_reason end_turn→ok; max_tokens→degrade; refusal→content-filter skip", async () => {
@@ -134,7 +134,7 @@ describe("callMessages", () => {
     });
 
     stubFetch(() => json(200, okMessages('{"findings":[]}', { stop_reason: "end_turn" })));
-    expect(await callMessages(fakeMessagesEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callMessages(fakeMessagesEp(), msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it("retries once on 429/5xx and degrades on timeout without retry", async () => {
@@ -144,7 +144,7 @@ describe("callMessages", () => {
         ? json(429, { error: "rate limited" }, { "retry-after": "0" })
         : json(200, okMessages('{"findings":[]}')),
     );
-    expect(await callMessages(fakeMessagesEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callMessages(fakeMessagesEp(), msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(calls.length).toBe(2);
 
     // Persistent 5xx → exactly one retry (two calls, never three).

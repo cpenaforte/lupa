@@ -291,7 +291,11 @@ describe("callLlm response handling", () => {
 
   it("accepts fence-wrapped JSON content end to end", async () => {
     stubFetch(() => json(200, okChat('```json\n{"findings":[]}\n```')));
-    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
   });
 
   it("maps findings to exactly {severity,file,line?,rule,message,suggestion?}, null to undefined", async () => {
@@ -309,6 +313,7 @@ describe("callLlm response handling", () => {
         { severity: "high", file: "a.ts", rule: "r1", message: "m1" },
         { severity: "warning", file: "b.ts", line: 7, rule: "r2", message: "m2", suggestion: "fix" },
       ],
+      verdicts: { pairs: [], links: [], malformed: 0 },
     });
     expect(r.ok && "line" in r.findings[0]).toBe(false);
     expect(r.ok && "suggestion" in r.findings[0]).toBe(false);
@@ -341,6 +346,70 @@ describe("callLlm response handling", () => {
   });
 });
 
+describe("dedup verdicts (parseVerdicts via callLlm)", () => {
+  const F = (extra: Record<string, unknown> = {}) => ({
+    severity: "warning",
+    file: "a.ts",
+    line: 1,
+    rule: "r",
+    message: "m",
+    suggestion: null,
+    ...extra,
+  });
+  const CLEAN = { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m" };
+
+  it("extracts duplicates pairs and duplicateOf pointers (toFindings ignores the new keys)", async () => {
+    const content = JSON.stringify({
+      findings: [F({ duplicateOf: 1 }), F({ duplicateOf: null })],
+      duplicates: [[0, 1]],
+    });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [CLEAN, CLEAN],
+      verdicts: { pairs: [[0, 1]], links: [[0, 1]], malformed: 0 },
+    });
+  });
+
+  it("null or absent verdict keys mean empty verdicts", async () => {
+    stubFetch(() => json(200, okChat('{"findings":[]}')));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+    stubFetch(() => json(200, okChat('{"findings":[], "duplicates": null}')));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+  });
+
+  it("drops self-pairs, negative, non-integer, and non-pair entries with counts", async () => {
+    const content = JSON.stringify({
+      findings: [F({ duplicateOf: 0 }), F({ duplicateOf: -2 }), F({ duplicateOf: "x" }), F()],
+      duplicates: [[0, 0], [-1, 2], [1.5, 2], "nope", 5, null, [0, 1]],
+    });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [CLEAN, CLEAN, CLEAN, CLEAN],
+      verdicts: { pairs: [[0, 1]], links: [[0, 0]], malformed: 8 },
+    });
+  });
+
+  it("drops wrong-length pairs", async () => {
+    const content = JSON.stringify({ findings: [], duplicates: [[0], [0, 1, 2], []] });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 3 },
+    });
+  });
+});
+
 describe("retry and timeout", () => {
   it("timeout degrades without retry", async () => {
     const r = await callLlmWithTimeout(1);
@@ -350,13 +419,21 @@ describe("retry and timeout", () => {
 
   it("retries 5xx once then succeeds", async () => {
     stubFetch((_c, n) => (n === 1 ? json(503, { error: "busy" }) : json(200, okChat())));
-    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
     expect(fetchCallCount()).toBe(2);
   }, 15000);
 
   it("retries 429 honoring Retry-After", async () => {
     stubFetch((_c, n) => (n === 1 ? json(429, {}, { "retry-after": "0" }) : json(200, okChat())));
-    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
     expect(fetchCallCount()).toBe(2);
   });
 
@@ -368,7 +445,7 @@ describe("retry and timeout", () => {
     expect(fetchCallCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchCallCount()).toBe(2);
-    expect(await p).toEqual({ ok: true, findings: [] });
+    expect(await p).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it("clamps an oversized Retry-After to 5s", async () => {
@@ -379,7 +456,7 @@ describe("retry and timeout", () => {
     expect(fetchCallCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchCallCount()).toBe(2);
-    expect(await p).toEqual({ ok: true, findings: [] });
+    expect(await p).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it("without Retry-After, backs off 500ms before the retry", async () => {
@@ -390,7 +467,7 @@ describe("retry and timeout", () => {
     expect(fetchCallCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchCallCount()).toBe(2);
-    expect(await p).toEqual({ ok: true, findings: [] });
+    expect(await p).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it.each([
@@ -406,7 +483,7 @@ describe("retry and timeout", () => {
     expect(fetchCallCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchCallCount()).toBe(2);
-    expect(await p).toEqual({ ok: true, findings: [] });
+    expect(await p).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it("gives up after one retry on persistent 5xx", async () => {

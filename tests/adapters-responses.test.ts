@@ -71,7 +71,7 @@ afterEach(() => {
 describe("callResponses", () => {
   it("posts input array + max_output_tokens + strict format", async () => {
     const r = await callResponses(fakeResponsesEp(), msgs(), opts());
-    expect(r).toEqual({ ok: true, findings: [] });
+    expect(r).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(calls.at(-1)!.url).toBe("https://opencode.ai/zen/v1/responses");
     const body = lastBody();
     expect(body.model).toBe("gpt-6-luna");
@@ -97,7 +97,7 @@ describe("callResponses", () => {
       n === 1 ? json(400, { error: "unsupported format" }) : json(200, okResponses('{"findings":[]}')),
     );
     const r = await callResponses(fakeResponsesEp(), msgs(), opts());
-    expect(r).toEqual({ ok: true, findings: [] });
+    expect(r).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(calls.length).toBe(2);
     expect(JSON.parse(String(calls[0]!.init.body)).text).toBeDefined();
     expect(JSON.parse(String(calls[1]!.init.body))).not.toHaveProperty("text");
@@ -113,7 +113,7 @@ describe("callResponses", () => {
         ],
       }),
     );
-    expect(await callResponses(fakeResponsesEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callResponses(fakeResponsesEp(), msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
   });
 
   it("refusal item → content-filter skip; incomplete → degrade", async () => {
@@ -145,7 +145,7 @@ describe("callResponses", () => {
     stubFetch((_c, n) =>
       n === 1 ? json(429, { error: "rate limited" }, { "retry-after": "0" }) : json(200, okResponses('{"findings":[]}')),
     );
-    expect(await callResponses(fakeResponsesEp(), msgs(), opts())).toEqual({ ok: true, findings: [] });
+    expect(await callResponses(fakeResponsesEp(), msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(calls.length).toBe(2);
 
     // Persistent 5xx → exactly one retry (two calls, never three).
