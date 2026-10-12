@@ -25004,6 +25004,13 @@ async function readFile(args, ctx) {
   const fullContent = selected.map((l, i) => `${start + i}: ${l}`).join("\n");
   const base = { path: rel, start_line: start, end_line: actualEnd, total_lines: total };
   const serialize = (content, truncated) => JSON.stringify({ ...base, truncated, content });
+  const serializeTruncated = (cut) => {
+    const idx = cut.lastIndexOf("\n");
+    const complete = idx >= 0;
+    const visible = complete ? cut.slice(0, idx) : cut;
+    const endLine2 = complete ? start + visible.split("\n").length - 1 : start - 1;
+    return JSON.stringify({ ...base, end_line: endLine2, truncated: true, content: visible + TRUNCATION_MARKER });
+  };
   if (Buffer.byteLength(serialize(fullContent, false), "utf8") <= AGENT_LIMITS.resultBytes) {
     return okResult(JSON.parse(serialize(fullContent, false)));
   }
@@ -25011,13 +25018,13 @@ async function readFile(args, ctx) {
   let hi = fullContent.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    const candidate = serialize(codePointSafeCut(fullContent, mid) + TRUNCATION_MARKER, true);
+    const candidate = serializeTruncated(codePointSafeCut(fullContent, mid));
     if (Buffer.byteLength(candidate, "utf8") <= AGENT_LIMITS.resultBytes)
       lo = mid;
     else
       hi = mid - 1;
   }
-  return okResult(JSON.parse(serialize(codePointSafeCut(fullContent, lo) + TRUNCATION_MARKER, true)));
+  return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, lo))));
 }
 async function listDir(args, ctx) {
   const resolvedRoot = await rootFor(args, ctx);

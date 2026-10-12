@@ -121,6 +121,48 @@ describe("read_file", () => {
       expect(JSON.parse(r.output)).toHaveProperty("error");
     }
   });
+
+  it("truncated read_file reports end_line of the last fully visible line", async () => {
+    const line = "x".repeat(200);
+    for (const start of [1, 50]) {
+      const root = tempRoot();
+      writeFileSync(join(root, "wide.txt"), (line + "\n").repeat(400));
+      const r = await executeTool("read_file", { path: "wide.txt", start }, ctxFor(root));
+      expect(r.isError, `start=${start}`).toBe(false);
+      const parsed = JSON.parse(r.output);
+      expect(parsed.truncated, `start=${start}`).toBe(true);
+      expect(parsed.content, `start=${start}`).toContain("[truncated]");
+      const N = (parsed.content.match(/^\d+: /gm) ?? []).length;
+      expect(N, `start=${start}`).toBeGreaterThan(0);
+      expect(parsed.end_line, `start=${start}`).toBe(start + N - 1);
+    }
+  });
+
+  it("truncated read_file backs up to complete lines", async () => {
+    const line = "x".repeat(200);
+    const root = tempRoot();
+    writeFileSync(join(root, "wide.txt"), (line + "\n").repeat(400));
+    const r = await executeTool("read_file", { path: "wide.txt", start: 1 }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.truncated).toBe(true);
+    const N = (parsed.content.match(/^\d+: /gm) ?? []).length;
+    const segments = String(parsed.content).split("\n");
+    expect(segments[segments.length - 1]).toBe("[truncated]");
+    expect(segments[segments.length - 2]).toBe(`${N}: ${line}`);
+    expect(parsed.end_line).toBe(1 + N - 1);
+  });
+
+  it("single over-budget line shows partial content with end_line start - 1", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "two.txt"), `short\n${"x".repeat(40000)}\n`);
+    const r = await executeTool("read_file", { path: "two.txt", start: 2 }, ctxFor(root));
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.content.length).toBeGreaterThan(0);
+    expect(parsed.end_line).toBe(1);
+  });
 });
 
 describe("list_dir", () => {
