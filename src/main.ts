@@ -817,7 +817,8 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
  * computed BEFORE all early returns (dry-run, fork-readonly, stale-head) and
  * returned for the flow exits, so every exit path gates on it. The reopen read
  * (getActor + listReviewThreads) is short-circuited when every merged finding
- * is already introduced — reopen can add nothing — and any thread/infra
+ * is already introduced — reopen can add nothing — or when no token is
+ * configured (empty token: no call, no warn), and any thread/infra
  * failure falls back to diff-only gating without throwing.
  */
 async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
@@ -833,7 +834,7 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
   const { introduced } = partitionGate(merged, parsed, a.hunks);
   const introducedKeys = new Set(introduced.map(reopenedKey));
   let reopened = new Set<string>();
-  if (introduced.length < merged.length) {
+  if (introduced.length < merged.length && a.env.inputs.githubToken !== "") {
     try {
       const self = await a.deps.gh.getActor(a.pr);
       if (self === undefined) {

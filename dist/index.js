@@ -29414,7 +29414,7 @@ async function publishReview(a) {
   const { introduced } = partitionGate(merged, parsed, a.hunks);
   const introducedKeys = new Set(introduced.map(reopenedKey));
   let reopened = /* @__PURE__ */ new Set();
-  if (introduced.length < merged.length) {
+  if (introduced.length < merged.length && a.env.inputs.githubToken !== "") {
     try {
       const self = await a.deps.gh.getActor(a.pr);
       if (self === void 0) {

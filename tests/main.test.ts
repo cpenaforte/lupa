@@ -1385,6 +1385,26 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
   });
 
+  it("empty token → silent reopen skip: no gateway call, no warning, COMMENT + exit 0", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threads: [offThread], githubToken: "" });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.actorCalls).toBe(0);
+    expect(r.threadCalls).toBe(0);
+    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).includes("review actor unknown"))).toBe(false);
+  });
+
+  it("getActor throw → fail-open diff-only gating: warn, COMMENT + exit 0, no throw", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threads: [offThread], actorError: true });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).includes("review-thread re-read failed"))).toBe(true);
+  });
+
   it("all-introduced → getActor and listReviewThreads never called", async () => {
     const addedHigh: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "add-rule", message: "new high" };
     const r = await runWithMocks({ failLevel: "high", llm: [addedHigh] });
