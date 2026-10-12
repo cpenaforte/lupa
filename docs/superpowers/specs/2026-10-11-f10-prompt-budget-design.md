@@ -1,7 +1,7 @@
 # Sub-project F10: complete inference-prompt budget — design
 
 Date: 2026-10-12
-Status: design approved (2026-10-12); review rounds 1-9 applied, round 10 pending
+Status: design approved (2026-10-12); review rounds 1-10 applied, loop closed by controller (see review-rounds.md audit)
 Source: Codex audit `PROJECT_FINDINGS.md` (F10), local HEAD `885adea`
 Goal: bound the variable user-message portion of the single-shot inference request — fast findings, linked-issue
 context, and diff together — with sanitized evidence, separate allowances, and
@@ -25,8 +25,10 @@ explicit omission records.
   180,000 bytes > the 120,000-byte default): accepted as intended — the budget is a
   cost/surprise control, the skip warns with both sizes, and the knob is tunable.
   README states this plainly.
-- Sanitize-before-prompt: fast findings are sanitized once at Flow A construction,
-  before both prompt assembly and artifact writes.
+- Sanitize-before-prompt: fast findings are sanitized in a prompt-only copy, never
+  in place (artifacts byte-identical by construction). `promptFast` is computed inside
+  `slowPath`, right where the regions enter (after the key/model/endpoint/ollama/model-check
+  preconditions, before the single budgeted assembly) — one place, both paths.
 - Ship with the whole-plan release — no tag for F10 alone (standing instruction:
   release after the conclusion of the whole roadmap plan).
 
@@ -89,7 +91,7 @@ budgetPrompt(
   issueBody: string | undefined,
   skipped: string[],
   budget: number,
-): { fast: Finding[]; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean }
+): { fast: Finding[]; promptText: string; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean }
 ```
 
 It takes the same structured regions `buildMessages` renders (never string surgery
@@ -115,7 +117,7 @@ Omitted <M> fast finding(s) to fit the prompt budget.
 
 Cut order, each leaving its explicit record:
 
-1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + issueOverhead)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count — step 1 sizes with `omitted = 0`, step 2 re-computes with the running count) and `issueOverhead` is the whole fixed cost of carrying any issue text (`## Linked issue…` header + `\n\n` separators + `<linked-issue>` tags + marker, all as exact `Buffer.byteLength` values computed in code, ≈145 bytes total — nothing estimated, nothing double-counted). `budgetPrompt` neutralises every region FIRST — issue text, diff text, and the findings-JSON `<`→`\\u003c` escaping (applied to the serialized JSON exactly as `buildMessages` does at `prompt.ts:50`; `fast` itself stays structured — the escape lives on the measured/rendered string, not in the objects), identical to `buildMessages` (`prompt.ts:50,59,62`) — which requires exporting `neutralise` plus the issue header/tags/marker as constants from `src/prompt.ts` (listed as plan change sites; neutralise is idempotent so `buildMessages` re-rendering is a no-op). Every measurement and cut operates on the neutralised regions; the returned `issueBody`/`promptText` strings are already neutralised (`fast` objects pass through — only their serialized form is escaped, at render). If the full block fits, it is kept uncut (no marker). Otherwise truncate to the allowance with the marker (balanced tags); when the allowance is negative, drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling). No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget.
+1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + issueOverhead)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count — step 1 sizes with `omitted = 0`, step 2 re-computes with the running count) and `issueOverhead` is the whole fixed cost of carrying any issue text (`## Linked issue…` header + `\n\n` separators + `<linked-issue>` tags + marker, all as exact `Buffer.byteLength` values computed in code, ≈145 bytes total — nothing estimated, nothing double-counted). `budgetPrompt` neutralises every region FIRST — issue text, diff text, skipped-file names, and the findings-JSON `<`→`\\u003c` escaping (applied to the serialized JSON exactly as `buildMessages` does at `prompt.ts:50`; `fast` itself stays structured — the escape lives on the measured/rendered string, not in the objects), identical to `buildMessages` (`prompt.ts:50,55,59,62`) — which requires exporting `neutralise` plus the issue header/tags/marker as constants from `src/prompt.ts` (listed as plan change sites; neutralise is idempotent so `buildMessages` re-rendering is a no-op). Every measurement and cut operates on the neutralised regions; the returned `issueBody`/`promptText` strings are already neutralised (`fast` objects pass through — only their serialized form is escaped, at render). The 6-arg call passes the returned regions (`b.promptText`, `b.issueBody`). If the full block fits, it is kept uncut (no marker). Otherwise truncate to the allowance with the marker (balanced tags); when the allowance is negative, drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling). No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget.
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
