@@ -36,7 +36,9 @@ explicit omission records.
 three unbounded regions — fast findings (full message text, no cap), linked-issue
 body (whole issue text), and the diff (the only capped region, via `maxDiffChars` +
 `PER_FILE_CAP`) — with no whole-request budget. A single 100,000-character TODO line
-produces a ~108,000-character user message against a 60,000 diff cap. Worse,
+produces an 8,000-character truncated diff excerpt (the `PER_FILE_CAP` cut), yet a
+~108,000-character user message — the finding repeats the full 100,000-character line
+outside any cap. Worse,
 `sanitizeFinding` runs after the LLM call (`src/main.ts:822`), so unsanitized
 evidence (control characters, over-long fields) enters inference, and the early
 artifact write (`:805`) persists it before the LLM call.
@@ -65,7 +67,10 @@ max_prompt_chars:
 
 `ActionInputs.maxPromptChars: number` (required, like `maxDiffChars`) via
 `readInt("max_prompt_chars", 120000, 1)`. README documents it beside
-`max_diff_chars` with the unit note. The two typed `ActionInputs` literals in the
+`max_diff_chars` with the unit note, and the Cost ceiling bullet is updated: the spend
+bound is now `max_prompt_chars` (keeping the pinned "about 3k input and 600 output
+tokens" comparison sentence — `tests/readme.test.ts:50` pins it — with the figures
+recomputed for the new default). The two typed `ActionInputs` literals in the
 tracked suite (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`) gain the field —
 listed as plan change sites. Budget covers the user message only; the fixed system
 prompt (~1.5 KB, plus ~480 B agent addendum on that path) is excluded by design
@@ -93,9 +98,11 @@ rendering the prose line after the findings JSON when > 0 (single-shot callers p
 `undefined` for `agent`: `buildMessages(fast, promptText, issueBody, skipped, undefined, omitted)`).
 Still a pure function; existing 4- and 5-arg callers and tests are unaffected. There is
 exactly ONE budgeted assembly: `budgetPrompt` + `buildMessages` run once before the
-`if (i.llmAgent)` branch, and both paths consume its outputs (the agent path adds
-tools/turns around the same message). Add one agent-path assertion that the `Tool budget`
-addendum survives an omission. Agent tool-round accumulation is F11 and
+`if (i.llmAgent)` branch with the full 6-arg call
+`buildMessages(b.fast, promptText, b.issueBody, b.skipped, i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : undefined, b.findingsOmitted)`,
+and both paths consume its outputs (the agent path adds
+tools/turns around the same message). The caller algorithm is fixed (no invention):
+`const b = budgetPrompt(fast, promptText, issueBody, skipped, budget); const m = buildMessages(...); const bytes = Buffer.byteLength(m.user, "utf8"); const diffBytes = Buffer.byteLength("<untrusted-diff>\n" + promptText + "\n</untrusted-diff>", "utf8"); if (diffBytes > budget || bytes > budget) skip with the size-naming warning.` Add one agent-path test asserting the rendered agent user message contains the omission line when findings are omitted (the `Tool budget` addendum lives in `system` and is unaffected by construction — the assertion pins the 6th-arg wiring, not the addendum). Agent tool-round accumulation is F11 and
 out of scope (no agent-path budget test). Ordering within the slow path is unchanged
 and deliberate: key/model/endpoint checks, `ensureOllama`, and `checkModelListed`
 (`:520`) run before assembly + budget — authoritative preconditions first (a budget
@@ -112,11 +119,20 @@ Cut order, each leaving its explicit record:
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
-   first, toolchain L2 last — no severity reordering, no policy change).
+   first, toolchain L2 last — no severity reordering, no policy change). The issue
+   allowance is computed once against the full findings set and never re-expanded:
+   step 2 does not restore issue text (literal approved order, stated so no reader
+   infers recomputation from "re-measures after every cut" — re-measurement covers
+   the running total only).
 3. **Diff**: never cut below its own contract. If the diff section alone exceeds the
    budget, or anything remains over budget after (1)+(2), the slow path skips with
    a warning naming both sizes
    (`prompt <bytes> exceeds max_prompt_chars <budget> after bounded cuts`).
+`budgetPrompt` is exported (tests import it from `src/main.ts`, which already imports
+it). `skipped` passes through unchanged and `issueDropped` is derivable from inputs —
+both stay in the return shape because the single 6-arg `buildMessages` call needs all
+regions plus both flags in one place. The agent-mode linked-repos `conv.turns` user
+message (`:589`) sits outside the budget (agent-turn context, F11).
 
 The cut affects model context only: posting and artifacts use the full `fast`
 array (`all` at `:822`), so omitted findings still reach the review.
@@ -142,13 +158,13 @@ stated explicitly, out of scope).
 
 ## 3. Tests
 
-`tests/prompt.test.ts` (pure assembler — unchanged) plus `tests/main.test.ts`
+`tests/prompt.test.ts` (assembler unchanged; renderer tests added) plus `tests/main.test.ts`
 `describe("prompt budget")` (TDD; small `maxPromptChars` overrides, e.g. 2000, so
 fixtures stay small — one 4,000-character TODO line no longer suffices since
 `MSG_CAP` bounds each finding and the overflow needs many findings or a small budget):
 
 - Oversized issue body truncates with the marker; tags stay balanced; rest intact.
-- Issue block dropped when the allowance cannot fit marker + tags (tiny budget + issue → `issueDropped`, `issueBody` undefined, review proceeds without issue context).
+- Issue block dropped when the allowance cannot fit marker + tags: budget 3,000 with a ~2,000-byte diff and a ~5,000-byte issue → `issueDropped`, `issueBody` undefined, review proceeds without issue context (deterministic window: above framing + tags + marker, below diff + framing + issue).
 - Fast-findings overflow drops whole tail findings with an exact omitted count rendered
   as the prose line after the findings JSON; the surviving JSON parses.
 - Diff is never cut below `maxDiffChars` (over-budget fixture with maxed diff →
@@ -160,7 +176,9 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
   budget alone) + 100 skipped files (note capped at 20 ≈ 700 B) + framing ≈ 200 B, with
   a linked issue and fast findings present: issue dropped, findings dropped to zero,
   yet diff + note + framing ≈ 6,100 > 6,000 → skip (pins the branch where cuts are
-  exhausted yet the total still overflows).
+  exhausted yet the total still overflows; `maxDiffChars: 5500` with the 5.2 KB file
+  first in patch order so exactly it is included and 25 tiny files skip — the test
+  computes exact `Buffer.byteLength` sums rather than asserting magic constants).
 - Pure-renderer tests in `tests/prompt.test.ts`: the `omitted` prose line renders after
   the findings JSON via the 6th param; the skipped-files list caps at 20 with the
   `…and <N> more` line (both pure `buildMessages` assertions, no budget needed).
@@ -169,8 +187,8 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
   note the `--- path` headers and trailing newline count toward `maxChars`, so 7,500
   would total ≈60,240 and skip the 8th file)
   with default 120,000-byte budget skips — this is intended default-config behavior for
-  non-ASCII-heavy PRs, pinned so the unit fix cannot regress.
-- Skipped-files cap: >20 skipped paths render 20 + the `…and <N> more` line.
+  diffs averaging over 2 bytes per UTF-16 unit (CJK, Cyrillic, Greek, accented Latin —
+  the bytes-versus-units rule, not a script list), pinned so the unit fix cannot regress.
 - `tests/inputs.test.ts`: `maxPromptChars` defaults to 120,000; add `max_prompt_chars`
   to `INPUT_NAMES` and the smoke-test declared-inputs list; 0/negative/non-numeric
   are rejected naming the input (`readInt` floor 1 = minimum accepted, never a clamp),
