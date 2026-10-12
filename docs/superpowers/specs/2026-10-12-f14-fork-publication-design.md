@@ -61,15 +61,20 @@ The template:
   token. The old two-value writability comparison becomes
   `!== 'github-token'`; `tokenIsApp` keeps its exact App-only meaning
   everywhere else, including the L2 scrub at `main.ts:927`).
-- Adds a guard step immediately after the App step (`if:
-  steps.app.outcome != 'success'`, before the download): without an App token
-  it emits a `::notice::` annotation AND appends the same line to
+- Adds a guard step immediately after the App step (`if: always() &&
+  steps.app.outcome != 'success'`, before the download): without a usable App
+  token it emits a `::notice::` annotation AND appends the same line to
   `$GITHUB_STEP_SUMMARY` (annotations from a `workflow_run` attach to the
   default-branch commit, not the PR head — the run summary is the honest
-  location; the posted review itself is the PR-visible signal). Exact text:
-  `::notice::lupa: posting fork review with the workflow-run token (no App
-  configured). For App-token posting set PR_REVIEWER_APP_ID / PR_REVIEWER_APP_KEY —
-  see README (fork reviews)`. Downgrade visible, never silent.
+  location; the posted review itself is the PR-visible signal). The App step
+  gets `continue-on-error: true`: a misconfigured App (bad key) falls back to
+  the workflow-run token with the notice instead of red-ing the job with no
+  review — resilience with equal visibility (ruled: availability wins, the
+  notice names the downgrade). Exact text: `::notice::lupa: posting fork
+  review with the workflow-run token (App token unavailable). For App-token
+  posting set PR_REVIEWER_APP_ID / PR_REVIEWER_APP_KEY — see README (fork
+  reviews)`. Downgrade visible, never silent. The guard text and placement
+  are pinned in `templates.test.ts`.
 - Pins explicit `fail_level: warning` in the Post step's `with:` block
   (today it inherits the action default silently).
 
@@ -81,8 +86,11 @@ The template:
   missing type must never post on a fork). Named updates: `main.test.ts`
   fakes, `tests/evals/types.ts` (`Pick`), `tests/evals/harness.ts`
   (`defaultInputs`), `tests/fixtures/evals/cases.ts` read-only fork case.
-  `README.md:163-168` (forks read-only / App-token text) is updated to the
-  new chain.
+  `README.md:163-168` (forks read-only / App-token text) is rewritten to the
+  new chain (required content: the workflow-run token is the default posting
+  credential on fork PRs; App token via `PR_REVIEWER_APP_ID` /
+  `PR_REVIEWER_APP_KEY` is the recommended upgrade; with neither, the run
+  skips posting with a loud warning).
 - `canWrite = !isFork || tokenType === 'app' || tokenType === 'workflow-run'`
   (exact): App and workflow-run tokens both write; fork-context
   `github-token`, unset, and unknown never write. Matrix (fork): app→post,
@@ -126,11 +134,16 @@ pinned in `templates.test.ts`; `fail_level` parity case (divergence fails);
 producer-threshold-ignored proof (artifact carrying any `fail_level`-shaped
 field changes nothing — assert the event from a fixture, not the field).
 
-Consumer canary (owner-run, required): a fork PR against test-lupa with a
-warning-severity finding and NO App configured — expect a posted review with
-event COMMENT under the workflow-run token plus the downgrade line in the
-post run's summary/annotations; then with App configured — expect the notice
-gone. Record verdicts in the implementation report. (Pre-existing residual,
+Consumer canary (owner-run, required): F14 keeps the pinned `658ab55`
+(v0.5.0) SHA — that release predates the feature, so the canary points
+test-lupa's privileged template at the F14 commit SHA (committed `dist/`
+included). Then: a fork PR against test-lupa with a warning-severity finding
+and NO App configured — expect a posted review with event COMMENT under the
+workflow-run token plus the downgrade line in the post run's
+summary/annotations; then with App configured — expect the notice gone.
+Record verdicts in the implementation report. The whole-plan release re-pins
+both templates to the release tag (with the `templates.test.ts` v0.5.0
+literal) — not this stage. (Pre-existing residual,
 out of scope: `readFindings`/pr-mismatch throws under the Post step's
 `continue-on-error: true` still produce no review while green — loud in logs,
 unchanged by this design.)
