@@ -64,7 +64,7 @@ max_prompt_chars:
 `max_diff_chars` with the unit note. The two typed `ActionInputs` literals in the
 tracked suite (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`) gain the field —
 listed as plan change sites. Budget covers the user message only; the fixed system
-prompt (~1.5 KB, plus ~400 B agent addendum on that path) is excluded by design
+prompt (~1.5 KB, plus ~480 B agent addendum on that path) is excluded by design
 (stated, not counted).
 
 ### Budget enforcement
@@ -147,14 +147,20 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 - Diff is never cut below `maxDiffChars` (over-budget fixture with maxed diff →
   slow-path skip, not a cut diff).
 - Still-over-budget-after-cuts skips with the size-naming warning; no LLM call.
-  Fixture: ASCII diff at default `maxDiffChars` scale with `maxPromptChars: 1000`
-  (diff section alone exceeds the budget — deterministic, no multibyte needed).
-- Multibyte floor: CJK-heavy diff at 60,000 UTF-16 units (~180,000 bytes) with default
-  120,000-byte budget skips — this is intended default-config behavior for
+  Two fixtures: (a) diff-alone: ASCII diff at default `maxDiffChars` scale with
+  `maxPromptChars: 1000` (diff section alone exceeds the budget — deterministic, no
+  multibyte needed); (b) after-cuts: small diff that fits, but diff + framing +
+  a 100-file skipped-files note exceed a 6,000-byte budget after issue and findings
+  are dropped (pins the branch where cuts are exhausted yet the total still overflows).
+- Multibyte floor: 8 files of ~7,500 CJK units each (60,000 UTF-16 units ≈ 180,000
+  bytes; each file under the 8,000-unit `PER_FILE_CAP` so no per-file cut shrinks it)
+  with default 120,000-byte budget skips — this is intended default-config behavior for
   non-ASCII-heavy PRs, pinned so the unit fix cannot regress.
 - Skipped-files cap: >20 skipped paths render 20 + the `…and <N> more` line.
-- `tests/inputs.test.ts`: `maxPromptChars` defaults to 120,000; small/zero/negative
-  values are floored by `readInt` (floor 1); non-numeric rejected like its neighbors.
+- `tests/inputs.test.ts`: `maxPromptChars` defaults to 120,000; add `max_prompt_chars`
+  to `INPUT_NAMES` and the smoke-test declared-inputs list; 0/negative/non-numeric
+  are rejected naming the input (`readInt` floor 1 = minimum accepted, never a clamp),
+  `1` accepted.
 - Control characters / over-long fields in fast findings are stripped/capped in the
   captured prompt (pre-LLM sanitization).
 - `ActionInputs` fixture updates (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`).
@@ -172,5 +178,6 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 
 F11 (agent/whole-review deadlines and tool-round accumulation — only the initial
 single-shot assembly is budgeted here), F15 (aggregate output limits), Q01–Q04,
-F14, template/CI changes, other new inputs or dependencies, touching
-`buildMessages`' assembly contract, redacting the prompt path.
+F14, template/CI changes, other new inputs or dependencies, redacting the prompt path.
+(`buildMessages` keeps its regions and order — the `omitted` parameter and the
+20-entry skipped-list cap are the two approved extensions.)
