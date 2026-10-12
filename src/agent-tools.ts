@@ -288,7 +288,7 @@ export function matchGlob(path: string, glob: string): boolean {
   return prev[m];
 }
 
-export interface WalkFile {
+interface WalkFile {
   abs: string;
   rel: string;
 }
@@ -328,6 +328,7 @@ export interface WalkSkipped {
   oversized: number;
   binary: number;
   overLimit: number;
+  pruned: number;
 }
 
 const WALK_DEFAULT_MAX_FILES = 10_000;
@@ -342,7 +343,7 @@ const WALK_DEFAULT_DEADLINE_MS = 10_000;
 const PRUNE_DIR_NAMES = new Set(["node_modules", "vendor", "target", ".venv", "venv", "__pycache__"]);
 
 function zeroSkipped(): WalkSkipped {
-  return { oversized: 0, binary: 0, overLimit: 0 };
+  return { oversized: 0, binary: 0, overLimit: 0, pruned: 0 };
 }
 
 /** True for entries the walk deliberately skips without touching the counter. */
@@ -407,7 +408,7 @@ function walkCore(
   }
 
   if (startStat.isFile()) {
-    if (0 >= maxFiles) {
+    if (maxFiles <= 0) {
       skipped.overLimit = 1;
       return { truncated: true, skipped };
     }
@@ -434,7 +435,10 @@ function walkCore(
     // so the walk can overshoot the deadline by one directory's processing time.
     for (let i = 0; i < dirents.length; i++) {
       const d = dirents[i];
-      if (isWalkSkippedEntry(d)) continue;
+      if (isWalkSkippedEntry(d)) {
+        if (d.isDirectory() && PRUNE_DIR_NAMES.has(d.name)) skipped.pruned++;
+        continue;
+      }
       if (examined >= maxFiles) {
         skipped.overLimit = countQueuedRemainder(dirents, i) + stack.length;
         return { truncated: true, skipped };
@@ -679,7 +683,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "grep",
-    description: "Search file contents with a JavaScript regular expression, returning matching lines.",
+    description: "Search file contents with a JavaScript regular expression, returning matching lines. Skips dependency directories (node_modules, vendor, target, .venv, venv, __pycache__) and .git.",
     parameters: {
       type: "object",
       properties: {
@@ -694,7 +698,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "glob",
-    description: "List repository-relative paths matching a glob pattern.",
+    description: "List repository-relative paths matching a glob pattern. Skips dependency directories (node_modules, vendor, target, .venv, venv, __pycache__) and .git.",
     parameters: {
       type: "object",
       properties: {

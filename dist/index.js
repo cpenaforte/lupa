@@ -25143,7 +25143,7 @@ var WALK_DEFAULT_MAX_FILES = 1e4;
 var WALK_DEFAULT_DEADLINE_MS = 1e4;
 var PRUNE_DIR_NAMES = /* @__PURE__ */ new Set(["node_modules", "vendor", "target", ".venv", "venv", "__pycache__"]);
 function zeroSkipped() {
-  return { oversized: 0, binary: 0, overLimit: 0 };
+  return { oversized: 0, binary: 0, overLimit: 0, pruned: 0 };
 }
 function isWalkSkippedEntry(d) {
   if (d.name.toLowerCase() === ".git")
@@ -25175,7 +25175,7 @@ function walkCore(root, startAbs, limits, visitFile) {
     return { truncated: false, skipped };
   }
   if (startStat.isFile()) {
-    if (0 >= maxFiles) {
+    if (maxFiles <= 0) {
       skipped.overLimit = 1;
       return { truncated: true, skipped };
     }
@@ -25200,8 +25200,11 @@ function walkCore(root, startAbs, limits, visitFile) {
     }
     for (let i = 0; i < dirents.length; i++) {
       const d = dirents[i];
-      if (isWalkSkippedEntry(d))
+      if (isWalkSkippedEntry(d)) {
+        if (d.isDirectory() && PRUNE_DIR_NAMES.has(d.name))
+          skipped.pruned++;
         continue;
+      }
       if (examined >= maxFiles) {
         skipped.overLimit = countQueuedRemainder(dirents, i) + stack.length;
         return { truncated: true, skipped };
@@ -25390,7 +25393,7 @@ var TOOL_DEFS = [
   },
   {
     name: "grep",
-    description: "Search file contents with a JavaScript regular expression, returning matching lines.",
+    description: "Search file contents with a JavaScript regular expression, returning matching lines. Skips dependency directories (node_modules, vendor, target, .venv, venv, __pycache__) and .git.",
     parameters: {
       type: "object",
       properties: {
@@ -25405,7 +25408,7 @@ var TOOL_DEFS = [
   },
   {
     name: "glob",
-    description: "List repository-relative paths matching a glob pattern.",
+    description: "List repository-relative paths matching a glob pattern. Skips dependency directories (node_modules, vendor, target, .venv, venv, __pycache__) and .git.",
     parameters: {
       type: "object",
       properties: {

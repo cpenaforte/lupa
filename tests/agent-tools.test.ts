@@ -3,7 +3,16 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AGENT_LIMITS } from "../src/agent-types.js";
-import { TOOL_DEFS, executeTool, grepInRoot, isBinaryFile, matchGlob, resolveWithinRoot, walkFiles, walkPaths } from "../src/agent-tools.js";
+import {
+  TOOL_DEFS,
+  executeTool,
+  grepInRoot,
+  isBinaryFile,
+  matchGlob,
+  resolveWithinRoot,
+  walkFiles,
+  walkPaths,
+} from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 
 const created: string[] = [];
@@ -211,6 +220,13 @@ describe("TOOL_DEFS", () => {
       expect(typeof def.description).toBe("string");
       walk(def.parameters, def.name);
     }
+  });
+
+  it("tool descriptions name the prune set", async () => {
+    const glob = TOOL_DEFS.find((t) => t.name === "glob")!;
+    const grep = TOOL_DEFS.find((t) => t.name === "grep")!;
+    expect(glob.description).toContain("node_modules");
+    expect(grep.description).toContain("node_modules");
   });
 });
 
@@ -459,7 +475,7 @@ describe("glob pure discovery", () => {
     const keep = JSON.parse((await executeTool("grep", { pattern: "keep" }, ctx)).output);
     expect(keep.matches.map((m: { file: string }) => m.file)).toContain("src/keep.ts");
     expect(keep.files_scanned).toBe(5);
-    expect(keep.skipped).toEqual({ oversized: 0, binary: 0, overLimit: 0 });
+    expect(keep.skipped).toEqual({ oversized: 0, binary: 0, overLimit: 0, pruned: 7 });
   });
 
   it("glob caps at 200 paths", async () => {
@@ -482,7 +498,7 @@ describe("grep skips and bounded walks", () => {
     const r = await executeTool("grep", { pattern: "marker" }, ctxFor(root));
     expect(r.isError).toBe(false);
     const parsed = JSON.parse(r.output);
-    expect(parsed.skipped).toEqual({ oversized: 1, binary: 1, overLimit: 0 });
+    expect(parsed.skipped).toEqual({ oversized: 1, binary: 1, overLimit: 0, pruned: 0 });
     expect(parsed.files_scanned).toBe(1);
   });
 
@@ -630,6 +646,17 @@ describe("grep skips and bounded walks", () => {
     expect(one.skipped.overLimit).toBe(0);
   });
 
+  it("generous deadline never fires", async () => {
+    const root = tempRoot();
+    for (let i = 0; i < 30; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+    const r = await grepInRoot(root, { pattern: "x" }, 5000, { deadlineMs: 60000 });
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.output);
+    expect(parsed.truncated).toBe(false);
+    expect(parsed.skipped.overLimit).toBe(0);
+    expect(parsed.skipped.pruned).toBe(0);
+  });
+
   it("single-file start paths count eligibility skips", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "big.ts"), "x".repeat(1024 * 1024 + 1));
@@ -659,7 +686,7 @@ describe("grep skips and bounded walks", () => {
 
     const over = walkFiles(root, join(root, "big.ts"), { maxFiles: 0 });
     expect(over.truncated).toBe(true);
-    expect(over.skipped).toEqual({ oversized: 0, binary: 0, overLimit: 1 });
+    expect(over.skipped).toEqual({ oversized: 0, binary: 0, overLimit: 1, pruned: 0 });
   });
 
   it("isBinaryFile treats open failure as binary (unreadable fold)", async () => {
