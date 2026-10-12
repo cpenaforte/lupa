@@ -255,6 +255,7 @@ export async function ensureLinkedRepo(
 
   const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
   if (head === "expired") {
+    removeDir(dir);
     return { error: deadlineExceeded };
   }
   writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });

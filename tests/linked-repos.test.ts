@@ -494,4 +494,27 @@ describe("deadline-aware linked clones (F11)", () => {
     expect(argv.some((a) => a[0] === "clone")).toBe(false);
     expect(existsSync(dir)).toBe(true);
   });
+
+  it("cloneHead expiry removes the just-created dir (fresh residue, not a cache)", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "a__b");
+    const argv: string[][] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, args) => {
+        argv.push(args);
+        if (args[0] === "clone") {
+          // Sleep past the 100 ms deadline, then succeed: the clone lands,
+          // but cloneHead finds the budget exhausted. One-sided timing.
+          await new Promise((r) => setTimeout(r, 300));
+          mkdirSync(args[args.length - 1]!, { recursive: true });
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    const res = await ensureLinkedRepo("a/b", { token: "", baseDir, deps, deadlineMs: Date.now() + 100 });
+    expect("error" in res ? res.error : "").toContain("deadline exceeded");
+    expect(argv.some((a) => a[0] === "clone")).toBe(true);
+    expect(existsSync(dir)).toBe(false);
+  });
 });
