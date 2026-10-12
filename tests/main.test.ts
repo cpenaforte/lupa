@@ -13,6 +13,12 @@ import { budgetPrompt, cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPa
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
+import {
+  DEFAULT_MAX_ARTIFACT_BYTES,
+  DEFAULT_MAX_FINDINGS,
+  DEFAULT_MAX_INLINE_COMMENTS,
+  DEFAULT_MAX_REVIEW_BODY_CHARS,
+} from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
 import { ReadonlyTokenError, StaleHeadError } from "../src/github.js";
 import type { ReviewPayload } from "../src/review.js";
@@ -177,6 +183,10 @@ function inputsFor(o: MockOpts): ActionInputs {
     failLevel: o.failLevel ?? "warning",
     maxDiffChars: o.maxDiffChars ?? 60000,
     maxPromptChars: o.maxPromptChars ?? 120000,
+    maxFindings: o.maxFindings ?? DEFAULT_MAX_FINDINGS,
+    maxInlineComments: o.maxInlineComments ?? DEFAULT_MAX_INLINE_COMMENTS,
+    maxReviewBodyChars: o.maxReviewBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS,
+    maxArtifactBytes: o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES,
     postComment: o.postComment ?? true,
     timeoutSeconds: 90,
     prNumber: o.prNumber === undefined ? 7 : o.prNumber,
@@ -209,6 +219,14 @@ interface MockOpts {
   maxPromptChars?: number;
   /** Diff ceiling override (default 60000, the real default). */
   maxDiffChars?: number;
+  /** Total findings published (inline + body) override (default 200, the real default). */
+  maxFindings?: number;
+  /** Inline comments posted per review override (default 30, the real default). */
+  maxInlineComments?: number;
+  /** Maximum review body size in Unicode code points override (default 60000, the real default). */
+  maxReviewBodyChars?: number;
+  /** Maximum artifact read bytes override (default 8388608, the real default). */
+  maxArtifactBytes?: number;
   /** Issue body returned by the getIssueBody fake (default "issue text"). */
   issueBody?: string;
   llm?: Finding[];
@@ -395,6 +413,10 @@ interface PrivOpts {
   liveRef?: string;
   liveSha?: string;
   diff?: string;
+  maxArtifactBytes?: number;
+  maxFindings?: number;
+  maxInlineComments?: number;
+  maxReviewBodyChars?: number;
 }
 
 /** Fluxo B. Analysis methods throw: the privileged flow must never call scanners, L2 or the LLM. */
@@ -428,7 +450,12 @@ async function runPrivileged(o: PrivOpts = {}) {
         conclusion: "success",
       },
     },
-    inputs: inputsFor({}),
+    inputs: inputsFor({
+      maxArtifactBytes: o.maxArtifactBytes,
+      maxFindings: o.maxFindings,
+      maxInlineComments: o.maxInlineComments,
+      maxReviewBodyChars: o.maxReviewBodyChars,
+    }),
     workDir: root,
     artifactDir,
     baseSha: SHA_BASE,

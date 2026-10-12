@@ -50,6 +50,10 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | `fail_level` | `warning` | `none`, `warning` or `high`. See the gate section. |
 | `max_diff_chars` | `60000` | Diff ceiling sent to the LLM. |
 | `max_prompt_chars` | `120000` | Total UTF-8 byte budget for the assembled LLM user message (diff, findings, issue context, headers, skipped-files note); the fixed system prompt is excluded. Note: `max_diff_chars` is counted in UTF-16 code units, not bytes. |
+| `max_findings` | `200` | Total findings published (inline + body). |
+| `max_inline_comments` | `30` | Inline comments posted per review. |
+| `max_review_body_chars` | `60000` | Maximum review body size in Unicode code points. |
+| `max_artifact_bytes` | `8388608` | Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts. |
 | `post_comment` | `true` | `false` makes a dry-run. |
 | `timeout_seconds` | `90` | LLM request timeout. A timeout degrades to a summary without retry. |
 

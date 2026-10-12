@@ -25668,6 +25668,10 @@ var LLM_API_STYLES = [
   "google-models",
   "custom-path"
 ];
+var DEFAULT_MAX_FINDINGS = 200;
+var DEFAULT_MAX_INLINE_COMMENTS = 30;
+var DEFAULT_MAX_REVIEW_BODY_CHARS = 6e4;
+var DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
 function parseFailLevel(v) {
   if (v === "none" || v === "warning" || v === "high")
     return v;
@@ -25736,6 +25740,10 @@ function getInputs() {
     failLevel: parseFailLevel(readString("fail_level", "warning")),
     maxDiffChars: readInt("max_diff_chars", 6e4, 1),
     maxPromptChars: readInt("max_prompt_chars", 12e4, 1),
+    maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
+    maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1),
+    maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1e3),
+    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1),
     postComment: readBool("post_comment", true),
     timeoutSeconds: readInt("timeout_seconds", 90, 1),
     prNumber,

@@ -77,6 +77,22 @@ inputs:
     description: "Wall-clock budget in seconds for the agent tool loop"
     required: false
     default: "180"
+  max_findings:
+    description: "Total findings published (inline + body)"
+    required: false
+    default: "200"
+  max_inline_comments:
+    description: "Inline comments posted per review"
+    required: false
+    default: "30"
+  max_review_body_chars:
+    description: "Maximum review body size in Unicode code points"
+    required: false
+    default: "60000"
+  max_artifact_bytes:
+    description: "Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts"
+    required: false
+    default: "8388608"
 outputs:
   exit-code:
     description: "fail_level gate result: 0 pass, 2 warning findings, 1 high-severity findings"

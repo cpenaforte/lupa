@@ -3,6 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ActionInputs } from "../../src/inputs.js";
+import {
+  DEFAULT_MAX_ARTIFACT_BYTES,
+  DEFAULT_MAX_FINDINGS,
+  DEFAULT_MAX_INLINE_COMMENTS,
+  DEFAULT_MAX_REVIEW_BODY_CHARS,
+} from "../../src/inputs.js";
 import { ReadonlyTokenError, StaleHeadError } from "../../src/github.js";
 import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/main.js";
 import type { LlmResult } from "../../src/llm.js";
@@ -31,6 +37,10 @@ function defaultInputs(): ActionInputs {
     failLevel: "warning",
     maxDiffChars: 60000,
     maxPromptChars: 120000,
+    maxFindings: DEFAULT_MAX_FINDINGS,
+    maxInlineComments: DEFAULT_MAX_INLINE_COMMENTS,
+    maxReviewBodyChars: DEFAULT_MAX_REVIEW_BODY_CHARS,
+    maxArtifactBytes: DEFAULT_MAX_ARTIFACT_BYTES,
     postComment: true,
     timeoutSeconds: 1,
     prNumber: null,

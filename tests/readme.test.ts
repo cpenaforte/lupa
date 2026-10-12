@@ -77,6 +77,10 @@ describe("README", () => {
       "llm_agent",
       "llm_agent_max_turns",
       "llm_agent_max_seconds",
+      "max_findings",
+      "max_inline_comments",
+      "max_review_body_chars",
+      "max_artifact_bytes",
       "read_file",
       "stop=final",
     ]) {

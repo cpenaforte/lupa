@@ -41,6 +41,10 @@ export interface ActionInputs {
   failLevel: FailLevel;
   maxDiffChars: number;
   maxPromptChars: number;
+  maxFindings: number;
+  maxInlineComments: number;
+  maxReviewBodyChars: number;
+  maxArtifactBytes: number;
   postComment: boolean;
   timeoutSeconds: number;
   prNumber: number | null;
@@ -48,6 +52,11 @@ export interface ActionInputs {
   llmAgentMaxTurns: number;
   llmAgentMaxSeconds: number;
 }
+
+export const DEFAULT_MAX_FINDINGS = 200;
+export const DEFAULT_MAX_INLINE_COMMENTS = 30;
+export const DEFAULT_MAX_REVIEW_BODY_CHARS = 60000;
+export const DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
 
 export function parseFailLevel(v: string): FailLevel {
   if (v === "none" || v === "warning" || v === "high") return v;
@@ -118,6 +127,10 @@ export function getInputs(): ActionInputs {
     failLevel: parseFailLevel(readString("fail_level", "warning")),
     maxDiffChars: readInt("max_diff_chars", 60000, 1),
     maxPromptChars: readInt("max_prompt_chars", 120000, 1),
+    maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
+    maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1),
+    maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1000),
+    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1),
     postComment: readBool("post_comment", true),
     timeoutSeconds: readInt("timeout_seconds", 90, 1),
     prNumber,
