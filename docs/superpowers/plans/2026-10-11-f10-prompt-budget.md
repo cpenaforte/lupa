@@ -50,7 +50,21 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/inputs.test.ts` (extend `INPUT_NAMES`, add default + reject/accept cases following the `max_diff_chars` cases at `:215-248`); in `tests/smoke.test.ts` (add the name to the declared-inputs list); in `tests/prompt.test.ts` (new `describe("budget rendering")` with the omitted-line + 20-cap tests).
+```ts
+// tests/prompt.test.ts — new describe("budget rendering"):
+it("renders the omission line via the 6th param", () => {
+  const m = buildMessages([], "DIFF", undefined, [], undefined, 3);
+  expect(m.user).toContain("\n\nOmitted 3 fast finding(s) to fit the prompt budget.");
+  expect(buildMessages([], "DIFF").user).not.toContain("Omitted ");
+});
+it("caps the skipped-files list at 20 with a count", () => {
+  const skipped = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`);
+  const m = buildMessages([], "DIFF", undefined, skipped);
+  expect(m.user).toContain("- …and 5 more omitted from this note");
+  expect(m.user.match(/^- src\/f\d+\.ts$/gm)).toHaveLength(20);
+});
+```
+In `tests/inputs.test.ts` (extend `INPUT_NAMES`, add default + reject/accept cases following the `max_diff_chars` cases at `:215-248`); in `tests/smoke.test.ts` (add the name to the declared-inputs list); in `tests/main.test.ts` + `tests/evals/harness.ts` (add the fields/seams named in Tests above).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -63,7 +77,7 @@ Per Exact behavior. Keep every existing string byte-identical except the listed 
 
 - [ ] **Step 4: Run tests + build**
 
-Run: `npx vitest run tests/inputs.test.ts tests/smoke.test.ts tests/prompt.test.ts tests/readme.test.ts && npx vitest run && npm run evals && npx tsc --noEmit -p tsconfig.json && npm run build && node --check dist/index.js`
+Run: `npx vitest run tests/inputs.test.ts tests/smoke.test.ts tests/prompt.test.ts tests/readme.test.ts && npm run build && node --check dist/index.js && npm run evals && npx vitest run && npx tsc --noEmit -p tsconfig.json`
 Expected: PASS all green; build clean. (`npm run evals` proves artifact identity — no product behavior changed yet.)
 
 - [ ] **Step 5: Commit**
@@ -107,10 +121,12 @@ it("truncates an oversized issue with a balanced marker", async () => {
   expect(r.llmCalled).toBe(1);
 });
 it("drops the issue block when the allowance is negative", async () => {
-  const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
-  // ^ DIFF_2700: custom `diff` (~2,700 B single-line hunk, DIFF format), constructed in-test;
-  // SCAN_FINDING: one small scanner finding (pins the allowance so a zero-finding fixture
-  // cannot silently truncate instead). Allowance < 0 → dropped.
+  const SCAN_FINDING = { severity: "warning", file: "src/a.ts", line: 2, rule: "scan-rule", message: "m".repeat(200) };
+  // ^ pinned ≈295 B JSON (verify with Buffer.byteLength in-test).
+  // DIFF_2900: custom `diff` (~2,900 B single-line hunk, DIFF format), constructed in-test.
+  // Allowance = 3200 − (2935 + 295 + ~100 + 145) < 0 → dropped (a zero-finding fixture would
+  // silently truncate instead — the finding pins the allowance).
+  const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2900, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
   expect(r.prompts!.user).not.toContain("## Linked issue");
   expect(r.llmCalled).toBe(1);
 });
@@ -134,8 +150,9 @@ it("never cuts the diff, skipping instead", async () => {
 });
 it("skips after cuts are exhausted", async () => {
   const r = await runWithMocks({ maxPromptChars: 6000, maxDiffChars: 5500, diff: BIG_FIRST_PATCH, issueBody: "z".repeat(3000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
-  // ^ BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files (~300 units each); test computes exact
-  // Buffer.byteLength sums to show diff ≈ 5.2 KB, note ≈ 700 B, total > 6,000 with diff alone < 6,000.
+  // ^ BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files `src/fixture-source-file-00.ts` …
+  // `src/fixture-source-file-24.ts` (~29-char paths → ~33 B/note-line); test computes exact
+  // Buffer.byteLength sums to show diff ≈ 5.2 KB, note ≈ 775 B, total > 6,000 with diff alone < 6,000.
   expect(r.llmCalled).toBe(0);
 });
 it("pins the multibyte floor", async () => {
@@ -145,13 +162,20 @@ it("pins the multibyte floor", async () => {
 });
 it("sanitizes evidence before the prompt", async () => {
   const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "a\0b" }] });
-  expect(r.prompts!.user).toContain("ab"); // control strip is the discriminator (NUL never survives JSON.stringify)
+  expect(r.prompts!.user).toContain('"message":"ab"'); // control strip is the discriminator (NUL never survives JSON.stringify)
+});
+it("caps over-long finding fields in the prompt", async () => {
+  const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "y".repeat(3000) }] });
+  const user = r.prompts!.user;
+  expect(user).not.toContain("y".repeat(3000));
+  expect(user).toContain("y".repeat(100)); // prefix present, capped per MSG_CAP
 });
 it("still posts omitted findings", async () => {
   const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
   const r = await runWithMocks({ maxPromptChars: 1000, scan: many });
   expect(r.posted).toBe(true);
-  expect(r.reviews.at(-1)!.body).toContain("finding(s)"); // all 12 merged findings post, not just survivors
+  expect(r.reviews.at(-1)!.body).toContain("lupa: 13 finding(s)."); // 12 scan + 1 default LLM finding, all merged
+  expect(JSON.stringify(r.reviews.at(-1)!)).toContain("r11"); // prompt-dropped rule still posts
 });
 it("renders the omission line on the agent path", async () => {
   const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
@@ -181,8 +205,8 @@ Per Exact behavior. Delete the old `const messages = buildMessages(fast, promptT
 
 - [ ] **Step 4: Run tests + build**
 
-Run: `npx vitest run tests/main.test.ts tests/prompt.test.ts && npx vitest run && npm run evals && npx tsc --noEmit -p tsconfig.json && npm run build && node --check dist/index.js`
-Expected: PASS all green (suite + evals); build clean.
+Run: `npx vitest run tests/main.test.ts tests/prompt.test.ts && npm run build && node --check dist/index.js && npm run evals && npx vitest run && npx tsc --noEmit -p tsconfig.json`
+Expected: PASS all green (suite + evals); build clean. (Build precedes evals — the harness loads `dist/index.js`, so evals must run against the fresh bundle.)
 
 - [ ] **Step 5: Commit**
 
