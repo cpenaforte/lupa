@@ -68,8 +68,8 @@ export interface WalkSkipped {
   // at the top of each loop iteration after pop, so a pushed-but-unlisted directory
   // fires check (b) when popped — there is no separate end-of-walk path, the loop
   // itself reaches it), so exact fit with an empty stack yields `truncated: false`.
-  // `overLimit` is exact for loop remainders and a conservative placeholder (one unit
-  // per unlisted directory) when check (b) fires — stated explicitly, not silently exact.
+  // `overLimit` is exact for file remainders and a conservative placeholder (one unit
+  // per unlisted directory) otherwise — stated explicitly, not silently exact.
   overLimit: number;
 }
 ```
