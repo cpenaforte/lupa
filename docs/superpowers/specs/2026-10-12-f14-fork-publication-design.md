@@ -74,9 +74,10 @@ The template:
   review with the workflow-run token (App token unavailable). For App-token
   posting set PR_REVIEWER_APP_ID / PR_REVIEWER_APP_KEY — see README (fork
   reviews)`. The `::notice::` prefix applies to the annotation only; the
-  step-summary line is the same sentence without it (a literal prefix would
-  render in the markdown). Downgrade visible, never silent. The guard text
-  and placement are pinned in `templates.test.ts`.
+  step-summary emission is a heredoc (`cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'`
+  with the bare sentence on its own line, closed by `EOF`) — a literal prefix
+  would render in the markdown. Downgrade visible, never silent. The guard
+  text and placement are pinned in `templates.test.ts`.
 - Pins explicit `fail_level: warning` in the Post step's `with:` block
   (today it inherits the action default silently).
 
