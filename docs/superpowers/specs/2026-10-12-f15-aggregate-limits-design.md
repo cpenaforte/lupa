@@ -149,7 +149,9 @@ Input: the full redacted set (gates already computed or computed from it —
    code-point-safely (never splits a surrogate pair). Fence-aware: if the
    retained portion contains an unclosed ```` ``` ```` fence, cut back to
    before its opening line (fence lines are short whole lines, so this always
-   terminates); the trunc-note is plain text and always last. Truncation drops
+   terminates; detect fence lines after stripping leading whitespace — folded
+   bodies indent fences two spaces); the trunc-note is plain text and always
+   last. Truncation drops
    are witnessed by the note only (no per-item count — stated).
    `capBody` takes the markers as an argument and guarantees them inside the
    cap (content is cut to `max − markers`); callers never hand-reserve.

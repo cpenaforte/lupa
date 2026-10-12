@@ -140,7 +140,7 @@ git commit -m "fix: bounded artifact ingestion with fail-loud oversize (F15)"
 - [ ] **Step 1: Write the failing tests**
   - `tests/review.test.ts`: `prioritizeFindings` order (highs, stable ties) + `capBody` units (whole-line, over-long mid-line cut, emoji-safe, fence backup, stale-note strip + omission extraction without duplication, marker-appended-when-fits, marker-inside guarantee, marker-too-big `RangeError`).
   - `tests/main.test.ts`: 500-finding funnel (retained 200, inline 30, folded general order, exact `> Omitted: 300` marker, gates see 500, artifact keeps 500, summary head shows 500); fixture findings reference files/lines present in a small unified-diff string passed via `runWithMocks({ diff })` (publishReview parses hunks internally — `ParsedHunk` cannot be injected). Body truncation (note inside cap); summary cap + skip-warning; dry-run `omitted=`; issue-fallback retained-set body (heading shows retained count).
-  - `tests/github.test.ts`: off-diff fold re-cap (single trunc-note last, omission count preserved, under cap; fits-after-strip case re-emits the note).
+  - `tests/github.test.ts`: off-diff fold re-cap (single trunc-note last, omission count preserved, under cap; fits-after-strip case re-emits the note; indented-fence case — a cut inside a two-space-indented folded fence block backs up before its opening fence line).
   - Flow B bounds: end-to-end through the shared paths (capped `readFindings` + capped `publishReview`, `PrivOpts` passthrough from Task 62); oversized Flow B artifact → loud throw with nothing posted.
 
 - [ ] **Step 2: Run tests to verify they fail**
