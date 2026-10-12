@@ -62,6 +62,11 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened?: boolea
 export interface InlineComment {
   path: string; line: number; side: "LEFT" | "RIGHT"; rule?: string;
   /* start_line/start_side/body unchanged */
+  /* rule is INTERNAL (fold keys only, set by mapToComments): main.ts strips it
+  when building payload.comments, so posted payloads, recorded eval payloads,
+  and the GitHub call carry exactly today's shape — NO eval pin updates for it.
+  The 422 retry path recovers keys via index-aligned commentKeys in
+  createReview opts (below), not from the stripped comments. */
 }
 export function buildBody(
   general: Finding[],
@@ -88,10 +93,15 @@ getActor(): Promise<string | undefined>;
 // getActor + listReviewThreads are SHORT-CIRCUITED when every merged finding
 // is already introduced (reopen can add nothing — saves two API calls);
 // with an empty token both return empty/undefined at entry (no call, no warn).
-// The blocking keys also thread to both fold sites (main.ts foldExcessInline
-// + github.ts foldComments via createReview opts) so folded non-blocking items
-// render `- path:line (non-blocking)` (key from InlineComment rule+path+line;
-// rule absent = assume blocking, no marker).
+// The blocking keys also thread to both fold sites. main.ts foldExcessInline
+// reads rule straight off the pre-strip InlineComments. The github.ts 422
+// retry folds payload.comments (already stripped), so main.ts additionally
+// passes index-aligned commentKeys (null where rule absent) in createReview
+// opts alongside blocking; foldComments marks `- path:line (non-blocking)`
+// only for index-aligned keys present AND outside blocking (length mismatch
+// or null key = assume blocking, no marker — fail-safe toward blocking).
+// createReview opts gains `blocking?: ReadonlySet<string>` +
+// `commentKeys?: readonly (string | null)[]` (both optional; fakes ignore them).
 async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
 ```
 
@@ -204,7 +214,8 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   `n` excluding blocking items (all-reopened/all-blocking → no note);
   folded excess non-blocking item renders `- path:line (non-blocking)` at
   BOTH fold sites (main.ts excess + github.ts 422 path); dry-run log gains
-  `blocking=<n>`.
+  `blocking=<n>`. Payload comment shape is unchanged (`rule` stripped at
+  construction), so `bundle.test.ts` exact comment literals need NO updates.
 - Live canary (MERGE GATE for task (ii)): on test-lupa, post a review with a
   high, Resolve its thread without fixing, re-run → re-blocks with marker;
   fix the issue, re-run → stays resolved. Proves identity derivation
