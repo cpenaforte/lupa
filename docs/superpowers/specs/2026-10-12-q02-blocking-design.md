@@ -29,11 +29,15 @@ export function indexHunks(hunks: ParsedHunk[]): Map<string, Map<string, HunkLin
 // review.ts — gate partition over the merged set (input order preserved).
 // introduced = TOUCHED lines only (RIGHT hit with kind === "add" — context and
 // LEFT/deletion hits stay display-inline but never gate) PLUS lineless findings
-// whose file is in the FileDiff file set (binary/mode-only/rename entries have
-// no hunks but ARE in the file set; deletions count — preserves today's
-// behavior, Q03 revisits heuristics-on-deletion later; file "" never matches).
+// whose file is present in the diff (FileDiff entry not marked deleted, and
+// hunks text empty or containing an add line — added-empty, mode-only, rename
+// and added-binary count; deleted and pure-removal files do not; empty-file
+// repo notes never match).
 // general = everything else. Display split (mapToComments) is untouched:
-// placement ≠ blocking.
+// placement ≠ blocking. Accepted display variance: on all-introduced runs the
+// short-circuit skips the thread read, so an introduced finding with a
+// resolved own thread renders no reopened marker there (gating is identical;
+// the marker is informational).
 export function partitionGate(
   findings: Finding[],
   hunks: ParsedHunk[],
