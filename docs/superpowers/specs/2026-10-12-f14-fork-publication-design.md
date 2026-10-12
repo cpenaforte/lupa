@@ -58,8 +58,8 @@ The template:
   `github-token` (`PR_REVIEWER_TOKEN_TYPE`; the fallback arm changes from
   `'github-token'` to `'workflow-run'` — a base-context token, writable —
   while the producer template keeps `'github-token'` for its fork-context
-  token. The old two-value writability comparison becomes
-  `!== 'github-token'`; `tokenIsApp` keeps its exact App-only meaning
+  token. Writability is the exact allowlist in the gating section below, not a
+  negation test; `tokenIsApp` keeps its exact App-only meaning
   everywhere else, including the L2 scrub at `main.ts:927`).
 - Adds a guard step immediately after the App step (`if: always() &&
   steps.app.outcome != 'success'`, before the download): without a usable App
@@ -89,8 +89,9 @@ The template:
   `README.md:163-168` (forks read-only / App-token text) is rewritten to the
   new chain (required content: the workflow-run token is the default posting
   credential on fork PRs; App token via `PR_REVIEWER_APP_ID` /
-  `PR_REVIEWER_APP_KEY` is the recommended upgrade; with neither, the run
-  skips posting with a loud warning).
+  `PR_REVIEWER_APP_KEY` is the recommended upgrade; without an App token the
+  run posts with the workflow-run token and emits the downgrade notice;
+  `github-token`/unset contexts skip posting with a loud warning).
 - `canWrite = !isFork || tokenType === 'app' || tokenType === 'workflow-run'`
   (exact): App and workflow-run tokens both write; fork-context
   `github-token`, unset, and unknown never write. Matrix (fork): app→post,
