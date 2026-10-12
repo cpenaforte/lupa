@@ -45,7 +45,7 @@
 - `action.yml`: `max_prompt_chars` after `max_diff_chars`, `required: false`, `default: "120000"`, description per spec (both-paths wording, unit note).
 - `inputs.ts`: `maxPromptChars: readInt("max_prompt_chars", 120000, 1)` after the `maxDiffChars` line.
 - `buildMessages`: 6th param `omitted: number = 0`; when > 0 renders `\n\nOmitted <M> fast finding(s) to fit the prompt budget.` after the findings JSON; skipped-file list capped at 20 entries + `\n- …and <N> more omitted from this note` line. Existing 4-/5-arg behavior byte-identical.
-- README: input documented beside `max_diff_chars` with the bytes-vs-units note; Cost ceiling bullet names `max_prompt_chars` (120,000 bytes ≈ 30k input tokens, roughly $0.30–$0.60 at the same frontier rates; keep the pinned "about 3k input and 600 output tokens" sentence verbatim); add the non-ASCII rule plainly (diffs averaging over 2 bytes per UTF-16 unit skip at default config — CJK, Cyrillic, Greek, accented Latin).
+- README: input documented beside `max_diff_chars` with the bytes-vs-units note; Cost ceiling bullet names `max_prompt_chars` (120,000 bytes ≈ 30k input tokens, roughly $0.30–$0.60 at the same frontier rates; keep the pinned "about 3k input and 600 output tokens" sentence verbatim); add the byte-total rule plainly (any diff whose UTF-8 bytes exceed 120,000 skips at default config — e.g. ~40k units at 3 B/unit, ~60k units at 2 B/unit).
 - Tests: `INPUT_NAMES` + smoke list gain `max_prompt_chars`; default 120000; `0`/`-5`/`"lots"`/`"12.5"` rejected naming the input, `"1"` accepted; renderer tests (omitted line via 6th param; 20-cap line with 25 skipped); `tests/main.test.ts:173` + `tests/evals/harness.ts:32` gain `maxPromptChars: 120000` (match the real default — no conflict); `MockOpts` gains `maxPromptChars?: number`, `issueBody?: string`, `maxDiffChars?: number`, and `inputsFor` uses `o.maxPromptChars ?? 120000` (the per-test override seam Task 58 needs); `gatewayFor.getIssueBody` returns `o.issueBody ?? "issue text"`; the `callWithProbe`/`callByStyle` mocks capture `rec.prompts = messages` (new `Rec` field `prompts?: { system: string; user: string }`, exposed on the return object).
 
 - [ ] **Step 1: Write the failing tests**
@@ -93,7 +93,7 @@ git commit -m "feat: max_prompt_chars input and budget-aware rendering (F10)"
 
 - [ ] **Step 1: Write the failing tests in `tests/main.test.ts`**
 
-`describe("prompt budget")`, driven through `runWithMocks` with `maxPromptChars` overrides via Task 57's `MockOpts.maxPromptChars` seam (`inputsFor` defaults it to 120000):
+`describe("prompt budget")`, driven through `runWithMocks` with Task 57's seams: `MockOpts.maxPromptChars` (`inputsFor` defaults 120000), `MockOpts.issueBody` threading into `getIssueBody` (default "issue text"), `MockOpts.maxDiffChars` used by `inputsFor` (default 60000), `rec.prompts` capture in the `callWithProbe`/`callByStyle` mocks (exposed on the return object), and the existing `MockOpts.prBody` (`:191`) into the PR body. Fast findings reach the prompt via `scan:` (scanner findings → fast array); `llm:` feeds only the mocked probe RETURN, never the prompt. Custom `diff` strings follow the `DIFF` format:
 
 ```ts
 it("truncates an oversized issue with a balanced marker", async () => {
@@ -107,29 +107,33 @@ it("truncates an oversized issue with a balanced marker", async () => {
   expect(r.llmCalled).toBe(1);
 });
 it("drops the issue block when the allowance is negative", async () => {
-  const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), llm: [LLM_FINDING] });
-  // ^ DIFF_2700: custom `diff` override (~2,700 B hunk, same format as DIFF); allowance < 0 → dropped.
+  const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
+  // ^ DIFF_2700: custom `diff` (~2,700 B single-line hunk, DIFF format), constructed in-test;
+  // SCAN_FINDING: one small scanner finding (pins the allowance so a zero-finding fixture
+  // cannot silently truncate instead). Allowance < 0 → dropped.
   expect(r.prompts!.user).not.toContain("## Linked issue");
   expect(r.llmCalled).toBe(1);
 });
 it("drops whole findings with an exact omitted count", async () => {
   const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
-  const r = await runWithMocks({ maxPromptChars: 3000, llm: many });
-  // ^ `llm:` fixture findings flow through the mocked probe return (existing pattern — verify name).
+  const r = await runWithMocks({ maxPromptChars: 1000, scan: many });
+  // ^ 12 findings ≈ 1.2 KB + framing/diff ≈ 1.7 KB total > 1000 → drops ~7-8.
   const user = r.prompts!.user;
   const m = user.match(/Omitted (\d+) fast finding\(s\) to fit the prompt budget\./);
   expect(m).not.toBeNull();
-  const kept = JSON.parse(user.split("## Fast findings")[1].split("##")[0]) as unknown[];
-  expect(kept.length + Number(m![1])).toBe(many.length);
   expect(Number(m![1])).toBeGreaterThan(0);
+  const jsonLine = user.split("\n\n").find((l) => l.startsWith("["));
+  const kept = JSON.parse(jsonLine!) as unknown[];
+  expect(kept.length + Number(m![1])).toBe(many.length);
 });
 it("never cuts the diff, skipping instead", async () => {
-  const r = await runWithMocks({ maxPromptChars: 1000 });
+  const r = await runWithMocks({ maxPromptChars: 1000, diff: DIFF_2000 });
+  // ^ DIFF_2000: custom `diff` with a ~2,000 B hunk (the default 141 B DIFF never reaches any budget).
   expect(vi.mocked(core.warning).mock.calls.map(String).join("\n")).toMatch(/prompt \d+ exceeds max_prompt_chars 1000 after bounded cuts/);
   expect(r.llmCalled).toBe(0);
 });
 it("skips after cuts are exhausted", async () => {
-  const r = await runWithMocks({ maxPromptChars: 6000, maxDiffChars: 5500, diff: BIG_FIRST_PATCH, issueBody: "z".repeat(3000), llm: [LLM_FINDING] });
+  const r = await runWithMocks({ maxPromptChars: 6000, maxDiffChars: 5500, diff: BIG_FIRST_PATCH, issueBody: "z".repeat(3000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
   // ^ BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files (~300 units each); test computes exact
   // Buffer.byteLength sums to show diff ≈ 5.2 KB, note ≈ 700 B, total > 6,000 with diff alone < 6,000.
   expect(r.llmCalled).toBe(0);
@@ -140,20 +144,29 @@ it("pins the multibyte floor", async () => {
   expect(r.llmCalled).toBe(0); // ~180 KB bytes > 120,000 default
 });
 it("sanitizes evidence before the prompt", async () => {
-  const r = await runWithMocks({ llm: [{ ...LLM_FINDING, message: "a\0b" }] });
-  expect(r.prompts!.user).toContain("ab");
-  expect(r.prompts!.user).not.toContain("\0");
+  const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "a\0b" }] });
+  expect(r.prompts!.user).toContain("ab"); // control strip is the discriminator (NUL never survives JSON.stringify)
 });
 it("still posts omitted findings", async () => {
   const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
-  const r = await runWithMocks({ maxPromptChars: 3000, llm: many });
+  const r = await runWithMocks({ maxPromptChars: 1000, scan: many });
   expect(r.posted).toBe(true);
-  expect(r.reviews.at(-1)!.body).toContain("finding(s)");
+  expect(r.reviews.at(-1)!.body).toContain("finding(s)"); // all 12 merged findings post, not just survivors
 });
 it("renders the omission line on the agent path", async () => {
   const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
-  const r = await runWithMocks({ maxPromptChars: 3000, llmAgent: true, llm: many });
-  expect(String(r.agentConv)).toContain("Omitted ");
+  const r = await runWithMocks({ maxPromptChars: 1000, llmAgent: true, scan: many });
+  expect((r.agentConv as { user: string }).user).toContain("Omitted ");
+});
+it("treats whitespace-only issues as absent", async () => {
+  const r = await runWithMocks({ issueBody: "   \n  ", prBody: "Fixes #7" });
+  expect(r.prompts!.user).not.toContain("## Linked issue");
+  expect(r.llmCalled).toBe(1);
+});
+it("logs the issue-dropped signal", async () => {
+  const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
+  expect(vi.mocked(core.info).mock.calls.map(String).join("\n")).toContain("linked issue context dropped to fit the 3200-byte prompt budget");
+  expect(r.llmCalled).toBe(1);
 });
 ```
 
@@ -164,7 +177,7 @@ Expected: FAIL (no `budgetPrompt`, no wiring).
 
 - [ ] **Step 3: Implement in `src/main.ts`**
 
-Per Exact behavior. Touch nothing else in the slow path (ordering, gates, publication identical).
+Per Exact behavior. Delete the old `const messages = buildMessages(fast, promptText, issueBody, skipped)` line (`:530`) and replace the agent-branch `buildMessages(fast, promptText, issueBody, skipped, { maxTurns: ... })` call (`:576`) with the single pre-branch assembly — exactly one `budgetPrompt` + `buildMessages` call feeds both paths. Touch nothing else in the slow path (ordering, gates, publication identical).
 
 - [ ] **Step 4: Run tests + build**
 

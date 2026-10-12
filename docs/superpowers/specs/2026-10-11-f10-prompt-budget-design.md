@@ -193,8 +193,8 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
   note the `--- path` headers and trailing newline count toward `maxChars`, so 7,500
   would total ≈60,240 and skip the 8th file)
   with default 120,000-byte budget skips — this is intended default-config behavior for
-  diffs averaging over 2 bytes per UTF-16 unit (CJK, Cyrillic, Greek, accented Latin —
-  the bytes-versus-units rule, not a script list), pinned so the unit fix cannot regress.
+  any diff whose UTF-8 bytes exceed the budget (e.g. ~40k units at 3 B/unit, ~60k units
+  at 2 B/unit) — pinned so the unit fix cannot regress.
 - `tests/inputs.test.ts`: `maxPromptChars` defaults to 120,000; add `max_prompt_chars`
   to `INPUT_NAMES` and the smoke-test declared-inputs list; 0/negative/non-numeric
   are rejected naming the input (`readInt` floor 1 = minimum accepted, never a clamp),
