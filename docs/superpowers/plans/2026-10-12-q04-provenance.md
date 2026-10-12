@@ -33,11 +33,11 @@
 
 **Files:**
 - Modify: `src/fastpath.ts` (Finding fields + L0 values), `src/artifact-limits.ts` (`sourceForLabel` + `byteCheck` source), `src/scanners.ts` (`warning(rule,message,source?)`, fromStdout wrap, runGitleaks label, SBOM label), `src/l2.ts` (success 90 / failure tool-health, gofmt pins), `src/main.ts` (isFinding shapes, sanitize carry+caps, `L2_SKIPPED`), `src/review.ts` (redact evidence + fresh objects)
-- Test: `tests/fastpath.test.ts`, `tests/scanners.test.ts` (`:329,339,367,381,418,431,445,458,477,489,500,520,766` + `:582,704,709,716,736,746`), `tests/l2.test.ts` (`:150,161,173` + `:183-185,:193-195`), `tests/artifact-limits.test.ts` (`:90-96`), `tests/main.test.ts` (isFinding/sanitize units), `tests/review.test.ts` (redact incl. snippet secret + fresh-object aliasing), `tests/fixtures/evals/cases.ts` (`:96` forkL2Skipped → gains source, summary `:275-277` verified)
+- Test: `tests/fastpath.test.ts`, `tests/scanners.test.ts` (`:329,339,367,381,418,431,445,458,477,489,500,520,766` + `:582,704,709,716,736,746`), `tests/l2.test.ts` (`:150,161,173` + `:183-185,:193-195`), `tests/artifact-limits.test.ts` (`:90-96`), `tests/main.test.ts` (isFinding/sanitize units), `tests/review.test.ts` (redact incl. snippet secret + fresh-object aliasing), `tests/fixtures/evals/cases.ts` (`:96` forkL2Skipped gains source; summary `:275-277` unchanged until Task 71's fallback rows)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
-- Consumes: existing `warning()` call sites — the following pass explicit sources: fromStdout internals (own label via `sourceForLabel`), runGitleaks (`"gitleaks"`), SBOM branch (`"sbom"`), byteCheck (maps internally); all other 2-arg calls compile unchanged. `tests/fixtures/evals/cases.ts` (`:96` forkL2Skipped gains source + summary `:275-277` gains the Source row — certain, not conditional).
+- Consumes: existing `warning()` call sites — the following pass explicit sources: fromStdout internals (own label via `sourceForLabel`), runGitleaks (`"gitleaks"`), SBOM branch (`"sbom"`), byteCheck (maps internally); all other 2-arg calls compile unchanged. `tests/fixtures/evals/cases.ts` (`:96` forkL2Skipped gains source; summary `:275-277` UNCHANGED here — fallback rows don't exist until Task 71).
 - Produces: `Finding.source?: string`, `Finding.confidence?: number`, `Finding.evidence?: { snippet?: string; analyzer?: string }`; `sourceForLabel(label: string): string` (artifact-limits.ts; `label.split(" (")[0]`, identity without parens).
 
 **Exact behavior:**
