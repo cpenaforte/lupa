@@ -648,13 +648,14 @@ async function slowPath(
     if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
     const toolCtx: ToolContext = {
       roots: { self: env.workDir, linked: new Map() },
-      ensureLinked: async (alias) => {
+      ensureLinked: async (alias, opts?) => {
         if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
           return { error: "repository not accessible: " + alias };
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
           maxBytes: AGENT_LIMITS.cloneMaxBytes,
+          deadlineMs: opts?.deadlineMs,
           sizeKb: async (a) => {
             const parts = a.split("/");
             if (parts.length !== 2) return undefined;

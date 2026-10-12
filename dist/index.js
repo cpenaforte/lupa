@@ -25348,8 +25348,8 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs
   }
   const requested = args.max_results === void 0 ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
-  const effectiveTimeout = endMs === void 0 ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
-  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout);
+  const effectiveTimeout2 = endMs === void 0 ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
+  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout2);
   if (outcome.isError)
     return { output: outcome.output, isError: true };
   const { matches, filesScanned, hitLimit } = outcome;
@@ -25756,6 +25756,13 @@ import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 var CLONE_TIMEOUT_MS = 6e4;
+function effectiveTimeout(configuredMs, endMs, nowMs = Date.now()) {
+  if (endMs === void 0)
+    return configuredMs;
+  if (endMs - nowMs <= 0)
+    return "expired";
+  return Math.max(1, Math.min(configuredMs, endMs - nowMs));
+}
 function defaultRun(cmd, args, o) {
   return new Promise((resolve2) => {
     execFile2(cmd, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs }, (err, stdout, stderr) => {
@@ -25854,8 +25861,14 @@ function removeDir(dir) {
 async function ensureLinkedRepo(alias, o) {
   const dir = join4(o.baseDir, alias.split("/").join("__"));
   const deps = o.deps ?? { run: defaultRun, ...o.sizeKb !== void 0 ? { sizeKb: o.sizeKb } : {} };
+  const deadlineExceeded = `repository not accessible: ${alias}: deadline exceeded`;
+  if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
+    return { error: deadlineExceeded };
+  }
   if (existsSync4(dir)) {
     const sha = await validateCache(deps, alias, dir, o);
+    if (sha === "expired")
+      return { error: deadlineExceeded };
     if (sha !== null)
       return { dir, sha };
     removeDir(dir);
@@ -25879,9 +25892,13 @@ async function ensureLinkedRepo(alias, o) {
     env.GIT_CONFIG_VALUE_0 = "Authorization: Basic " + Buffer.from("x-access-token:" + o.token, "utf8").toString("base64");
   }
   const args = ["clone", "--depth", "1", "--single-branch", `https://github.com/${alias}.git`, dir];
+  const cloneTimeout = effectiveTimeout(o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  if (cloneTimeout === "expired") {
+    return { error: deadlineExceeded };
+  }
   let result;
   try {
-    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: o.timeoutMs ?? CLONE_TIMEOUT_MS });
+    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: cloneTimeout });
   } catch (e) {
     result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
   }
@@ -25903,7 +25920,10 @@ async function ensureLinkedRepo(alias, o) {
       return { error: "repository too large" };
     }
   }
-  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS);
+  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  if (head === "expired") {
+    return { error: deadlineExceeded };
+  }
   writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });
   return { dir, sha: head.sha };
 }
@@ -25940,15 +25960,21 @@ function readMarker(dir) {
     return null;
   }
 }
-async function cloneHead(deps, dir, timeoutMs) {
+async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   let branch = "";
   let sha = "";
   try {
-    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
+    const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+    if (branchTimeout === "expired")
+      return "expired";
+    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: branchTimeout });
     if (b.code === 0)
       branch = b.stdout.trim();
-    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs });
+    const headTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+    if (headTimeout === "expired")
+      return "expired";
+    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
     if (h.code === 0)
       sha = h.stdout.trim();
   } catch {
@@ -25956,18 +25982,32 @@ async function cloneHead(deps, dir, timeoutMs) {
   return { branch, sha };
 }
 async function validateCache(deps, alias, dir, o) {
+  const endMs = o.deadlineMs;
+  const isExpired = () => endMs !== void 0 && endMs - Date.now() <= 0;
+  if (isExpired())
+    return "expired";
   if (!existsSync4(join4(dir, ".git")))
     return null;
   const marker = readMarker(dir);
   if (marker === null || marker.repo !== alias)
     return null;
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  const timeoutMs = o.timeoutMs ?? CLONE_TIMEOUT_MS;
+  const configured = o.timeoutMs ?? CLONE_TIMEOUT_MS;
   try {
-    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs });
+    let timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired")
+      return "expired";
+    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired())
+      return "expired";
     if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`)
       return null;
-    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
+    timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired")
+      return "expired";
+    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired())
+      return "expired";
     const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
     if (resolvedBranch === "" || resolvedBranch !== marker.branch)
       return null;
@@ -25981,11 +26021,18 @@ async function validateCache(deps, alias, dir, o) {
       if (total > o.maxBytes)
         return null;
     }
-    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs });
+    timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired")
+      return "expired";
+    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired())
+      return "expired";
     if (head.code !== 0)
       return null;
     return head.stdout.trim();
   } catch {
+    if (isExpired())
+      return "expired";
     return null;
   }
 }
@@ -28634,13 +28681,14 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
       info(`agent linked repositories: ${linked.join(", ")}`);
     const toolCtx = {
       roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
-      ensureLinked: async (alias) => {
+      ensureLinked: async (alias, opts) => {
         if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
           return { error: "repository not accessible: " + alias };
         const r = await ensureLinkedRepo(alias, {
           token: i.githubToken,
           baseDir: join6(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
           maxBytes: AGENT_LIMITS.cloneMaxBytes,
+          deadlineMs: opts?.deadlineMs,
           sizeKb: async (a) => {
             const parts = a.split("/");
             if (parts.length !== 2)

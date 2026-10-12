@@ -19,6 +19,20 @@ export interface CloneDeps {
 
 const CLONE_TIMEOUT_MS = 60000;
 
+/**
+ * Clamps a configured git timeout to the remaining deadline budget.
+ * No deadline → the configured value. An exhausted budget
+ * (`endMs - nowMs <= 0`) → the `"expired"` sentinel (never spawn).
+ * Otherwise the clamped remainder, floored at 1 ms (a bare 0 would mean
+ * no-timeout in `execFile`). `nowMs` defaults to wall-clock `Date.now`;
+ * tests pass it explicitly for determinism.
+ */
+export function effectiveTimeout(configuredMs: number, endMs?: number, nowMs: number = Date.now()): number | "expired" {
+  if (endMs === undefined) return configuredMs;
+  if (endMs - nowMs <= 0) return "expired";
+  return Math.max(1, Math.min(configuredMs, endMs - nowMs));
+}
+
 function defaultRun(
   cmd: string,
   args: string[],
@@ -151,6 +165,13 @@ function removeDir(dir: string): void {
  * match, size within `maxBytes`). Any mismatch or git error wipes the dir
  * (marker included) and runs the full fresh-clone path. The returned sha is
  * always re-derived from git, never trusted from the marker.
+ *
+ * An absolute `deadlineMs` epoch (wall-clock `Date.now`) clamps every git
+ * timeout via `effectiveTimeout`. An already-expired deadline aborts before
+ * any spawn with `repository not accessible: <alias>: deadline exceeded` and
+ * never wipes an existing dir; `validateCache` reports expiry distinctly from
+ * reclone-`null` so a mid-validation expiry maps to the same error. Only a
+ * just-created partial fresh clone is still removed on failure.
  */
 export async function ensureLinkedRepo(
   alias: string,
@@ -161,13 +182,20 @@ export async function ensureLinkedRepo(
     maxBytes?: number;
     deps?: CloneDeps;
     sizeKb?: (alias: string) => Promise<number | undefined>;
+    deadlineMs?: number;
   },
 ): Promise<{ dir: string; sha: string } | { error: string }> {
   const dir = join(o.baseDir, alias.split("/").join("__"));
   const deps: CloneDeps = o.deps ?? { run: defaultRun, ...(o.sizeKb !== undefined ? { sizeKb: o.sizeKb } : {}) };
+  const deadlineExceeded = `repository not accessible: ${alias}: deadline exceeded`;
+
+  if (o.deadlineMs !== undefined && o.deadlineMs - Date.now() <= 0) {
+    return { error: deadlineExceeded };
+  }
 
   if (existsSync(dir)) {
     const sha = await validateCache(deps, alias, dir, o);
+    if (sha === "expired") return { error: deadlineExceeded };
     if (sha !== null) return { dir, sha };
     removeDir(dir);
   }
@@ -195,9 +223,13 @@ export async function ensureLinkedRepo(
   }
   const args = ["clone", "--depth", "1", "--single-branch", `https://github.com/${alias}.git`, dir];
 
+  const cloneTimeout = effectiveTimeout(o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  if (cloneTimeout === "expired") {
+    return { error: deadlineExceeded };
+  }
   let result: CloneRunResult;
   try {
-    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: o.timeoutMs ?? CLONE_TIMEOUT_MS });
+    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: cloneTimeout });
   } catch (e) {
     result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
   }
@@ -221,7 +253,10 @@ export async function ensureLinkedRepo(
     }
   }
 
-  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS);
+  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  if (head === "expired") {
+    return { error: deadlineExceeded };
+  }
   writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });
   return { dir, sha: head.sha };
 }
@@ -291,14 +326,19 @@ async function cloneHead(
   deps: CloneDeps,
   dir: string,
   timeoutMs: number,
-): Promise<{ branch: string; sha: string }> {
+  deadlineMs?: number,
+): Promise<{ branch: string; sha: string } | "expired"> {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   let branch = "";
   let sha = "";
   try {
-    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
+    const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+    if (branchTimeout === "expired") return "expired";
+    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: branchTimeout });
     if (b.code === 0) branch = b.stdout.trim();
-    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs });
+    const headTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+    if (headTimeout === "expired") return "expired";
+    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
     if (h.code === 0) sha = h.stdout.trim();
   } catch {
     // Ignore: the clone itself succeeded, so return what was derived so far.
@@ -308,26 +348,39 @@ async function cloneHead(
 
 /**
  * Validates an existing clone dir for reuse. Returns the re-derived HEAD sha,
- * or null when the cache must be wiped and re-cloned. Every mismatch and every
- * git error fails closed to null (a safe re-clone), never to trust. The size
- * check is skipped when `maxBytes` is undefined. Introspection runs without
- * token vars so no secret reaches the cached repo's git.
+ * `"expired"` when the deadline lapsed (distinct from reclone-`null`: the
+ * caller maps it to the deadline error without wiping the dir), or null when
+ * the cache must be wiped and re-cloned. Every mismatch and every git error
+ * fails closed to null (a safe re-clone), never to trust. The size check is
+ * skipped when `maxBytes` is undefined. Expiry is checked at entry and after
+ * EACH validation git call: a clamped-timeout kill returns non-zero/throws,
+ * which would otherwise read as `null` and wipe a valid cache. Introspection
+ * runs without token vars so no secret reaches the cached repo's git.
  */
 async function validateCache(
   deps: CloneDeps,
   alias: string,
   dir: string,
-  o: { maxBytes?: number; timeoutMs?: number },
-): Promise<string | null> {
+  o: { maxBytes?: number; timeoutMs?: number; deadlineMs?: number },
+): Promise<string | null | "expired"> {
+  const endMs = o.deadlineMs;
+  const isExpired = (): boolean => endMs !== undefined && endMs - Date.now() <= 0;
+  if (isExpired()) return "expired";
   if (!existsSync(join(dir, ".git"))) return null;
   const marker = readMarker(dir);
   if (marker === null || marker.repo !== alias) return null;
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  const timeoutMs = o.timeoutMs ?? CLONE_TIMEOUT_MS;
+  const configured = o.timeoutMs ?? CLONE_TIMEOUT_MS;
   try {
-    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs });
+    let timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired") return "expired";
+    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired()) return "expired";
     if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`) return null;
-    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs });
+    timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired") return "expired";
+    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired()) return "expired";
     const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
     if (resolvedBranch === "" || resolvedBranch !== marker.branch) return null;
     if (o.maxBytes !== undefined) {
@@ -339,10 +392,14 @@ async function validateCache(
       }
       if (total > o.maxBytes) return null;
     }
-    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs });
+    timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired") return "expired";
+    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired()) return "expired";
     if (head.code !== 0) return null;
     return head.stdout.trim();
   } catch {
+    if (isExpired()) return "expired";
     return null;
   }
 }
