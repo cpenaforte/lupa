@@ -38,7 +38,7 @@ import {
   ensureOllama,
   type LlmResult,
 } from "./llm.js";
-import { buildMessages, linkedIssueNumber } from "./prompt.js";
+import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
 import { buildBody, buildFallbackReport, eventFor, exitFor, mapToComments, redactFindings, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
@@ -423,6 +423,84 @@ export function sanitizeFinding(f: Finding): Finding {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt budget (F10). The variable user-message portion of the single-shot
+// inference request — fast findings, linked-issue context, and diff together —
+// is bounded in UTF-8 bytes (Buffer.byteLength, what actually ships).
+// ---------------------------------------------------------------------------
+
+/** Prefix of `s` holding at most `maxBytes` UTF-8 bytes, cut on a code-point boundary. */
+function cutToBytes(s: string, maxBytes: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const ch of s) {
+    const bl = Buffer.byteLength(ch, "utf8");
+    if (bytes + bl > maxBytes) break;
+    bytes += bl;
+    end += ch.length;
+  }
+  return s.slice(0, end);
+}
+
+/**
+ * Fits the structured prompt regions into `budget` UTF-8 bytes. Cut order:
+ * linked-issue context first (truncate with a marker, or drop when the
+ * allowance is negative), then whole fast findings from the tail with a
+ * re-rendered omitted count; the diff is never cut. Every region is
+ * neutralised first, exactly as `buildMessages` renders it, and every
+ * measurement runs on the rendered string. Findings objects pass through
+ * (only their serialized form is escaped at render); posting and artifacts
+ * keep using the full `fast` array, so omitted findings still reach the review.
+ */
+export function budgetPrompt(
+  fast: Finding[],
+  promptText: string,
+  issueBody: string | undefined,
+  skipped: string[],
+  budget: number,
+): { fast: Finding[]; promptText: string; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean } {
+  const nPrompt = neutralise(promptText);
+  const nIssueFull = issueBody !== undefined && issueBody.trim() !== "" ? neutralise(issueBody) : undefined;
+  const render = (f: Finding[], ib: string | undefined, omitted: number): string =>
+    buildMessages(f, nPrompt, ib, skipped, undefined, omitted).user;
+
+  let curIssue = nIssueFull;
+  let issueDropped = false;
+  let kept = [...fast];
+  let omitted = 0;
+
+  if (Buffer.byteLength(render(kept, curIssue, 0), "utf8") <= budget) {
+    return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: 0, issueDropped: false };
+  }
+
+  // Step 1: linked-issue context. The allowance is sized once against the full
+  // findings set: budget minus everything else plus the fixed cost of carrying
+  // any issue text (header, separators, tags, marker — byte-exact, measured on
+  // the rendered regions, never estimated).
+  if (curIssue !== undefined) {
+    const noIssueBytes = Buffer.byteLength(render(kept, undefined, 0), "utf8");
+    const markerBytes = Buffer.byteLength(ISSUE_TRUNCATION_MARKER, "utf8");
+    const issueOverhead =
+      Buffer.byteLength(render(kept, ISSUE_TRUNCATION_MARKER, 0), "utf8") - noIssueBytes - markerBytes;
+    const allowance = budget - noIssueBytes - issueOverhead;
+    if (allowance < 0) {
+      curIssue = undefined;
+      issueDropped = true;
+    } else if (Buffer.byteLength(curIssue, "utf8") > allowance) {
+      curIssue = cutToBytes(curIssue, Math.max(0, allowance - markerBytes)) + ISSUE_TRUNCATION_MARKER;
+    }
+  }
+
+  // Step 2: fast-findings overflow. Whole findings dropped from the tail with a
+  // re-rendered count — never mid-finding cuts, so the JSON stays parseable.
+  while (kept.length > 0 && Buffer.byteLength(render(kept, curIssue, omitted), "utf8") > budget) {
+    kept = kept.slice(0, -1);
+    omitted += 1;
+  }
+
+  return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: omitted, issueDropped };
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -527,7 +605,24 @@ async function slowPath(
   if (check.status === "unknown") {
     core.warning(`model check inconclusive (${check.detail ?? "unknown error"}); continuing`);
   }
-  const messages = buildMessages(fast, promptText, issueBody, skipped);
+  const promptFast = fast.map(sanitizeFinding);
+  const b = budgetPrompt(promptFast, promptText, issueBody, skipped, i.maxPromptChars);
+  const messages = buildMessages(
+    b.fast,
+    b.promptText,
+    b.issueBody,
+    b.skipped,
+    i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : undefined,
+    b.findingsOmitted,
+  );
+  const promptBytes = Buffer.byteLength(messages.user, "utf8");
+  if (promptBytes > i.maxPromptChars) {
+    core.warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
+    return undefined;
+  }
+  if (b.issueDropped) {
+    core.info(`linked issue context dropped to fit the ${i.maxPromptChars}-byte prompt budget`);
+  }
   const llmOpts = {
     model: i.llmModel,
     apiKey: i.llmApiKey,
@@ -573,7 +668,7 @@ async function slowPath(
       },
     };
     const conv: Conversation = {
-      ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }),
+      ...messages,
       tools: [...TOOL_DEFS],
     };
     if (linked.length > 0)

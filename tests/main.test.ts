@@ -1388,3 +1388,129 @@ describe("exec env and git path helpers", () => {
     expect(unquoteGitPath('"tab\\there"')).toBe("tab\there");
   });
 });
+
+describe("prompt budget", () => {
+  const countRealTags = (s: string, tag: string) =>
+    (s.match(new RegExp(`<\\s*\\/?\\s*${tag}\\b[^>]*>?`, "gi")) ?? []).length;
+
+  const diffWithHunk = (body: string, file = "src/a.ts"): string =>
+    [
+      `diff --git a/${file} b/${file}`,
+      "index 111..222 100644",
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      "@@ -1 +1 @@",
+      `+${body}`,
+      "",
+    ].join("\n");
+
+  // ~2,900 B single-line hunk, DIFF format.
+  const DIFF_2900 = diffWithHunk("x".repeat(2900));
+  // DIFF_2700 per the brief: constructed at 2,900 B.
+  const DIFF_2700 = diffWithHunk("x".repeat(2900));
+  // ~2,000 B hunk (the default 141 B DIFF never reaches any budget).
+  const DIFF_2000 = diffWithHunk("x".repeat(2000));
+
+  // Pinned ≈295 B JSON (verify with Buffer.byteLength in-test).
+  const SCAN_FINDING: Finding = {
+    severity: "warning",
+    file: "src/a.ts",
+    line: 2,
+    rule: "scan-rule",
+    message: "m".repeat(200),
+  };
+
+  // BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files `src/fixture-source-file-00.ts` …
+  // `src/fixture-source-file-24.ts` (~29-char paths → ~33 B/note-line). Exact sizes:
+  // big section = 14 + 12 + 5201 + 1 = 5228 chars, leaving a ~272-char gap under
+  // maxDiffChars 5500; each tiny section = 34 + 12 + 261 + 1 = 308 chars, so all 25 skip.
+  // diff text ≈ 5.2 KB (< 6,000 alone), note (20 lines + "…and 5 more") ≈ 775 B,
+  // total > 6,000 after the issue and findings are cut → skip.
+  const BIG_FIRST_PATCH = [
+    diffWithHunk("b".repeat(5200), "src/big.ts"),
+    ...Array.from({ length: 25 }, (_, i) =>
+      diffWithHunk("t".repeat(260), `src/fixture-source-file-${String(i).padStart(2, "0")}.ts`)),
+  ].join("");
+
+  // CJK_PATCH: 8 files × ~7,450 CJK units (each under PER_FILE_CAP 8000).
+  const CJK_PATCH = Array.from({ length: 8 }, (_, i) =>
+    diffWithHunk("あ".repeat(7450), `src/cjk-0${i}.ts`)).join("");
+
+  it("truncates an oversized issue with a balanced marker", async () => {
+    const r = await runWithMocks({ maxPromptChars: 4000, issueBody: "x".repeat(5000), prBody: "Fixes #7" });
+    const user = r.prompts!.user;
+    expect(user).toContain("…[issue context truncated to fit the prompt budget]");
+    expect(countRealTags(user, "linked-issue")).toBe(2); // balanced (inline the prompt.test.ts regex or import the helper pattern)
+    expect(Buffer.byteLength(user, "utf8")).toBeLessThanOrEqual(4000);
+    expect(r.llmCalled).toBe(1);
+  });
+  it("drops the issue block when the allowance is negative", async () => {
+    // Allowance = 3200 − (2935 + 295 + ~100 + 145) < 0 → dropped (a zero-finding fixture would
+    // silently truncate instead — the finding pins the allowance).
+    const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2900, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
+    expect(r.prompts!.user).not.toContain("## Linked issue");
+    expect(r.llmCalled).toBe(1);
+  });
+  it("drops whole findings with an exact omitted count", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
+    const r = await runWithMocks({ maxPromptChars: 1000, scan: many });
+    // ^ 12 findings ≈ 1.2 KB + framing/diff ≈ 1.7 KB total > 1000 → drops ~7-8.
+    const user = r.prompts!.user;
+    const m = user.match(/Omitted (\d+) fast finding\(s\) to fit the prompt budget\./);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBeGreaterThan(0);
+    const jsonLine = user.split("\n\n").find((l) => l.startsWith("["));
+    const kept = JSON.parse(jsonLine!) as unknown[];
+    expect(kept.length + Number(m![1])).toBe(many.length);
+  });
+  it("never cuts the diff, skipping instead", async () => {
+    const r = await runWithMocks({ maxPromptChars: 1000, diff: DIFF_2000 });
+    // ^ DIFF_2000: custom `diff` with a ~2,000 B hunk (the default 141 B DIFF never reaches any budget).
+    expect(vi.mocked(core.warning).mock.calls.map(String).join("\n")).toMatch(/prompt \d+ exceeds max_prompt_chars 1000 after bounded cuts/);
+    expect(r.llmCalled).toBe(0);
+  });
+  it("skips after cuts are exhausted", async () => {
+    const r = await runWithMocks({ maxPromptChars: 6000, maxDiffChars: 5500, diff: BIG_FIRST_PATCH, issueBody: "z".repeat(3000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
+    // ^ BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files `src/fixture-source-file-00.ts` …
+    // `src/fixture-source-file-24.ts` (~29-char paths → ~33 B/note-line); test computes exact
+    // Buffer.byteLength sums to show diff ≈ 5.2 KB, note ≈ 775 B, total > 6,000 with diff alone < 6,000.
+    expect(r.llmCalled).toBe(0);
+  });
+  it("pins the multibyte floor", async () => {
+    const r = await runWithMocks({ diff: CJK_PATCH });
+    // ^ CJK_PATCH: 8 files × ~7,450 CJK units (each under PER_FILE_CAP 8000).
+    expect(r.llmCalled).toBe(0); // ~180 KB bytes > 120,000 default
+  });
+  it("sanitizes evidence before the prompt", async () => {
+    const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "a\0b" }] });
+    expect(r.prompts!.user).toContain('"message":"ab"'); // control strip is the discriminator (NUL never survives JSON.stringify)
+  });
+  it("caps over-long finding fields in the prompt", async () => {
+    const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "y".repeat(3000) }] });
+    const user = r.prompts!.user;
+    expect(user).not.toContain("y".repeat(3000));
+    expect(user).toContain("y".repeat(100)); // prefix present, capped per MSG_CAP
+  });
+  it("still posts omitted findings", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
+    const r = await runWithMocks({ maxPromptChars: 1000, scan: many });
+    expect(r.posted).toBe(true);
+    expect(r.reviews.at(-1)!.body).toContain("lupa: 13 finding(s)."); // 12 scan + 1 default LLM finding, all merged
+    expect(JSON.stringify(r.reviews.at(-1)!)).toContain("r11"); // prompt-dropped rule still posts
+  });
+  it("renders the omission line on the agent path", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
+    const r = await runWithMocks({ maxPromptChars: 1000, llmAgent: true, scan: many });
+    expect((r.agentConv as { user: string }).user).toContain("Omitted ");
+  });
+  it("treats whitespace-only issues as absent", async () => {
+    const r = await runWithMocks({ issueBody: "   \n  ", prBody: "Fixes #7" });
+    expect(r.prompts!.user).not.toContain("## Linked issue");
+    expect(r.llmCalled).toBe(1);
+  });
+  it("logs the issue-dropped signal", async () => {
+    const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
+    expect(vi.mocked(core.info).mock.calls.map(String).join("\n")).toContain("linked issue context dropped to fit the 3200-byte prompt budget");
+    expect(r.llmCalled).toBe(1);
+  });
+});

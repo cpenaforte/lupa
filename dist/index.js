@@ -25982,6 +25982,7 @@ function neutralise(text) {
 var LINKED_ISSUE_HEADER = "## Linked issue (context from the PR's closing reference)";
 var LINKED_ISSUE_OPEN = "<linked-issue>\n";
 var LINKED_ISSUE_CLOSE = "\n</linked-issue>";
+var ISSUE_TRUNCATION_MARKER = "\u2026[issue context truncated to fit the prompt budget]";
 function agentAddendum(maxTurns) {
   return [
     "You have read-only tools to inspect the repository and any linked repositories: read_file, list_dir, grep, glob. Use them to verify claims (callers, definitions, configs, tests) before reporting.",
@@ -28404,6 +28405,47 @@ function sanitizeFinding(f) {
   }
   return out;
 }
+function cutToBytes(s, maxBytes) {
+  let bytes = 0;
+  let end = 0;
+  for (const ch of s) {
+    const bl = Buffer.byteLength(ch, "utf8");
+    if (bytes + bl > maxBytes)
+      break;
+    bytes += bl;
+    end += ch.length;
+  }
+  return s.slice(0, end);
+}
+function budgetPrompt(fast, promptText, issueBody, skipped, budget) {
+  const nPrompt = neutralise(promptText);
+  const nIssueFull = issueBody !== void 0 && issueBody.trim() !== "" ? neutralise(issueBody) : void 0;
+  const render = (f, ib, omitted2) => buildMessages(f, nPrompt, ib, skipped, void 0, omitted2).user;
+  let curIssue = nIssueFull;
+  let issueDropped = false;
+  let kept = [...fast];
+  let omitted = 0;
+  if (Buffer.byteLength(render(kept, curIssue, 0), "utf8") <= budget) {
+    return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: 0, issueDropped: false };
+  }
+  if (curIssue !== void 0) {
+    const noIssueBytes = Buffer.byteLength(render(kept, void 0, 0), "utf8");
+    const markerBytes = Buffer.byteLength(ISSUE_TRUNCATION_MARKER, "utf8");
+    const issueOverhead = Buffer.byteLength(render(kept, ISSUE_TRUNCATION_MARKER, 0), "utf8") - noIssueBytes - markerBytes;
+    const allowance = budget - noIssueBytes - issueOverhead;
+    if (allowance < 0) {
+      curIssue = void 0;
+      issueDropped = true;
+    } else if (Buffer.byteLength(curIssue, "utf8") > allowance) {
+      curIssue = cutToBytes(curIssue, Math.max(0, allowance - markerBytes)) + ISSUE_TRUNCATION_MARKER;
+    }
+  }
+  while (kept.length > 0 && Buffer.byteLength(render(kept, curIssue, omitted), "utf8") > budget) {
+    kept = kept.slice(0, -1);
+    omitted += 1;
+  }
+  return { fast: kept, promptText: nPrompt, issueBody: curIssue, skipped, findingsOmitted: omitted, issueDropped };
+}
 function fields(env) {
   return env.payload;
 }
@@ -28482,7 +28524,17 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prB
   if (check.status === "unknown") {
     warning(`model check inconclusive (${check.detail ?? "unknown error"}); continuing`);
   }
-  const messages = buildMessages(fast, promptText, issueBody, skipped);
+  const promptFast = fast.map(sanitizeFinding);
+  const b = budgetPrompt(promptFast, promptText, issueBody, skipped, i.maxPromptChars);
+  const messages = buildMessages(b.fast, b.promptText, b.issueBody, b.skipped, i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : void 0, b.findingsOmitted);
+  const promptBytes = Buffer.byteLength(messages.user, "utf8");
+  if (promptBytes > i.maxPromptChars) {
+    warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
+    return void 0;
+  }
+  if (b.issueDropped) {
+    info(`linked issue context dropped to fit the ${i.maxPromptChars}-byte prompt budget`);
+  }
   const llmOpts = {
     model: i.llmModel,
     apiKey: i.llmApiKey,
@@ -28527,7 +28579,7 @@ async function slowPath(env, deps, pr, fast, promptText, issueBody, skipped, prB
       }
     };
     const conv = {
-      ...buildMessages(fast, promptText, issueBody, skipped, { maxTurns: i.llmAgentMaxTurns }),
+      ...messages,
       tools: [...TOOL_DEFS]
     };
     if (linked.length > 0)
@@ -28858,6 +28910,7 @@ if (isEntry) {
   });
 }
 export {
+  budgetPrompt,
   cleanEnvForExec,
   main,
   readRunEnv,
