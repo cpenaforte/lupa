@@ -93,7 +93,7 @@ git commit -m "feat: max_prompt_chars input and budget-aware rendering (F10)"
 
 - [ ] **Step 1: Write the failing tests in `tests/main.test.ts`**
 
-`describe("prompt budget")`, driven through `runWithMocks` with `maxPromptChars` overrides (check `MockOpts` for an inputs-override seam, e.g. how `maxDiffChars` is set — mirror it; add `maxPromptChars` to the fixture inputs default at `:173` = 60000 if Task 57 hasn't):
+`describe("prompt budget")`, driven through `runWithMocks` with `maxPromptChars` overrides via Task 57's `MockOpts.maxPromptChars` seam (`inputsFor` defaults it to 120000):
 
 ```ts
 it("truncates an oversized issue with a balanced marker", ...); // ~5 KB issue, small budget; tags balanced; rest intact
