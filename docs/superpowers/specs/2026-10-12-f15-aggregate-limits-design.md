@@ -11,7 +11,8 @@ as clean.
 ## Decisions (approved in brainstorming)
 
 - Scope: F15 only (`src/main.ts` publication flow + `readFindings`, `src/review.ts`
-  mapping/body, `src/github.ts` untouched, `src/scanners.ts` artifact reads,
+  mapping/body, `src/github.ts` (`PostReviewOptions` + fold re-cap only),
+  `src/scanners.ts` artifact reads,
   `src/inputs.ts` + `action.yml` + README for the new inputs, owning tests).
   No adapter, template, or CI changes.
 - Approach C (two gates + one shared helper): bound at **ingestion** (byte caps
@@ -148,7 +149,9 @@ Input: the full redacted set (gates already computed or computed from it —
    retained portion contains an unclosed ```` ``` ```` fence, cut back to
    before its opening line (fence lines are short whole lines, so this always
    terminates); the trunc-note is plain text and always last. Truncation drops
-   are witnessed by the note only (no per-item count — stated). `body = buildBody(general,
+   are witnessed by the note only (no per-item count — stated).
+   `capBody` takes the markers as an argument and guarantees them inside the
+   cap (content is cut to `max − markers`); callers never hand-reserve. `body = buildBody(general,
    summary)`; then markers, then cap (markers are always inside the cap):
    - `omitted > 0` → `> Omitted: ${omitted} finding(s) omitted to fit the ${max}-finding publication limit.` (exact)
    - body over `maxChars` → cut content to fit, append `> Note: review body truncated to the ${max}-character limit.` (exact)
@@ -165,14 +168,17 @@ at the existing call sites.
 ### Off-diff fold stays under the cap
 
 `postReview` folds inline comments into the body on a 422 off-diff retry —
-after the cap above. So `PostReviewOptions.maxBodyChars` is REQUIRED (an
-omitted cap would silently disable the re-cap), `Gateway.createReview`'s opts
+after the cap above. So `PostReviewOptions.maxBodyChars` is a REQUIRED key
+(inside the still-optional `opts?` — anyone passing options must pass the cap,
+so the re-cap can never be silently disabled), `Gateway.createReview`'s opts
 gain it (interface at `src/main.ts:81`, call site `:774`, `realGateway`
 forwards it at `:1030-1031`, test fakes updated — named per task), and the
 fold path re-runs the shared `capBody` after folding: strip lines matching
 the trunc-note template (`^> Note: review body truncated to the \d+-character
-limit\.$` — stale notes from the pre-fold cap, never the `> Omitted:` count
-markers), cut fence-aware, append a fresh trunc-note last. Without this, ~30
+limit\.$` — stale notes from the pre-fold cap), extract the `> Omitted:`
+count lines and pass them as `capBody` markers (they survive inside the cap —
+a folded-then-recapped body never loses its omission count), cut fence-aware,
+append a fresh trunc-note last. Without this, ~30
 folded comments (~6 KB each at full field caps) could post a ~180 KB body and
 a retry-exhausted 422 would rethrow with no issue fallback. The `main.ts`
 `createReview` closure forwards the input.
@@ -185,8 +191,9 @@ silently — stated residual.
 
 - `summaryPath` artifact (`GITHUB_STEP_SUMMARY`): written through
   `buildFallbackReport(findings, { maxBytes: remaining })` where `remaining =
-  1048576 − bytes already in the file` (`statSync`, missing → 0 — the 1 MiB
-  platform ceiling; uploads above it abort). Whole-record cuts only (no split
+  1048576 − bytes already in the file − 1` (`statSync`, missing → 0; the −1 is
+  the trailing `\n` the append adds — without it a full-size report overflows
+  by one byte). The 1 MiB figure is the platform ceiling; uploads above it Whole-record cuts only (no split
   UTF-8, no open fences — inherited from F07); its `> Omitted:` marker is the
   truncation signal, no extra note. `remaining` too small for even the heading
   (F07 throws): catch, `core.warning`, skip the write — observability degrades
