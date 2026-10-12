@@ -63,8 +63,16 @@ stay stable and short):
   tool-health: `source` = the `name` argument (already the warning's `rule`
   value — no invention), confidence absent — never 90.
 - `warning(rule, message, source?)` gains an optional third parameter
-  (non-breaking for existing call sites); `runGitleaks` passes `"gitleaks"`,
-  the SBOM branch `"sbom".
+  (non-breaking for existing call sites); `fromStdout` assigns its (mapped)
+  label internally, `runGitleaks` passes `"gitleaks"`, the SBOM branch
+  `"sbom"`, `byteCheck` maps its label argument internally via
+  `sourceForLabel()` (existing `byteCheck` tests with plain labels are
+  unaffected — mapping is identity without parens).
+- `sourceForLabel(label: string): string` in `fastpath.ts` (finding home, no
+  cycles): `label.split(" (")[0]` — identity for paren-free labels,
+  `"osv-scanner (lock)"` → `"osv-scanner"`. Used at EVERY construction site
+  including `warning()` and `byteCheck`, so lockfile paths never reach the
+  contract.
 - Tool-health warnings (`scanner-missing`/`scanner-failed`/`sbom-write`,
   `byteCheck`): `source` = the failing tool's label, confidence ABSENT (no
   evidentiary claim). Synthetic substitutes (`L2_SKIPPED`): `source: "l2"`,
@@ -73,7 +81,9 @@ stay stable and short):
   `confidence` from a nullable structured `confidence` field (same pattern
   as `duplicateOf` — schema, `googleSchema`-safe shape, added to the
   `required` lists, absent stays absent; invalid values drop the FIELD,
-  never the finding). Agent-mode findings carry NO provenance: `agent.ts`
+  never the finding). No separate agent schema: required keys constrain the
+  model's output and models emit them (dedup's required verdict keys set
+  this precedent without incident); the agent strip covers the rest. Agent-mode findings carry NO provenance: `agent.ts`
   strips the three fields after its `toFindings` call (one explicit step —
   the shared parser cannot know its caller); agent prompt/contract untouched,
   revisit with Q01 structured output (seam noted, not built). Response
@@ -88,8 +98,10 @@ stay stable and short):
 provenance must never drop silently mid-pipeline)
 
 - `isFinding` accepts the new fields with exact shapes (source: non-empty
-  string ≤ 100 chars; confidence: safe integer 0..100; evidence: object
-  with optional strings; anything else → contract violation as today).
+  string with `.length ≤ 100` (UTF-16 units — deliberately NOT code points,
+  diverging from `capText`; validation is a shape check, capping is
+  `sanitizeFinding`'s job); confidence: safe integer 0..100; evidence:
+  object with optional strings; anything else → contract violation as today).
 - `sanitizeFinding` carries all three with caps (`source` capped like rule,
   `snippet` like message, `analyzer` capped like rule with control-strip);
   absent stays absent through sanitize, redact, merge, and funnel — no stage
@@ -119,15 +131,17 @@ provenance must never drop silently mid-pipeline)
 ### Rendering (display-only; gates untouched)
 
 - Inline bodies: compact trailer `` `src:<source> · conf <n>` `` appended
-  after the message/suggestion — partials: source-only →
-  `` `src:<source>` ``, confidence-only → `` `conf <n>` ``, neither → no
-  trailer. `confidence: 0` renders (`conf 0` — never truthiness-tested;
-  pinned by test).
+  after the message/suggestion — AFTER any suggestion fence (never inside a
+  patch block); partials: source-only → `` `src:<source>` ``,
+  confidence-only → `` `conf <n>` ``, neither → no trailer. `confidence: 0`
+  renders (`conf 0` — never truthiness-tested; pinned by test).
 - General-body items: same trailer inline. The trailer is part of item text:
   it renders BEFORE any `capBody` cut (never appended post-cap) and may be
   truncated with the item (the truncation note witnesses).
 - Fallback report: `- Source:` / `- Confidence:` / `- Evidence:` rows after
-  the `- Message/evidence:` row (present fields only).
+  the `- Message/evidence:` row (present fields only; values via the
+  existing `field()` fenced helper like neighboring rows; `evidence` =
+  `analyzer: <name>` line when present + fenced snippet when present).
 - SARIF results: `properties` with `confidence`/`source` when EITHER is
   present; omitted entirely when both absent (`message.text` unchanged).
 - `findings.json`: stores everything (already does — new fields ride along;
