@@ -260,10 +260,12 @@ git commit -m "fix: whole-agent deadline and exact byte allowance (F11)"
     removeDir+reclone) + expired deadline → same error + dir still exists (no wipe).
   - Pre-seeded dir with `.git` + valid marker (`mkdir .git`, write
     `.lupa-clone.json` with `{ repo: "a/b", branch: "main", sha: "0"*40 }` per the
-    `:285` valid-cache test), `deps.run` fakes returning non-zero (as a
-    clamped-timeout kill would) + expired deadline → error
-    containing `deadline exceeded` (not a reclone) + dir still exists (proves the
-    per-call expiry check maps kills to `"expired"`, not to wipe-`null`).
+    `:285` valid-cache test), deadline `Date.now() + 100`, first validation git
+    fake sleeps ≥ 300 ms then returns non-zero (as a clamped-timeout kill would) →
+    error containing `deadline exceeded` (not a reclone) + dir still exists. Robust
+    one-sided timing: the sleep guarantees entry passes but the post-call check
+    finds expiry; without the per-call re-check this path wipes the dir for
+    reclone, so the dir-intact assertion is non-vacuous.
   - In `tests/main.test.ts`: nothing new (closure covered by type-check + review).
 
 - [ ] **Step 2: Run tests to verify they fail**
