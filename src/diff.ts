@@ -10,6 +10,8 @@ export interface FileDiff {
   truncated: boolean;
   /** Decided by git (binary diff). Never guess from extension. */
   binary?: boolean;
+  /** Set from the `deleted file mode` header: the file was deleted, so it introduces nothing. */
+  deleted?: boolean;
   /** Bytes on disk (stat). The large-file rule uses this, never hunks.length. */
   size?: number;
 }

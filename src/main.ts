@@ -41,7 +41,7 @@ import {
 } from "./llm.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, prioritizeFindings, redactFindings, type InlineComment, type ReviewPayload } from "./review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, type InlineComment, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 import { readCappedFileSync } from "./artifact-limits.js";
 
@@ -80,7 +80,7 @@ export interface Gateway {
   getIssueBody(issue: number): Promise<string>;
   /** Repository size in KB, or undefined when unknown (any API error). */
   getRepoSize(owner: string, repo: string): Promise<number | undefined>;
-  createReview(pr: number, payload: ReviewPayload, opts: { canWrite: boolean; maxBodyChars?: number }): Promise<void>;
+  createReview(pr: number, payload: ReviewPayload, opts: { canWrite: boolean; maxBodyChars?: number; blocking?: ReadonlySet<string>; commentKeys?: readonly (string | null)[] }): Promise<void>;
   createIssueComment(pr: number, body: string, opts: { enabled: boolean; issuesWrite: boolean }): Promise<void>;
 }
 
@@ -302,21 +302,23 @@ function headerFile(line: string): string | undefined {
 
 /**
  * Splits `git diff -U3` output into per-file sections. `hunks` starts at the first `@@`, so
- * file headers never reach the hunk parsers. Binary sections are flagged from git's own text.
+ * file headers never reach the hunk parsers. Binary sections are flagged from git's own text,
+ * and deleted-file sections from the `deleted file mode` header.
  */
-function parseDiffFiles(text: string, workDir?: string): FileDiff[] {
-  type Section = { file: string; lines: string[]; binary: boolean };
+export function parseDiffFiles(text: string, workDir?: string): FileDiff[] {
+  type Section = { file: string; lines: string[]; binary: boolean; deleted: boolean };
   const sections: Section[] = [];
   let cur: Section | undefined;
   for (const line of text.split("\n")) {
     if (line.startsWith("diff --git ")) {
       const file = headerFile(line);
-      cur = file === undefined ? undefined : { file, lines: [], binary: false };
+      cur = file === undefined ? undefined : { file, lines: [], binary: false, deleted: false };
       if (cur !== undefined) sections.push(cur);
       continue;
     }
     if (cur === undefined) continue;
     if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) cur.binary = true;
+    if (line.startsWith("deleted file mode")) cur.deleted = true;
     cur.lines.push(line);
   }
   return sections.map((s) => {
@@ -327,6 +329,7 @@ function parseDiffFiles(text: string, workDir?: string): FileDiff[] {
     const size = hunks === "" && !s.binary ? 0 : sizeOf(workDir, s.file);
     const f: FileDiff = { file: s.file, hunks, truncated: false, size };
     if (s.binary) f.binary = true;
+    if (s.deleted) f.deleted = true;
     return f;
   });
 }
@@ -776,13 +779,17 @@ interface PublishArgs {
 /**
  * Renders overflow inline comments into body text in the same item shape as
  * the off-diff fold in github.ts (`- path:line` plus two-space-indented
- * continuation lines). When the general section is empty the block carries its
- * heading; otherwise it continues the existing list.
+ * continuation lines). Items outside the blocking set carry a ` (non-blocking)`
+ * suffix (rule absent means assume blocking: no marker). When the general
+ * section is empty the block carries its heading; otherwise it continues the
+ * existing list.
  */
-function foldExcessInline(withHeading: boolean, excess: InlineComment[]): string {
+function foldExcessInline(withHeading: boolean, excess: InlineComment[], blocking?: ReadonlySet<string>): string {
   const items = excess.map((c) => {
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
-    const head = `- ${c.path}:${c.line}`;
+    const key = c.rule === undefined ? null : `${c.rule}\0${c.path}\0${c.line}`;
+    const suffix = key !== null && blocking !== undefined && !blocking.has(key) ? " (non-blocking)" : "";
+    const head = `- ${c.path}:${c.line}${suffix}`;
     if (text.trim() === "") return head;
     return `${head}\n  ${text.replace(/\n/g, "\n  ")}`;
   });
@@ -793,8 +800,12 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[]): string
  * Posts one review for `headSha`, or dry-runs it. Writes the summary in every case. Posts only
  * when the token can write and the PR head still equals `headSha` (checked via the API).
  * A failed issue fallback is a warning; it never changes the exit code.
+ *
+ * The blocking set (PR-touched findings) is computed BEFORE all early returns
+ * (dry-run, fork-readonly, stale-head) and returned for the flow exits, so every
+ * exit path gates on it. Task 72: the reopened set is empty (no thread read yet).
  */
-async function publishReview(a: PublishArgs): Promise<void> {
+async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
   // Dedup merge before the funnel. Gate inputs keep the full pre-merge set (provably
@@ -803,23 +814,31 @@ async function publishReview(a: PublishArgs): Promise<void> {
   const { merged, dropped } =
     a.verdicts === undefined ? { merged: fullSet, dropped: 0 } : mergeDuplicates(fullSet, a.verdicts);
   if (dropped > 0) core.warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
+  const parsed = parseHunks(a.hunks);
+  const { introduced } = partitionGate(merged, parsed, a.hunks);
+  const reopened = new Set<string>();
+  const blocking = introduced;
+  const blockingKeys = new Set(blocking.map(reopenedKey));
   // Publication funnel: top-N by severity, then the inline cap (excess folds
-  // to the body), then the body char cap. Gates keep the full pre-cap set.
+  // to the body), then the body char cap. Gates keep the blocking set.
   const ordered = prioritizeFindings(merged);
   const retained = ordered.slice(0, inputs.maxFindings);
   const omitted = merged.length - retained.length;
   const omissionMarker = omitted > 0 ? omissionMarkerFor(omitted, inputs.maxFindings) : undefined;
-  const { inline, general } = mapToComments(retained, parseHunks(a.hunks));
+  const { inline, general } = mapToComments(retained, parsed);
   const postedInline = inline.slice(0, inputs.maxInlineComments);
   const excessInline = inline.slice(inputs.maxInlineComments);
-  let body = buildBody(general, summaryFor(fullSet));
-  if (excessInline.length > 0) body += foldExcessInline(general.length === 0, excessInline);
+  let body = buildBody(general, summaryFor(fullSet), { reopened, blocking: blockingKeys });
+  if (excessInline.length > 0) body += foldExcessInline(general.length === 0, excessInline, blockingKeys);
   const capped = capBody(body, inputs.maxReviewBodyChars, omissionMarker === undefined ? [] : [omissionMarker]);
+  // commentKeys ride index-aligned with the posted comments for the 422 fold path;
+  // rule is internal (fold keys only) and never ships in the payload.
+  const commentKeys = postedInline.map((c) => (c.rule === undefined ? null : `${c.rule}\0${c.path}\0${c.line}`));
   const payload: ReviewPayload = {
     commit_id: a.headSha,
     body: capped,
-    event: eventFor(inputs.failLevel, fullSet),
-    comments: postedInline,
+    event: eventFor(inputs.failLevel, blocking),
+    comments: postedInline.map(({ rule, ...c }) => c),
   };
   if (a.env.summaryPath !== undefined) {
     // The 1 MiB platform ceiling minus bytes already in the file minus the
@@ -842,22 +861,22 @@ async function publishReview(a: PublishArgs): Promise<void> {
     const high = fullSet.filter((f) => f.severity === "high").length;
     core.info(
       `post_comment is false: dry-run, nothing posted (would post event=${payload.event}, ` +
-        `inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, omitted=${omitted})`,
+        `inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${blocking.length}, omitted=${omitted})`,
     );
-    return;
+    return { blocking };
   }
   const canWrite = !a.isFork || a.env.tokenType === "app" || a.env.tokenType === "workflow-run";
   if (!canWrite) {
     core.warning("fork PR with a read-only token: review not posted; summary and artifact only");
-    return;
+    return { blocking };
   }
   const live = await a.deps.gh.getPr(a.pr);
   if (live.headSha !== a.headSha) {
     core.warning(`PR head moved from ${a.headSha} to ${live.headSha}: skipping review for the stale head`);
-    return;
+    return { blocking };
   }
   try {
-    await a.deps.gh.createReview(a.pr, payload, { canWrite: true, maxBodyChars: inputs.maxReviewBodyChars });
+    await a.deps.gh.createReview(a.pr, payload, { canWrite: true, maxBodyChars: inputs.maxReviewBodyChars, blocking: blockingKeys, commentKeys });
     a.out.posted = true;
   } catch (e) {
     if (e instanceof StaleHeadError) {
@@ -868,7 +887,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
       );
       a.out.staleSkipped = true;
       a.out.exitCode = 0;
-      return;
+      return { blocking };
     }
     if (!(e instanceof ReadonlyTokenError)) throw e;
     core.error(`review post refused by GitHub: ${e.detail !== "" ? e.detail : e.message}`);
@@ -877,7 +896,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
     const issuesWrite = a.env.issueFallback && canWrite;
     if (!issuesWrite) {
       core.warning("issue fallback unavailable (not enabled, or token lacks issues: write); nothing posted");
-      return;
+      return { blocking };
     }
     try {
       // The fallback publishes the retained (publication-capped) set with the
@@ -896,6 +915,7 @@ async function publishReview(a: PublishArgs): Promise<void> {
       core.warning(`issue fallback failed: ${(fallbackErr as Error).message}`);
     }
   }
+  return { blocking };
 }
 
 /**
@@ -1039,8 +1059,8 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   const { merged: sarifSet } = verdicts === undefined ? { merged: redacted } : mergeDuplicates(redacted, verdicts);
   writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(sarifSet), null, 2) + "\n", "utf8");
 
-  await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts });
-  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, all);
+  const { blocking } = await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts });
+  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, blocking);
 }
 
 /**
@@ -1094,8 +1114,8 @@ async function runFlowB(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
   // A missing verdicts key means no judge ran: silent no-merge. Out-of-range indices
   // range-check inside the publishReview merge (dropped with the count).
-  await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
-  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, findings);
+  const { blocking } = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
+  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, blocking);
 }
 
 /** Runs one review. Returns the outcome; main() maps exitCode to the process. */
@@ -1147,7 +1167,7 @@ function realGateway(token: string): Gateway {
     },
     getRepoSize: (owner, repo) => fetchRepoSize(octokit(), owner, repo),
     createReview: (pr, payload, opts) =>
-      postReview(octokit(), pr, payload, { canWrite: opts.canWrite, maxBodyChars: opts.maxBodyChars }).then(() => undefined),
+      postReview(octokit(), pr, payload, { canWrite: opts.canWrite, maxBodyChars: opts.maxBodyChars, blocking: opts.blocking, commentKeys: opts.commentKeys }).then(() => undefined),
     createIssueComment: (pr, body, opts) => postIssueFallback(octokit(), { pr, body, ...opts }),
   };
 }

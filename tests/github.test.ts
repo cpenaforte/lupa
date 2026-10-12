@@ -379,6 +379,62 @@ describe("postReview", () => {
   });
 });
 
+describe("postReview fold non-blocking markers", () => {
+  const offDiff = () => httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS);
+  const keyFor = (rule: string, path: string, line: number): string => `${rule}\0${path}\0${line}`;
+  const blockingPayload: ReviewPayload = {
+    commit_id: "sha-old",
+    body: "summary",
+    event: "COMMENT",
+    comments: [
+      { path: "a.ts", line: 4, side: "RIGHT", body: "**high** [rA] mA" },
+      { path: "b.ts", line: 9, side: "RIGHT", body: "**warning** [rB] mB" },
+    ],
+  };
+
+  it("marks only index-aligned keys outside the blocking set", async () => {
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, blockingPayload, {
+      blocking: new Set([keyFor("rB", "b.ts", 9)]),
+      commentKeys: [keyFor("rA", "a.ts", 4), keyFor("rB", "b.ts", 9)],
+    });
+    const body = String(f.reviewArgs[1]!.body);
+    expect(body).toContain("- a.ts:4 (non-blocking)");
+    expect(body).toContain("- b.ts:9\n ");
+    expect(body).not.toContain("- b.ts:9 (non-blocking)");
+  });
+
+  it("treats a null key as blocking (no marker)", async () => {
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, blockingPayload, {
+      blocking: new Set([keyFor("rB", "b.ts", 9)]),
+      commentKeys: [null, keyFor("rB", "b.ts", 9)],
+    });
+    const body = String(f.reviewArgs[1]!.body);
+    expect(body).not.toContain("- a.ts:4 (non-blocking)");
+    expect(body).toContain("- a.ts:4\n ");
+  });
+
+  it("treats a length mismatch as blocking (no marker on the unkeyed tail)", async () => {
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, blockingPayload, {
+      blocking: new Set<string>(),
+      commentKeys: [keyFor("rA", "a.ts", 4)],
+    });
+    const body = String(f.reviewArgs[1]!.body);
+    expect(body).toContain("- a.ts:4 (non-blocking)");
+    expect(body).not.toContain("- b.ts:9 (non-blocking)");
+  });
+
+  it("emits no markers without blocking keys (hand-built comments stay marker-free)", async () => {
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, blockingPayload);
+    const body = String(f.reviewArgs[1]!.body);
+    expect(body).toContain("- a.ts:4\n ");
+    expect(body).not.toContain("(non-blocking)");
+  });
+});
+
 describe("getRepoSize", () => {
   it("getRepoSize returns the Octokit size in KB and undefined on error", async () => {
     const ok = { rest: { repos: { get: async () => ({ data: { size: 4321 } }) } } } as unknown as Octokit;

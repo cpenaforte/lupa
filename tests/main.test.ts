@@ -105,6 +105,9 @@ interface Rec {
   earlyFindingsRaw?: string;
   /** Options observed by the createReview fake (F15 asserts maxBodyChars forwarding). */
   reviewOpts?: { canWrite: boolean; maxBodyChars?: number };
+  /** Blocking set and post-slice comment keys observed by the createReview fake (Q02 threading pin). */
+  reviewBlocking?: ReadonlySet<string>;
+  reviewCommentKeys?: readonly (string | null)[];
   repoSizeCalls: Array<[string, string]>;
   /** Prompt messages observed by the slow-path seam (Task 58 asserts on these). */
   prompts?: { system: string; user: string };
@@ -158,6 +161,8 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
     },
     createReview: async (_pr, payload, opts) => {
       rec.reviewOpts = { canWrite: opts.canWrite, ...(opts.maxBodyChars !== undefined ? { maxBodyChars: opts.maxBodyChars } : {}) };
+      rec.reviewBlocking = opts.blocking;
+      rec.reviewCommentKeys = opts.commentKeys;
       rec.reviewAttempts += 1;
       if (o.write403) {
         throw new ReadonlyTokenError("review post refused", 403, "Resource not accessible by integration");
@@ -404,6 +409,8 @@ async function runWithMocks(o: MockOpts = {}) {
     l2Changed: rec.l2Changed,
     earlyFindingsRaw: rec.earlyFindingsRaw,
     reviewOpts: rec.reviewOpts,
+    reviewBlocking: rec.reviewBlocking,
+    reviewCommentKeys: rec.reviewCommentKeys,
     artifactDir,
     summaryPath,
     sbomDir,
@@ -557,7 +564,7 @@ describe("run() orchestration", () => {
     const dry = lines.find((l) => l.includes("dry-run, nothing posted"));
     // Fixture: one warning finding on src/a.ts:2, which is an added line in DIFF, so it maps inline.
     expect(dry).toBe(
-      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=1, general=0, high=0, omitted=0)",
+      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=1, general=0, high=0, blocking=1, omitted=0)",
     );
   });
 
@@ -569,7 +576,7 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(false);
     const dry = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
     expect(dry).toBe(
-      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1, omitted=0)",
+      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1, blocking=1, omitted=0)",
     );
   });
 
@@ -1151,6 +1158,122 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({ diff: QUOTED_BINARY });
     expect(r.body).toContain("café.bin");
     expect(r.body).not.toContain("caf\\303");
+  });
+});
+
+describe("Q02 novelty-gated blocking", () => {
+  const DEL_DIFF = `diff --git a/src/a.ts b/src/a.ts
+index 111..222 100644
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,2 +1,1 @@
+ const x = 1;
+-const gone = 1;
+`;
+
+  const SENSITIVE_DIFF = `diff --git a/id_rsa b/id_rsa
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/id_rsa
+@@ -0,0 +1 @@
++private-key-material
+`;
+
+  const TWO_ADD_DIFF = `diff --git a/src/a.ts b/src/a.ts
+index 111..222 100644
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,2 +1,4 @@
+ const x = 1;
++const y = 2;
++const z = 3;
+ export {};
+`;
+
+  it("ctx-line high stays inline but never gates: COMMENT + exit 0, no body item", async () => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 3, rule: "ctx-rule", message: "ctx high" };
+    const r = await runWithMocks({ failLevel: "high", llm: [high] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    expect(r.reviews[0]!.comments[0]).toMatchObject({ path: "src/a.ts", line: 3, side: "RIGHT" });
+    expect(r.reviews[0]!.body).toBe("lupa: 1 finding(s).");
+  });
+
+  it("LEFT-only high stays inline LEFT but never gates: COMMENT + exit 0, no body item, no note", async () => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "del-rule", message: "removed high" };
+    const r = await runWithMocks({ diff: DEL_DIFF, failLevel: "high", llm: [high] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    expect(r.reviews[0]!.comments[0]).toMatchObject({ path: "src/a.ts", line: 2, side: "LEFT" });
+    expect(r.reviews[0]!.body).toBe("lupa: 1 finding(s).");
+  });
+
+  it("lineless sensitive-path high on a touched file still blocks: REQUEST_CHANGES + exit 1", async () => {
+    const r = await runWithMocks({ diff: SENSITIVE_DIFF, failLevel: "high", llm: [] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(r.exitCode).toBe(1);
+    expect(r.reviews[0]!.comments).toEqual([]);
+    expect(r.reviews[0]!.body).toContain("- **high** **blocking** id_rsa [sensitive-path]");
+    expect(r.reviews[0]!.body).not.toContain("outside the PR diff");
+  });
+
+  it("posted payload comments carry no rule key", async () => {
+    const r = await runWithMocks({});
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    expect("rule" in r.reviews[0]!.comments[0]!).toBe(false);
+    expect(r.reviews[0]!.comments[0]).toEqual({
+      path: "src/a.ts",
+      line: 2,
+      side: "RIGHT",
+      body: expect.stringContaining("llm message"),
+    });
+  });
+
+  it("passes the computed blocking set and post-slice comment keys to the gateway", async () => {
+    const llm: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "r1", message: "first" },
+      { severity: "warning", file: "src/a.ts", line: 3, rule: "r2", message: "second" },
+    ];
+    const r = await runWithMocks({ diff: TWO_ADD_DIFF, llm, maxInlineComments: 1 });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    // The gateway saw the full blocking set even though only one comment posted.
+    expect(r.reviewBlocking).toEqual(new Set(["r1\0src/a.ts\0" + "2", "r2\0src/a.ts\0" + "3"]));
+    // Keys are post-slice and index-aligned with the posted comments.
+    expect(r.reviewCommentKeys).toEqual(["r1\0src/a.ts\0" + "2"]);
+  });
+
+  it("folds excess non-blocking inline comments with the (non-blocking) suffix", async () => {
+    const llm: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "r-add", message: "added" },
+      { severity: "warning", file: "src/a.ts", line: 3, rule: "r-ctx", message: "context" },
+    ];
+    const r = await runWithMocks({ llm, maxInlineComments: 1 });
+    expect(r.posted).toBe(true);
+    expect(r.body).toContain("**Findings not placed inline:**");
+    expect(r.body).toContain("- src/a.ts:3 (non-blocking)");
+    expect(r.body).not.toContain("- src/a.ts:2 (non-blocking)");
+  });
+
+  it("dry-run computes blocking before the early return: off-diff high keeps high=1 with blocking=0 and exit 0", async () => {
+    const info = vi.mocked(core.info);
+    info.mockClear();
+    const high: Finding = { severity: "high", file: "src/other.ts", line: 1, rule: "off-rule", message: "off diff high" };
+    const r = await runWithMocks({ postComment: false, failLevel: "high", llm: [high] });
+    expect(r.posted).toBe(false);
+    expect(r.exitCode).toBe(0);
+    const dry = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
+    expect(dry).toBe(
+      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=0, general=1, high=1, blocking=0, omitted=0)",
+    );
+    expect(r.body).toBeUndefined();
   });
 });
 
@@ -1830,7 +1953,7 @@ ${FUNNEL_DIFF_LINES.join("\n")}
     expect(r.posted).toBe(false);
     const dry = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
     expect(dry).toBe(
-      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=0, general=200, high=0, omitted=50)",
+      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=0, general=200, high=0, blocking=0, omitted=50)",
     );
   });
 
@@ -2003,7 +2126,7 @@ describe("dedup merge and flow wiring", () => {
     expect(readPrMeta(r.artifactDir)!.verdicts).toEqual({ pairs: [], links: [], malformed: 0 });
   });
 
-  it("merges before the funnel with gates, summary, and dry-run on the full set; sarif matches merged", async () => {
+  it("merges before the funnel with gates on the blocking set, summary and high count on the full set; sarif matches merged", async () => {
     const scan: Finding[] = [
       { severity: "high", file: "src/a.ts", line: 2, rule: "h1", message: "high evidence" },
       { severity: "warning", file: "src/a.ts", line: 2, rule: "w1", message: "warning evidence" },
@@ -2028,13 +2151,14 @@ describe("dedup merge and flow wiring", () => {
     };
     expect(sarif.runs[0]!.results).toHaveLength(1);
     expect(sarif.runs[0]!.results[0]!.ruleId).toBe("h1+w1");
-    // Dry-run counts the full set (high=1) with funnel positions from the merged set.
+    // Dry-run counts the full set (high=1) with funnel positions from the merged set;
+    // the single merged survivor is the blocking finding.
     const info = vi.mocked(core.info);
     info.mockClear();
     const dry = await runWithMocks({ scan, llm: [], llmVerdicts: verdicts, failLevel: "high", postComment: false });
     const line = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
     expect(line).toBe(
-      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1, omitted=0)",
+      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1, blocking=1, omitted=0)",
     );
     expect(dry.body).toBeUndefined();
   });

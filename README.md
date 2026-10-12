@@ -133,26 +133,27 @@ Budget figures are estimates. Prices change: check your provider's price page, a
 
 ## Gate: `fail_level`
 
-The findings and the gate are separate. The review event and the exit code follow the level:
+Only PR-touched findings block. The review event and the exit code read the blocking set — findings on added lines, plus lineless findings on touched files — under the active level:
 
 | `fail_level` | Review event | Exit code |
 |---|---|---|
 | `none` | always `COMMENT` | `0` always (log only) |
-| `warning` | `COMMENT` | `2` if any finding is `warning` or `high`; `0` for info-only |
-| `high` | `REQUEST_CHANGES` when a high-severity finding exists; otherwise `COMMENT` | `1` if any `high` finding; `0` otherwise |
+| `warning` | `COMMENT` | `2` if any blocking finding is `warning` or `high`; `0` for info-only |
+| `high` | `REQUEST_CHANGES` when a blocking high-severity finding exists; otherwise `COMMENT` | `1` if any blocking high finding; `0` otherwise |
 
 - The action never approves automatically in v1.
 - A `REQUEST_CHANGES` review always has a body.
 - The action step exits non-zero for `1` and `2`, so the template runs it with `continue-on-error: true` and reads `steps.review.outputs.exit-code` in a separate gate step.
 - The template's gate passes on `0` and `2` and fails on `1`. Warning findings never block a merge. A failed run (for example an action error, where no exit code is produced) still fails the gate. To block on high-severity findings, set `fail_level: high`.
 - A prompt-budget skip passes the gate on fast findings only; the skip is recorded in the step summary.
+- Findings outside the PR diff never block on their own: they stay visible in the review body under `**Findings not placed inline:**`, preceded by a `**Note:** <n> finding(s) below are outside the PR diff and do not block.` header when at least one body item is non-blocking. Body items in the blocking set carry a `**blocking**` marker after the severity; folded excess inline comments outside the blocking set render `- path:line (non-blocking)`. Markers denote blocking-set membership read under the active fail level (a marked `warning` under `fail_level: high` still exits 0).
 
 ## Scanners and their runtimes
 
 - **semgrep** runs from the PyPI package, pinned to `semgrep==1.180.0`. The unprivileged template installs it into a venv. No docker is needed for semgrep. Without `SEMGREP_APP_TOKEN` it runs `semgrep scan --config p/default --metrics=off` (`--config auto` is rejected when `--metrics=off` is set: "Cannot create auto config when metrics are off"); with a token it runs `semgrep ci` (diff-aware via `SEMGREP_BASELINE_COMMIT`).
 - **gitleaks, trivy and osv-scanner** run from docker images pinned by digest. The runner needs docker for them. Without docker, each one reports a `scanner-missing` warning and the run continues.
 - Docker scanners mount the checkout at `/src`, so SARIF reports absolute `/src/<path>` (or `file:///src/<path>`) artifact URIs. These are normalized back to repo-relative paths before findings are mapped, so inline comments still land on the right file.
-- **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate, the summary head/counts, and the dry-run event/high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
+- **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate sees the blocking subset of the merged set; the summary head/counts and the dry-run high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
 
 ## Finding provenance
 
@@ -168,7 +169,7 @@ Policy note: heuristic fastpath matches report confidence 50 even when they are 
 
 ## Dry-run: `post_comment: false`
 
-With `post_comment: false` the action runs the whole pipeline, writes the summary and the artifact, and logs the event and the finding counts it would have posted (event, inline, general and high). The review body is not logged. Nothing is posted to the PR. Use it to tune the prompt, the model, or `max_diff_chars` before you enable posting.
+With `post_comment: false` the action runs the whole pipeline, writes the summary and the artifact, and logs the event from the blocking set and the finding counts it would have posted (event, inline, general, high and blocking). The review body is not logged. Nothing is posted to the PR. Use it to tune the prompt, the model, or `max_diff_chars` before you enable posting.
 
 ## Forks and the two-workflow setup
 

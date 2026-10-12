@@ -11,6 +11,7 @@ import {
   type FileDiff,
   type PrMeta,
 } from "../src/diff.js";
+import { parseDiffFiles } from "../src/main.js";
 
 // Local fixture (do NOT import from review.js — Task 10 owns it).
 function hunksFor(file: string): { file: string; header: string; body: string }[] {
@@ -141,6 +142,34 @@ describe("diff", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("parseDiffFiles deleted marker", () => {
+  const text = [
+    "diff --git a/gone.ts b/gone.ts",
+    "deleted file mode 100644",
+    "index 1111111..0000000",
+    "--- a/gone.ts",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    "-x",
+    "diff --git a/live.ts b/live.ts",
+    "index 1111111..2222222 100644",
+    "--- a/live.ts",
+    "+++ b/live.ts",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    "",
+  ].join("\n");
+
+  it("marks deleted-file sections and leaves live files unmarked", () => {
+    const files = parseDiffFiles(text);
+    expect(files).toHaveLength(2);
+    expect(files[0]).toMatchObject({ file: "gone.ts", deleted: true });
+    expect(files[1]!.file).toBe("live.ts");
+    expect("deleted" in files[1]!).toBe(false);
   });
 });
 

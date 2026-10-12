@@ -33,9 +33,9 @@ describe("README", () => {
       "two-workflow pattern",
       "Dry-run: `post_comment: false`",
       "fail_level: high",
-      "when a high-severity finding exists",
+      "when a blocking high-severity finding exists",
       "Warning findings never block a merge",
-      "event, inline, general and high",
+      "event, inline, general, high and blocking",
       "llm_provider: opencode-go",
       "Anthropic-compatible",
     ]) {
@@ -112,6 +112,24 @@ describe("README", () => {
     expect(r).toContain(
       "A `github-token` or unset token type never posts on a fork; it skips posting with a loud warning.",
     );
+  });
+});
+
+describe("README novelty-gated blocking (Q02)", () => {
+  it("documents the blocking set, the non-blocking note, and the markers", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    for (const s of [
+      "when a blocking high-severity finding exists",
+      "`1` if any blocking high finding",
+      "event, inline, general, high and blocking",
+      "blocking subset of the merged set",
+      "outside the PR diff and do not block",
+      "**blocking**",
+      "(non-blocking)",
+      "a marked `warning` under `fail_level: high` still exits 0",
+    ]) {
+      expect(r).toContain(s);
+    }
   });
 });
 

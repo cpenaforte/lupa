@@ -52,6 +52,14 @@ export interface PostReviewOptions {
    * identical behavior on small bodies.
    */
   maxBodyChars?: number;
+  /**
+   * Blocking-set keys for the 422 off-diff fold. Folded items whose
+   * index-aligned commentKeys entry is present AND outside this set render
+   * `- path:line (non-blocking)`; anything else assumes blocking (no marker).
+   */
+  blocking?: ReadonlySet<string>;
+  /** Index-aligned fold keys for the posted comments (null where rule absent). */
+  commentKeys?: readonly (string | null)[];
 }
 
 const OFF_DIFF = /could not be resolved|part of the diff|line.*(diff|resolve)/i;
@@ -123,13 +131,23 @@ export async function getRepoSize(octokit: Octokit, owner: string, repo: string)
  * its list item. CRLF and stray CR characters are normalized to LF first, so no `\r` leaks
  * into the body. Code fences are not special-cased: they are indented like any other line.
  * An empty or whitespace-only body emits the bare `- path:line` item with no continuation line.
+ * Items whose index-aligned key is present AND outside the blocking set gain a
+ * ` (non-blocking)` suffix; a missing, null, or misaligned key (or no blocking
+ * set at all) assumes blocking and renders no marker — fail-safe toward blocking.
  */
-function foldComments(body: string, comments: InlineComment[]): string {
+function foldComments(
+  body: string,
+  comments: InlineComment[],
+  blocking?: ReadonlySet<string>,
+  commentKeys?: readonly (string | null)[],
+): string {
   if (comments.length === 0) return body;
-  const items = comments.map((c) => {
+  const items = comments.map((c, i) => {
     // Drop trailing whitespace-only lines so a body ending in "\r" or "\n" adds no bare "  " line.
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
-    const head = `- ${c.path}:${c.line}`;
+    const key = commentKeys?.[i] ?? null;
+    const suffix = key !== null && blocking !== undefined && !blocking.has(key) ? " (non-blocking)" : "";
+    const head = `- ${c.path}:${c.line}${suffix}`;
     // A body that is empty or whitespace-only gets no continuation line at all.
     if (text.trim() === "") return head;
     return `${head}\n  ${text.replace(/\n/g, "\n  ")}`;
@@ -242,7 +260,7 @@ export async function postReview(
       }
       if (!degraded && comments.length > 0 && OFF_DIFF.test(detail)) {
         body = recapFoldedBody(
-          foldComments(body, comments),
+          foldComments(body, comments, opts?.blocking, opts?.commentKeys),
           opts?.maxBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS,
         );
         comments = [];

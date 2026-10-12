@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, isTruncNoteLine, mapToComments, mergeDuplicates, omissionMarkerFor, prioritizeFindings, redactFindings, truncNoteFor } from "../src/review.js";
-import { parseHunks } from "../src/diff.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, indexHunks, isTruncNoteLine, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, truncNoteFor } from "../src/review.js";
+import { parseHunks, type FileDiff } from "../src/diff.js";
 import type { DedupVerdicts } from "../src/llm.js";
 import type { Finding } from "../src/fastpath.js";
 
@@ -197,6 +197,132 @@ describe("mapToComments", () => {
   });
 });
 
+describe("indexHunks", () => {
+  it("indexes RIGHT and LEFT lines with first-write-wins", () => {
+    const hunks = parseHunks([{ file: "a.ts", hunks: "@@ -3,1 +3,1 @@\n-old\n+new\n" }]);
+    const index = indexHunks(hunks);
+    expect(index.get("a.ts")?.get("LEFT:3")).toEqual({ side: "LEFT", line: 3, kind: "del" });
+    expect(index.get("a.ts")?.get("RIGHT:3")).toEqual({ side: "RIGHT", line: 3, kind: "add" });
+    expect(index.get("missing.ts")).toBeUndefined();
+  });
+
+  it("parity with mapToComments placement: RIGHT-wins, LEFT-fallback, fileless/lineless/off-diff go general", () => {
+    const hunks = parseHunks([
+      { file: "a.ts", hunks: "@@ -3,1 +3,1 @@\n-old\n+new\n@@ -10,0 +4,1 @@\n+d\n" },
+      { file: "d.ts", hunks: "@@ -3,1 +3,0 @@\n-gone\n" },
+    ]);
+    const findings: Finding[] = [
+      { severity: "info", file: "a.ts", line: 3, rule: "r", message: "both-sides" },
+      { severity: "info", file: "a.ts", line: 4, rule: "r", message: "added" },
+      { severity: "info", file: "d.ts", line: 3, rule: "r", message: "left-only" },
+      { severity: "info", file: "a.ts", line: 99, rule: "r", message: "off-diff" },
+      { severity: "info", file: "", rule: "r", message: "repo" },
+      { severity: "info", file: "a.ts", rule: "r", message: "no-line" },
+    ];
+    const r = mapToComments(findings, hunks);
+    expect(r.inline.map((c) => c.side)).toEqual(["RIGHT", "RIGHT", "LEFT"]);
+    expect(r.inline.map((c) => c.line)).toEqual([3, 4, 3]);
+    expect(r.general.map((f) => f.message)).toEqual(["off-diff", "repo", "no-line"]);
+  });
+});
+
+describe("reopenedKey", () => {
+  it("pins the rule-file-line shape joined by NUL", () => {
+    expect(
+      reopenedKey({ severity: "high", file: "a.ts", line: 2, rule: "r", message: "m" }),
+    ).toBe("r\0a.ts\0" + "2");
+  });
+
+  it("renders a missing line as undefined", () => {
+    expect(reopenedKey({ severity: "info", file: "", rule: "r", message: "m" })).toBe("r\0\0undefined");
+  });
+});
+
+describe("partitionGate", () => {
+  const F = (file: string, line: number | undefined, rule = "r"): Finding => ({
+    severity: "warning",
+    file,
+    ...(line !== undefined ? { line } : {}),
+    rule,
+    message: `${rule}@${file}:${line}`,
+  });
+
+  function filesFor(): FileDiff[] {
+    return [
+      { file: "a.ts", hunks: "@@ -1,1 +1,2 @@\n keep\n+new\n", truncated: false },
+      { file: "d.ts", hunks: "@@ -3,1 +3,0 @@\n-gone\n", truncated: false },
+      { file: "c.ts", hunks: "@@ -1,1 +1,1 @@\n same\n", truncated: false },
+      { file: "new.bin", hunks: "", truncated: false, binary: true },
+      { file: "gone.ts", hunks: "@@ -1,1 +0,0 @@\n-x\n", truncated: false, deleted: true },
+    ];
+  }
+
+  function hunksFor(): ReturnType<typeof parseHunks> {
+    return parseHunks(filesFor().map(({ file, hunks }) => ({ file, hunks })));
+  }
+
+  it("takes add-line findings, rejects ctx-line and LEFT-only findings", () => {
+    const files = filesFor();
+    const hunks = hunksFor();
+    expect(partitionGate([F("a.ts", 2)], hunks, files).introduced).toHaveLength(1);
+    expect(partitionGate([F("a.ts", 1)], hunks, files).introduced).toEqual([]);
+    expect(partitionGate([F("a.ts", 1)], hunks, files).general).toHaveLength(1);
+    expect(partitionGate([F("d.ts", 3)], hunks, files).introduced).toEqual([]);
+    expect(partitionGate([F("d.ts", 3)], hunks, files).general).toHaveLength(1);
+    expect(partitionGate([F("a.ts", 99)], hunks, files).introduced).toEqual([]);
+  });
+
+  it("ctx-line and LEFT-only findings stay display-inline while out of the gate", () => {
+    const hunks = hunksFor();
+    expect(mapToComments([F("a.ts", 1)], hunks).inline).toHaveLength(1);
+    const left = mapToComments([F("d.ts", 3)], hunks);
+    expect(left.inline).toHaveLength(1);
+    expect(left.inline[0]!.side).toBe("LEFT");
+  });
+
+  it("takes lineless findings on present files with hunks or add lines", () => {
+    const files = filesFor();
+    const hunks = hunksFor();
+    // a.ts has hunks text with an add line.
+    expect(partitionGate([F("a.ts", undefined)], hunks, files).introduced).toHaveLength(1);
+    // new.bin is hunks-empty (added-binary) but present: counts.
+    expect(partitionGate([F("new.bin", undefined)], hunks, files).introduced).toHaveLength(1);
+  });
+
+  it("rejects lineless findings on deleted and pure-removal files", () => {
+    const files = filesFor();
+    const hunks = hunksFor();
+    expect(partitionGate([F("gone.ts", undefined)], hunks, files).introduced).toEqual([]);
+    expect(partitionGate([F("d.ts", undefined)], hunks, files).introduced).toEqual([]);
+  });
+
+  it("rejects lineless findings with empty or absent files", () => {
+    const files = filesFor();
+    const hunks = hunksFor();
+    expect(partitionGate([F("", undefined)], hunks, files).introduced).toEqual([]);
+    expect(partitionGate([F("absent.ts", undefined)], hunks, files).introduced).toEqual([]);
+  });
+
+  it("treats a null line like a missing line (same predicate as mapToComments)", () => {
+    const files = filesFor();
+    const hunks = hunksFor();
+    const nulled = { ...F("a.ts", undefined), line: null } as unknown as Finding;
+    expect(mapToComments([nulled], hunks).inline).toEqual([]);
+    expect(partitionGate([nulled], hunks, files).introduced).toHaveLength(1);
+    const nulledAbsent = { ...F("absent.ts", undefined), line: null } as unknown as Finding;
+    expect(partitionGate([nulledAbsent], hunks, files).introduced).toEqual([]);
+  });
+
+  it("preserves input order in both partitions", () => {
+    const files = filesFor();
+    const hunks = hunksFor();
+    const findings = [F("a.ts", 1, "ctx"), F("a.ts", 2, "add"), F("absent.ts", undefined, "abs"), F("new.bin", undefined, "bin")];
+    const { introduced, general } = partitionGate(findings, hunks, files);
+    expect(introduced.map((f) => f.rule)).toEqual(["add", "bin"]);
+    expect(general.map((f) => f.rule)).toEqual(["ctx", "abs"]);
+  });
+});
+
 describe("parseHunks", () => {
   it("assigns side per line and ignores the no-newline marker", () => {
     const h = parseHunks([{ file: "b.ts", hunks: "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n\\ No newline at end of file\n" }]);
@@ -243,9 +369,9 @@ describe("buildBody", () => {
 
   it("appends general findings to the summary with file:line locators", () => {
     const body = buildBody([{ severity: "warning", file: "a.ts", line: 99, rule: "r", message: "off diff" }], "Summary");
-    expect(body).toContain("Summary");
-    expect(body).toContain("off diff");
-    expect(body).toContain("a.ts:99");
+    expect(body).toBe(
+      "Summary\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **warning** a.ts:99 [r] off diff",
+    );
   });
 
   it("locator: file without line, and (repository) for repo-level", () => {
@@ -256,8 +382,52 @@ describe("buildBody", () => {
       ],
       "S",
     );
-    expect(body).toContain("b.ts [r] no line");
-    expect(body).toContain("(repository) [r] repo wide");
+    expect(body).toBe(
+      "S\n\n**Note:** 2 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **info** b.ts [r] no line\n- **info** (repository) [r] repo wide",
+    );
+  });
+
+  it("note order is head, NOTE, heading, then items", () => {
+    const body = buildBody(
+      [
+        { severity: "warning", file: "a.ts", line: 99, rule: "r", message: "first" },
+        { severity: "info", file: "", rule: "q", message: "second" },
+      ],
+      "Head",
+    );
+    const lines = body.split("\n");
+    expect(lines[0]).toBe("Head");
+    expect(lines[2]).toBe("**Note:** 2 finding(s) below are outside the PR diff and do not block.");
+    expect(lines[4]).toBe("**Findings not placed inline:**");
+    expect(lines[5]).toContain("first");
+    expect(lines[6]).toContain("second");
+  });
+
+  it("the note counts only items outside the blocking set", () => {
+    const blockingItem: Finding = { severity: "info", file: "touched.bin", rule: "binary-note", message: "bin" };
+    const offItem: Finding = { severity: "warning", file: "a.ts", line: 99, rule: "r", message: "off diff" };
+    const blocking = new Set([reopenedKey(blockingItem)]);
+    const body = buildBody([blockingItem, offItem], "Head", { blocking });
+    expect(body).toContain("**Note:** 1 finding(s) below are outside the PR diff and do not block.");
+    expect(body).toContain("- **info** **blocking** touched.bin [binary-note] bin");
+    expect(body).toContain("- **warning** a.ts:99 [r] off diff");
+  });
+
+  it("omits the note when every body item blocks", () => {
+    const item: Finding = { severity: "info", file: "touched.bin", rule: "binary-note", message: "bin" };
+    const body = buildBody([item], "Head", { blocking: new Set([reopenedKey(item)]) });
+    expect(body).toBe("Head\n\n**Findings not placed inline:**\n- **info** **blocking** touched.bin [binary-note] bin");
+    expect(body).not.toContain("outside the PR diff");
+  });
+
+  it("**reopened** wins over **blocking** on the same item", () => {
+    const item: Finding = { severity: "high", file: "a.ts", line: 99, rule: "r", message: "drifted" };
+    const key = reopenedKey(item);
+    const body = buildBody([item], "Head", { reopened: new Set([key]), blocking: new Set([key]) });
+    expect(body).toContain("- **high** **reopened** a.ts:99 [r] drifted");
+    expect(body).not.toContain("**blocking**");
+    // Reopened items re-block, so nothing is outside the blocking set: no note.
+    expect(body).not.toContain("outside the PR diff");
   });
 });
 

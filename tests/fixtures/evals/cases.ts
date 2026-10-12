@@ -262,7 +262,7 @@ export const evalCases: readonly EvalCase[] = [
     llmFindings: [deletionFinding],
     expected: {
       promptDiffSnippet: "-  return privileged();",
-      findings: [deletionFinding], exitCode: 2, summary: summaryFor(deletionFinding),
+      findings: [deletionFinding], exitCode: 0, summary: summaryFor(deletionFinding),
       publication: { kind: "review", payload: inlinePayload(deletionFinding, "LEFT") },
     },
   },
@@ -377,7 +377,7 @@ export const evalCases: readonly EvalCase[] = [
         kind: "review",
         payload: {
           ...authzReviewPayload,
-          body: "lupa: 2 finding(s).\n\n**Findings not placed inline:**\n- **info** (repository) [l2-note] Synthetic L2 note.",
+          body: "lupa: 2 finding(s).\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **info** (repository) [l2-note] Synthetic L2 note.",
         },
       },
     },
