@@ -15,7 +15,7 @@ import {
   type FileDiff,
   type PrMeta,
 } from "./diff.js";
-import { capText, MSG_CAP, RULE_CAP, runL0, TRUNC_MARK, type Finding } from "./fastpath.js";
+import { capText, MSG_CAP, RULE_CAP, runL0, type Finding } from "./fastpath.js";
 import { runL2 } from "./l2.js";
 import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
 import { AGENT_LIMITS, type Conversation } from "./agent-types.js";
