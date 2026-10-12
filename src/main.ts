@@ -20,13 +20,16 @@ import { runL2 } from "./l2.js";
 import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
 import { AGENT_LIMITS, type Conversation } from "./agent-types.js";
 import {
+  fetchActor as fetchReviewActor,
   getRepoSize as fetchRepoSize,
+  listReviewThreads as fetchReviewThreads,
   postIssueFallback,
   postReview,
   ReadonlyTokenError,
   resolvePrNumber,
   shouldTrigger,
   StaleHeadError,
+  type ReviewThread,
 } from "./github.js";
 import { getInputs, DEFAULT_MAX_ARTIFACT_BYTES, type ActionInputs } from "./inputs.js";
 import { ensureLinkedRepo, parseLinkedRepos } from "./linked-repos.js";
@@ -41,7 +44,7 @@ import {
 } from "./llm.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, type InlineComment, type ReviewPayload } from "./review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened, type InlineComment, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 import { readCappedFileSync } from "./artifact-limits.js";
 
@@ -82,6 +85,15 @@ export interface Gateway {
   getRepoSize(owner: string, repo: string): Promise<number | undefined>;
   createReview(pr: number, payload: ReviewPayload, opts: { canWrite: boolean; maxBodyChars?: number; blocking?: ReadonlySet<string>; commentKeys?: readonly (string | null)[] }): Promise<void>;
   createIssueComment(pr: number, body: string, opts: { enabled: boolean; issuesWrite: boolean }): Promise<void>;
+  /** This PR's review threads for the wrongly-resolved re-check (fail-open: empty on any error). */
+  listReviewThreads(pr: number): Promise<ReviewThread[]>;
+  /**
+   * Login that posted our reviews (primary: authenticated user; fallback: newest
+   * lupa-body review). Undefined when neither resolves — publishReview then
+   * skips the reopen check. The pr is passed explicitly: publishReview owns a.pr
+   * on both flows, with no context.issue dependency (undefined on workflow_run).
+   */
+  getActor(pr: number): Promise<string | undefined>;
 }
 
 /** Scanner, linter and LLM boundary. The privileged flow never invokes these. */
@@ -801,9 +813,12 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
  * when the token can write and the PR head still equals `headSha` (checked via the API).
  * A failed issue fallback is a warning; it never changes the exit code.
  *
- * The blocking set (PR-touched findings) is computed BEFORE all early returns
- * (dry-run, fork-readonly, stale-head) and returned for the flow exits, so every
- * exit path gates on it. Task 72: the reopened set is empty (no thread read yet).
+ * The blocking set (PR-touched findings plus wrongly-resolved reopened ones) is
+ * computed BEFORE all early returns (dry-run, fork-readonly, stale-head) and
+ * returned for the flow exits, so every exit path gates on it. The reopen read
+ * (getActor + listReviewThreads) is short-circuited when every merged finding
+ * is already introduced — reopen can add nothing — and any thread/infra
+ * failure falls back to diff-only gating without throwing.
  */
 async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
@@ -816,8 +831,24 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
   if (dropped > 0) core.warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
   const parsed = parseHunks(a.hunks);
   const { introduced } = partitionGate(merged, parsed, a.hunks);
-  const reopened = new Set<string>();
-  const blocking = introduced;
+  const introducedKeys = new Set(introduced.map(reopenedKey));
+  let reopened = new Set<string>();
+  if (introduced.length < merged.length) {
+    try {
+      const self = await a.deps.gh.getActor(a.pr);
+      if (self === undefined) {
+        core.warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
+      } else {
+        reopened = resolveReopened(merged, await a.deps.gh.listReviewThreads(a.pr), self);
+      }
+    } catch {
+      core.warning("lupa: review-thread re-read failed; gating on diff membership only");
+      reopened = new Set<string>();
+    }
+  }
+  // Single filter over merged in merged order: introduced or reopened. A
+  // finding that is both is counted once (never concatenated).
+  const blocking = merged.filter((f) => introducedKeys.has(reopenedKey(f)) || reopened.has(reopenedKey(f)));
   const blockingKeys = new Set(blocking.map(reopenedKey));
   // Publication funnel: top-N by severity, then the inline cap (excess folds
   // to the body), then the body char cap. Gates keep the blocking set.
@@ -825,7 +856,7 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
   const retained = ordered.slice(0, inputs.maxFindings);
   const omitted = merged.length - retained.length;
   const omissionMarker = omitted > 0 ? omissionMarkerFor(omitted, inputs.maxFindings) : undefined;
-  const { inline, general } = mapToComments(retained, parsed);
+  const { inline, general } = mapToComments(retained, parsed, reopened);
   const postedInline = inline.slice(0, inputs.maxInlineComments);
   const excessInline = inline.slice(inputs.maxInlineComments);
   let body = buildBody(general, summaryFor(fullSet), { reopened, blocking: blockingKeys });
@@ -1166,6 +1197,17 @@ function realGateway(token: string): Gateway {
       return r.data.body ?? "";
     },
     getRepoSize: (owner, repo) => fetchRepoSize(octokit(), owner, repo),
+    listReviewThreads: async (pr) => {
+      // No token (dry-run without one): skip silently — the expected path.
+      if (token === "") return [];
+      const { owner, repo } = context.repo;
+      return fetchReviewThreads(octokit(), owner, repo, pr);
+    },
+    getActor: async (pr) => {
+      if (token === "") return undefined;
+      const { owner, repo } = context.repo;
+      return fetchReviewActor(octokit(), owner, repo, pr);
+    },
     createReview: (pr, payload, opts) =>
       postReview(octokit(), pr, payload, { canWrite: opts.canWrite, maxBodyChars: opts.maxBodyChars, blocking: opts.blocking, commentKeys: opts.commentKeys }).then(() => undefined),
     createIssueComment: (pr, body, opts) => postIssueFallback(octokit(), { pr, body, ...opts }),

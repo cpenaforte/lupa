@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, indexHunks, isTruncNoteLine, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, truncNoteFor } from "../src/review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, formatBody, indexHunks, isTruncNoteLine, mapToComments, mergeDuplicates, normalizeBot, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened, truncNoteFor } from "../src/review.js";
 import { parseHunks, type FileDiff } from "../src/diff.js";
 import type { DedupVerdicts } from "../src/llm.js";
 import type { Finding } from "../src/fastpath.js";
@@ -1024,5 +1024,114 @@ describe("finding provenance rendering (Q04)", () => {
     expect(exitFor("high", provenanced)).toBe(1);
     expect(exitFor("warning", provenanced)).toBe(2);
     expect(exitFor("none", provenanced)).toBe(0);
+  });
+});
+
+describe("normalizeBot", () => {
+  it("strips one trailing [bot] on either side", () => {
+    expect(normalizeBot("lupa[bot]")).toBe("lupa");
+    expect(normalizeBot("lupa")).toBe("lupa");
+    expect(normalizeBot("github-actions[bot]")).toBe("github-actions");
+  });
+
+  it("leaves plain logins unchanged", () => {
+    expect(normalizeBot("octocat")).toBe("octocat");
+    expect(normalizeBot("")).toBe("");
+  });
+});
+
+describe("resolveReopened", () => {
+  const F = (rule: string, file: string, line?: number): Finding => ({
+    severity: "high",
+    file,
+    ...(line !== undefined ? { line } : {}),
+    rule,
+    message: "m",
+  });
+  const T = (o: Partial<import("../src/github.js").ReviewThread> & { rule?: string | null }): import("../src/github.js").ReviewThread => ({
+    authorLogin: "self",
+    isResolved: true,
+    path: "a.ts",
+    line: 10,
+    rule: "r",
+    ...o,
+  });
+
+  it("matches a resolved own thread with rule intersection and exact file+line", () => {
+    const out = resolveReopened([F("r", "a.ts", 10)], [T({})], "self");
+    expect(out.has(reopenedKey(F("r", "a.ts", 10)))).toBe(true);
+  });
+
+  it("matches on originalLine when line is absent", () => {
+    const out = resolveReopened([F("r", "a.ts", 10)], [T({ line: null, originalLine: 10 })], "self");
+    expect(out).toHaveLength(1);
+  });
+
+  it("matches a joined-thread rule against unmerged members", () => {
+    const out = resolveReopened([F("a", "a.ts", 10), F("b", "a.ts", 10)], [T({ rule: "a+b" })], "self");
+    expect(out.has(reopenedKey(F("a", "a.ts", 10)))).toBe(true);
+    expect(out.has(reopenedKey(F("b", "a.ts", 10)))).toBe(true);
+  });
+
+  it("matches a drifted-line member (context/LEFT position still re-blocks)", () => {
+    const out = resolveReopened([F("r", "a.ts", 3)], [T({ path: "a.ts", line: 3 })], "self");
+    expect(out.has(reopenedKey(F("r", "a.ts", 3)))).toBe(true);
+  });
+
+  it("matches across [bot] conventions on either side", () => {
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: "self[bot]" })], "self")).toHaveLength(1);
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: "self" })], "self[bot]")).toHaveLength(1);
+  });
+
+  it("rejects unresolved threads", () => {
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ isResolved: false })], "self")).toHaveLength(0);
+  });
+
+  it("rejects foreign and null authors", () => {
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: "other" })], "self")).toHaveLength(0);
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: null })], "self")).toHaveLength(0);
+  });
+
+  it("rejects null rules", () => {
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ rule: null })], "self")).toHaveLength(0);
+  });
+
+  it("rejects rules containing ] (the parser never yields them)", () => {
+    expect(resolveReopened([F("r]junk", "a.ts", 10)], [T({ rule: "r" })], "self")).toHaveLength(0);
+  });
+
+  it("rejects line mismatches and threads with both lines absent", () => {
+    expect(resolveReopened([F("r", "a.ts", 11)], [T({})], "self")).toHaveLength(0);
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ line: null, originalLine: null })], "self")).toHaveLength(0);
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ line: undefined, originalLine: undefined })], "self")).toHaveLength(0);
+  });
+
+  it("rejects file mismatches", () => {
+    expect(resolveReopened([F("r", "b.ts", 10)], [T({})], "self")).toHaveLength(0);
+  });
+});
+
+describe("formatBody reopened marker", () => {
+  const F = (): Finding => ({ severity: "high", file: "a.ts", line: 10, rule: "r", message: "m" });
+
+  it("renders **reopened** between severity and rule when true", () => {
+    expect(formatBody(F(), "RIGHT", true)).toContain("**high** **reopened** [r]");
+  });
+
+  it("renders today's shape when false or omitted", () => {
+    expect(formatBody(F(), "RIGHT", false)).toContain("**high** [r]");
+    expect(formatBody(F(), "RIGHT", false)).not.toContain("reopened");
+    expect(formatBody(F(), "RIGHT")).toContain("**high** [r]");
+  });
+
+  it("marks inline items whose key is reopened via mapToComments", () => {
+    const findings: Finding[] = [F()];
+    const hunks = parseHunks([{ file: "a.ts", hunks: "@@ -9,2 +9,2 @@\n ctx\n-old\n+new\n" }]);
+    const key = reopenedKey(findings[0]!);
+    const marked = mapToComments(findings, hunks, new Set([key]));
+    expect(marked.inline).toHaveLength(1);
+    expect(marked.inline[0]!.body).toContain("**reopened**");
+    const plain = mapToComments(findings, hunks);
+    expect(plain.inline[0]!.body).not.toContain("reopened");
   });
 });

@@ -21,7 +21,7 @@ import {
   DEFAULT_MAX_REVIEW_BODY_CHARS,
 } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
-import { ReadonlyTokenError, StaleHeadError } from "../src/github.js";
+import { ReadonlyTokenError, StaleHeadError, type ReviewThread } from "../src/github.js";
 import { buildFallbackReport, redactFindings, type ReviewPayload } from "../src/review.js";
 import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
@@ -108,13 +108,16 @@ interface Rec {
   /** Blocking set and post-slice comment keys observed by the createReview fake (Q02 threading pin). */
   reviewBlocking?: ReadonlySet<string>;
   reviewCommentKeys?: readonly (string | null)[];
+  /** Thread re-read seam calls (Q02 reopen pin). */
+  threadCalls: number;
+  actorCalls: number;
   repoSizeCalls: Array<[string, string]>;
   /** Prompt messages observed by the slow-path seam (Task 58 asserts on these). */
   prompts?: { system: string; user: string };
 }
 
 function newRec(): Rec {
-  return { reviews: [], reviewAttempts: 0, issueComments: [], getPrCalls: 0, llmCalled: 0, ollamaCalled: 0, agentCalled: 0, repoSizeCalls: [] };
+  return { reviews: [], reviewAttempts: 0, issueComments: [], getPrCalls: 0, llmCalled: 0, ollamaCalled: 0, agentCalled: 0, threadCalls: 0, actorCalls: 0, repoSizeCalls: [] };
 }
 
 interface GwOpts {
@@ -131,6 +134,16 @@ interface GwOpts {
   headMoves?: boolean;
   /** getPr throws once the call count exceeds this number. */
   failGetPrAfter?: number;
+  /** Resolved review threads returned by the listReviewThreads fake (default none). */
+  threads?: ReviewThread[];
+  /** listReviewThreads throws (fail-open pin: gate falls back to diff-only). */
+  threadsError?: boolean;
+  /** Actor login returned by the getActor fake (default "test-actor"). */
+  actor?: string | undefined;
+  /** getActor resolves undefined (identity unknown → skip reopen). */
+  actorMissing?: boolean;
+  /** getActor throws (fail-open pin). */
+  actorError?: boolean;
   info?: Partial<PrInfo>;
 }
 
@@ -158,6 +171,17 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
     getRepoSize: async (owner, repo) => {
       rec.repoSizeCalls.push([owner, repo]);
       return o.repoSizeKb ?? 1024;
+    },
+    listReviewThreads: async () => {
+      rec.threadCalls += 1;
+      if (o.threadsError === true) throw new Error("threads boom");
+      return o.threads ?? [];
+    },
+    getActor: async () => {
+      rec.actorCalls += 1;
+      if (o.actorError === true) throw new Error("actor boom");
+      if (o.actorMissing === true) return undefined;
+      return o.actor === undefined ? "test-actor" : o.actor;
     },
     createReview: async (_pr, payload, opts) => {
       rec.reviewOpts = { canWrite: opts.canWrite, ...(opts.maxBodyChars !== undefined ? { maxBodyChars: opts.maxBodyChars } : {}) };
@@ -255,6 +279,16 @@ interface MockOpts {
   summaryPrefill?: string;
   /** Findings returned by the runScanners fake (default []). */
   scan?: Finding[];
+  /** Resolved review threads returned by the listReviewThreads fake (default none). */
+  threads?: ReviewThread[];
+  /** listReviewThreads throws (fail-open pin). */
+  threadsError?: boolean;
+  /** Actor login returned by the getActor fake (default "test-actor"). */
+  actor?: string | undefined;
+  /** getActor resolves undefined (identity unknown → skip reopen). */
+  actorMissing?: boolean;
+  /** getActor throws (fail-open pin). */
+  actorError?: boolean;
   tokenType?: "app" | "workflow-run" | "github-token";
   llmProvider?: LlmProvider;
   llmModel?: string;
@@ -310,6 +344,11 @@ async function runWithMocks(o: MockOpts = {}) {
       body: o.prBody,
       repoSizeKb: o.repoSizeKb,
       issueBody: o.issueBody,
+      threads: o.threads,
+      threadsError: o.threadsError,
+      actor: o.actor,
+      actorMissing: o.actorMissing,
+      actorError: o.actorError,
       info: { isFork: o.forkReadonly === true, headRepo: o.forkReadonly ? "fork/r" : "o/r" },
     }),
     analysis: {
@@ -411,6 +450,8 @@ async function runWithMocks(o: MockOpts = {}) {
     reviewOpts: rec.reviewOpts,
     reviewBlocking: rec.reviewBlocking,
     reviewCommentKeys: rec.reviewCommentKeys,
+    threadCalls: rec.threadCalls,
+    actorCalls: rec.actorCalls,
     artifactDir,
     summaryPath,
     sbomDir,
@@ -1274,6 +1315,84 @@ index 111..222 100644
       "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=0, general=1, high=1, blocking=0, omitted=0)",
     );
     expect(r.body).toBeUndefined();
+  });
+});
+
+describe("Q02 wrongly-resolved reopen", () => {
+  const offHigh: Finding = { severity: "high", file: "src/other.ts", line: 1, rule: "off-rule", message: "off diff high" };
+  const offThread: ReviewThread = {
+    authorLogin: "test-actor",
+    isResolved: true,
+    path: "src/other.ts",
+    line: 1,
+    originalLine: null,
+    rule: "off-rule",
+  };
+
+  it("persists → re-blocks with marker: REQUEST_CHANGES + exit 1, **reopened** in the body", async () => {
+    const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threads: [offThread] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(r.exitCode).toBe(1);
+    expect(r.reviews[0]!.body).toContain("- **high** **reopened** src/other.ts:1 [off-rule]");
+    expect(r.threadCalls).toBe(1);
+    expect(r.actorCalls).toBe(1);
+  });
+
+  it("ctx-drifted persisting finding re-blocks inline with the marker", async () => {
+    const ctxHigh: Finding = { severity: "high", file: "src/a.ts", line: 3, rule: "ctx-rule", message: "ctx high" };
+    const thread: ReviewThread = {
+      authorLogin: "test-actor[bot]",
+      isResolved: true,
+      path: "src/a.ts",
+      line: 3,
+      originalLine: null,
+      rule: "ctx-rule",
+    };
+    const r = await runWithMocks({ failLevel: "high", llm: [ctxHigh], threads: [thread] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(r.exitCode).toBe(1);
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    expect(r.reviews[0]!.comments[0]!.body).toContain("**high** **reopened** [ctx-rule]");
+  });
+
+  it("gone → stays resolved: COMMENT + exit 0", async () => {
+    const ctxHigh: Finding = { severity: "high", file: "src/a.ts", line: 3, rule: "ctx-rule", message: "ctx high" };
+    const goneThread: ReviewThread = { ...offThread, path: "src/a.ts", line: 3, rule: "fixed-rule" };
+    const r = await runWithMocks({ failLevel: "high", llm: [ctxHigh], threads: [goneThread] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.reviews[0]!.body).not.toContain("reopened");
+  });
+
+  it("thread API failure → diff-only gating: COMMENT + exit 0", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threadsError: true });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
+  });
+
+  it("unknown actor → skip reopen with a warning: COMMENT + exit 0", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threads: [offThread], actorMissing: true });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
+  });
+
+  it("all-introduced → getActor and listReviewThreads never called", async () => {
+    const addedHigh: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "add-rule", message: "new high" };
+    const r = await runWithMocks({ failLevel: "high", llm: [addedHigh] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(r.exitCode).toBe(1);
+    expect(r.threadCalls).toBe(0);
+    expect(r.actorCalls).toBe(0);
   });
 });
 

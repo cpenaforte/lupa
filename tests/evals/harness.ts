@@ -146,6 +146,14 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
       gatewayCalls.push({ method: "getRepoSize", args: [owner, repo] });
       return 0;
     },
+    async listReviewThreads(pr) {
+      gatewayCalls.push({ method: "listReviewThreads", args: [pr] });
+      return [];
+    },
+    async getActor(pr) {
+      gatewayCalls.push({ method: "getActor", args: [pr] });
+      return "synthetic-actor";
+    },
     async createReview(pr, payload) {
       gatewayCalls.push({ method: "createReview", args: [pr, payload] });
       if (testCase.fakeGatewayMode === "refusedReview") throw new ReadonlyTokenError("refused", 403);

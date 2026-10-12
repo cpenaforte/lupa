@@ -1,4 +1,5 @@
 import { context, getOctokit } from "@actions/github";
+import * as core from "@actions/core";
 import type { InlineComment, ReviewPayload } from "./review.js";
 import { capBody, isTruncNoteLine, truncNoteFor } from "./review.js";
 import { DEFAULT_MAX_REVIEW_BODY_CHARS } from "./inputs.js";
@@ -270,6 +271,141 @@ export async function postReview(
       throw new Error("review post rejected (HTTP 422)");
     }
   }
+}
+
+/**
+ * One PR review thread, as needed for the wrongly-resolved re-check. `rule` is
+ * parsed from the first comment body (the `formatBody` head shape, tolerating
+ * our own inline reopened marker); unparseable bodies yield null and never
+ * match. A null author (deleted account) never matches either.
+ */
+export interface ReviewThread {
+  authorLogin: string | null;
+  isResolved: boolean;
+  path: string;
+  line?: number | null;
+  originalLine?: number | null;
+  rule: string | null;
+}
+
+/** `formatBody` head shape, tolerating our own inline reopened marker. */
+const THREAD_RULE_RE = /^\*\*(\w+)\*\* (?:\*\*reopened\*\* )?\[([^[\]]+)\]/;
+
+function threadRuleOf(body: unknown): string | null {
+  if (typeof body !== "string") return null;
+  const m = THREAD_RULE_RE.exec(body);
+  return m === null ? null : m[2]!;
+}
+
+interface ThreadNode {
+  isResolved?: unknown;
+  path?: unknown;
+  line?: unknown;
+  originalLine?: unknown;
+  comments?: { nodes?: Array<{ author?: { login?: unknown } | null; body?: unknown }> };
+}
+
+function asThread(n: ThreadNode): ReviewThread {
+  const first = n.comments?.nodes?.[0];
+  const login = first?.author?.login;
+  const line = typeof n.line === "number" ? n.line : null;
+  const originalLine = typeof n.originalLine === "number" ? n.originalLine : null;
+  return {
+    authorLogin: typeof login === "string" ? login : null,
+    isResolved: n.isResolved === true,
+    path: typeof n.path === "string" ? n.path : "",
+    line,
+    originalLine,
+    rule: threadRuleOf(first?.body),
+  };
+}
+
+/**
+ * Reads this PR's review threads (newest 100 — recent resolves are the relevant
+ * ones) over GraphQL on the same client. `hasPreviousPage` warns (lupa prefix)
+ * and uses the 100; any fetch error warns and yields empty (fail-open: never
+ * blocks on infra failure).
+ */
+export async function listReviewThreads(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pr: number,
+): Promise<ReviewThread[]> {
+  try {
+    const data = (await octokit.graphql(
+      `query ($owner: String!, $repo: String!, $pr: Int!) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $pr) {
+            reviewThreads(last: 100) {
+              pageInfo { hasPreviousPage }
+              nodes {
+                isResolved
+                path
+                line
+                originalLine
+                comments(first: 1) { nodes { author { login } body } }
+              }
+            }
+          }
+        }
+      }`,
+      { owner, repo, pr },
+    )) as { repository?: { pullRequest?: { reviewThreads?: { pageInfo?: { hasPreviousPage?: unknown }; nodes?: ThreadNode[] } } } };
+    const threads = data.repository?.pullRequest?.reviewThreads;
+    if (threads === undefined || !Array.isArray(threads.nodes)) throw new Error("reviewThreads missing");
+    if (threads.pageInfo?.hasPreviousPage === true) {
+      core.warning("lupa: more than 100 review threads; re-checking the newest 100 only");
+    }
+    return threads.nodes.map(asThread);
+  } catch (e) {
+    core.warning(`lupa: review-thread re-read failed (${(e as Error).message}); gating on diff membership only`);
+    return [];
+  }
+}
+
+/** Prefix every posted review body opens with (the summary head). */
+const LUPA_BODY_PREFIX = "lupa:";
+
+/**
+ * Identity for the reopen match. Primary: the authenticated login on the same
+ * token that posts. Fallback (e.g. installation tokens that 403 on the user
+ * route): the login of the newest review on this PR whose body opens with the
+ * lupa summary prefix (paginated, per_page 100 — newest match wins). Both
+ * failing yields undefined (caller skips the reopen check with a warning).
+ */
+export async function fetchActor(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pr: number,
+): Promise<string | undefined> {
+  try {
+    const me = await octokit.rest.users.getAuthenticated();
+    const login = (me.data as { login?: unknown }).login;
+    if (typeof login === "string" && login !== "") return login;
+  } catch {
+    // Fall through to the review-body fallback below.
+  }
+  try {
+    const reviews = (await octokit.paginate(octokit.rest.pulls.listReviews, {
+      owner,
+      repo,
+      pull_number: pr,
+      per_page: 100,
+    })) as Array<{ body?: unknown; user?: { login?: unknown } | null }>;
+    let newest: string | undefined;
+    for (const r of reviews) {
+      if (typeof r.body === "string" && r.body.startsWith(LUPA_BODY_PREFIX) && typeof r.user?.login === "string") {
+        newest = r.user.login;
+      }
+    }
+    if (newest !== undefined) return newest;
+  } catch {
+    // Both paths failed; warn below.
+  }
+  core.warning("lupa: could not determine the review actor; skipping the wrongly-resolved re-check");
+  return undefined;
 }
 
 /**

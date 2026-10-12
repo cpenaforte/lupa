@@ -70,10 +70,12 @@ function provenanceTrailer(f: Finding): string {
 /**
  * Inline body. Only RIGHT-side hits get a ```suggestion fence (a suggestion replaces the
  * commented line, which only exists on the new side). LEFT hits show the suggestion as
- * plain text instead.
+ * plain text instead. A reopened finding renders `**reopened**` between the severity
+ * and the rule (`**high** **reopened** [rule] ...`) — the thread-fetch rule parser
+ * tolerates this marker, so a re-posted thread stays parseable.
  */
-function formatBody(f: Finding, side: "LEFT" | "RIGHT"): string {
-  let body = `**${f.severity}** [${f.rule}] ${f.message}`;
+export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened = false): string {
+  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
   if (hasSuggestion(f)) {
     if (side === "RIGHT") {
       const fence = fenceFor(f.suggestion);
@@ -122,6 +124,54 @@ export function reopenedKey(f: Finding): string {
 }
 
 /**
+ * Normalizes a login across both API conventions: strips one trailing `[bot]`.
+ * Compared on both sides, so `x[bot]` and `x` are identical.
+ */
+export function normalizeBot(login: string): string {
+  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
+}
+
+/**
+ * Pure reopen match over the MERGED set, in ANY position: a resolved thread whose
+ * line drifted to context/LEFT must still re-block while the issue persists.
+ * Keeps a thread iff it is resolved, its author normalizes to the review actor
+ * (null authors never match), and its rule INTERSECTS the finding's rule
+ * (`+`-split on both sides — the posted thread rule is the joined survivor while
+ * the next run may see unmerged members). File is exact; the thread line is
+ * `line ?? originalLine` (both absent → no match). Returns the reopened keys.
+ */
+export function resolveReopened(
+  findings: Finding[],
+  threads: import("./github.js").ReviewThread[],
+  selfLogin: string,
+): Set<string> {
+  const self = normalizeBot(selfLogin);
+  const kept = threads.filter(
+    (t) =>
+      t.isResolved &&
+      t.rule !== null &&
+      t.authorLogin !== null &&
+      normalizeBot(t.authorLogin) === self &&
+      (t.line ?? t.originalLine ?? null) !== null,
+  );
+  const out = new Set<string>();
+  for (const f of findings) {
+    if (typeof f.line !== "number") continue;
+    const rules = new Set(f.rule.split("+"));
+    for (const t of kept) {
+      if (t.path !== f.file) continue;
+      if ((t.line ?? t.originalLine) !== f.line) continue;
+      const threadRules = (t.rule as string).split("+");
+      if (threadRules.some((r) => rules.has(r))) {
+        out.add(reopenedKey(f));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Maps findings onto commentable diff lines. A finding becomes an inline comment only when
  * its file and line are both present in the hunks; everything else (repo-level, line-less,
  * off-diff) goes to the general list, which the caller folds into the review body.
@@ -133,11 +183,13 @@ export function reopenedKey(f: Finding): string {
  * replaces only the single flagged line.
  *
  * Each inline comment carries the finding's rule for fold keys (INTERNAL: stripped
- * before posting, so payload shapes are unchanged).
+ * before posting, so payload shapes are unchanged). Items whose key is in
+ * `reopened` render the `**reopened**` marker via formatBody.
  */
 export function mapToComments(
   findings: Finding[],
   hunks: ParsedHunk[],
+  reopened?: ReadonlySet<string>,
 ): { inline: InlineComment[]; general: Finding[] } {
   const index = indexHunks(hunks);
   const inline: InlineComment[] = [];
@@ -153,7 +205,8 @@ export function mapToComments(
       general.push(f);
       continue;
     }
-    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side), rule: f.rule });
+    const isReopened = reopened?.has(reopenedKey(f)) === true;
+    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
   }
   return { inline, general };
 }

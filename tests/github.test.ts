@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as core from "@actions/core";
+vi.mock("@actions/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@actions/core")>();
+  return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
+});
 import {
+  fetchActor,
+  listReviewThreads,
   ReadonlyTokenError,
   StaleHeadError,
   getRepoSize,
@@ -551,5 +558,136 @@ describe("postReview fold re-cap", () => {
     const retry = String(f.reviewArgs[1].body);
     expect(noteCount(retry)).toBe(0);
     expect(retry).toContain("- a.ts:4");
+  });
+});
+
+describe("listReviewThreads", () => {
+  const commentNode = (login: string | null, body: string) => ({ author: login === null ? null : { login }, body });
+  const threadNode = (o: {
+    isResolved?: boolean; path?: string; line?: number | null; originalLine?: number | null;
+    login?: string | null; body?: string;
+  } = {}) => ({
+    isResolved: o.isResolved ?? true,
+    path: o.path ?? "a.ts",
+    line: o.line ?? 10,
+    originalLine: o.originalLine ?? null,
+    comments: { nodes: [commentNode(o.login === undefined ? "self" : o.login, o.body ?? "**high** [r] m")] },
+  });
+  const response = (nodes: unknown[], hasPreviousPage = false) => ({
+    repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage }, nodes } } },
+  });
+  const gqlOk = (nodes: unknown[], hasPreviousPage = false) => {
+    const graphql = vi.fn(async () => response(nodes, hasPreviousPage));
+    const octokit = { graphql } as unknown as Octokit;
+    return { octokit, graphql };
+  };
+
+  beforeEach(() => {
+    vi.mocked(core.warning).mockClear();
+  });
+
+  it("reads the newest 100 threads with the listed fields", async () => {
+    const { octokit, graphql } = gqlOk([threadNode()]);
+    const out = await listReviewThreads(octokit, "o", "r", 7);
+    expect(graphql).toHaveBeenCalledTimes(1);
+    const [query, vars] = graphql.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(query).toContain("last: 100");
+    expect(query).toContain("isResolved");
+    expect(query).toContain("originalLine");
+    expect(vars).toEqual({ owner: "o", repo: "r", pr: 7 });
+    expect(out).toEqual([{ authorLogin: "self", isResolved: true, path: "a.ts", line: 10, originalLine: null, rule: "r" }]);
+  });
+
+  it("warns with the lupa prefix and uses the 100 when hasPreviousPage", async () => {
+    const { octokit } = gqlOk([threadNode()], true);
+    const out = await listReviewThreads(octokit, "o", "r", 7);
+    expect(out).toHaveLength(1);
+    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
+  });
+
+  it("returns empty with a warning on any fetch error", async () => {
+    const graphql = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const octokit = { graphql } as unknown as Octokit;
+    await expect(listReviewThreads(octokit, "o", "r", 7)).resolves.toEqual([]);
+    expect(vi.mocked(core.warning)).toHaveBeenCalled();
+  });
+
+  it("parses the rule from the first-comment body, tolerating our inline reopened marker", async () => {
+    const { octokit } = gqlOk([
+      threadNode({ body: "**high** **reopened** [r] m" }),
+      threadNode({ path: "b.ts", body: "**warning** [a+b] m" }),
+      threadNode({ path: "c.ts", body: "plain human reply" }),
+      threadNode({ path: "d.ts", body: "**high** [broken rule] trailing" }),
+    ]);
+    const out = await listReviewThreads(octokit, "o", "r", 7);
+    expect(out.map((t) => t.rule)).toEqual(["r", "a+b", null, "broken rule"]);
+  });
+
+  it("keeps a null author (never matches self)", async () => {
+    const { octokit } = gqlOk([threadNode({ login: null })]);
+    const out = await listReviewThreads(octokit, "o", "r", 7);
+    expect(out[0]!.authorLogin).toBeNull();
+  });
+});
+
+describe("fetchActor", () => {
+  const review = (login: string, body: string) => ({ user: { login }, body });
+  const LUPA = "lupa: 1 finding(s).";
+  function actorOk(opts: {
+    authed?: string | Error;
+    pages?: Array<Array<{ user: { login: string }; body: string }>>;
+    listError?: Error;
+  } = {}) {
+    const getAuthenticated = vi.fn(async () => {
+      if (opts.authed instanceof Error) throw opts.authed;
+      return { data: { login: opts.authed ?? "self" } };
+    });
+    const listReviews = vi.fn(async (params: { page?: number }) => {
+      if (opts.listError !== undefined) throw opts.listError;
+      const pages = opts.pages ?? [];
+      return { data: pages[(params.page ?? 1) - 1] ?? [] };
+    });
+    const paginate = vi.fn(async (fn: (p: unknown) => Promise<{ data: unknown[] }>, params: Record<string, unknown>) => {
+      const all: unknown[] = [];
+      for (let page = 1; ; page++) {
+        const r = await fn({ ...params, page });
+        all.push(...r.data);
+        if (r.data.length === 0) break;
+      }
+      return all;
+    });
+    const octokit = { rest: { users: { getAuthenticated }, pulls: { listReviews } }, paginate } as unknown as Octokit;
+    return { octokit, getAuthenticated, listReviews, paginate };
+  }
+
+  beforeEach(() => {
+    vi.mocked(core.warning).mockClear();
+  });
+
+  it("prefers the authenticated login", async () => {
+    const { octokit, listReviews } = actorOk({ authed: "self" });
+    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBe("self");
+    expect(listReviews).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the newest lupa-body review across pages (match on page two wins)", async () => {
+    const { octokit, paginate } = actorOk({
+      authed: new Error("403"),
+      pages: [
+        [review("human", "LGTM"), review("old-bot", LUPA)],
+        [review("new-bot", LUPA)],
+      ],
+    });
+    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBe("new-bot");
+    const params = paginate.mock.calls[0]![1] as Record<string, unknown>;
+    expect(params).toMatchObject({ owner: "o", repo: "r", pull_number: 7, per_page: 100 });
+  });
+
+  it("warns and returns undefined when both identity paths fail", async () => {
+    const { octokit } = actorOk({ authed: new Error("403"), listError: new Error("boom") });
+    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBeUndefined();
+    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
   });
 });
