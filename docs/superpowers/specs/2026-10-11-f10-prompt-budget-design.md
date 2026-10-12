@@ -1,7 +1,7 @@
 # Sub-project F10: complete inference-prompt budget — design
 
 Date: 2026-10-12
-Status: design approved (2026-10-12); review round 1 applied (2026-10-12)
+Status: design approved (2026-10-12); review rounds 1-6 applied, round 7 pending
 Source: Codex audit `PROJECT_FINDINGS.md` (F10), local HEAD `885adea`
 Goal: bound the variable user-message portion of the single-shot inference request — fast findings, linked-issue
 context, and diff together — with sanitized evidence, separate allowances, and
@@ -102,7 +102,7 @@ exactly ONE budgeted assembly: `budgetPrompt` + `buildMessages` run once before 
 `if (i.llmAgent)` branch with the full 6-arg call
 `buildMessages(b.fast, promptText, b.issueBody, b.skipped, i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : undefined, b.findingsOmitted)`,
 and both paths consume its outputs (the agent path adds
-tools/turns around the same message). The caller algorithm is fixed (no invention): render via the 6-arg call, measure `bytes = Buffer.byteLength(m.user, "utf8")`, and skip with the size-naming warning when over budget. No separate diff-bytes term: a diff that alone exceeds the budget makes the total exceed it, so one total check subsumes both branches (the fixtures still distinguish them). Add one agent-path test asserting the rendered agent user message contains the omission line when findings are omitted (the `Tool budget` addendum lives in `system` and is unaffected by construction — the assertion pins the 6th-arg wiring, not the addendum). Agent tool-round accumulation is F11 and
+tools/turns around the same message). The caller algorithm is fixed (no invention): render via the 6-arg call, measure `bytes = Buffer.byteLength(m.user, "utf8")`, and skip with the size-naming warning when over budget. No separate diff-bytes term: a diff that alone exceeds the budget makes the total exceed it, so one total check subsumes both branches (the fixtures still distinguish them). Add one agent-path test asserting the rendered agent user message contains the omission line when findings are omitted (a 6th-arg wiring test — the `Tool budget` addendum lives in `system` and is unaffected by construction; this does not test cut/skip behavior on the agent path, which stays F11). Agent tool-round accumulation is F11 and
 out of scope (no agent-path budget test). Ordering within the slow path is unchanged
 and deliberate: key/model/endpoint checks, `ensureOllama`, and `checkModelListed`
 (`:520`) run before assembly + budget — authoritative preconditions first (a budget
@@ -115,7 +115,7 @@ Omitted <M> fast finding(s) to fit the prompt budget.
 
 Cut order, each leaving its explicit record:
 
-1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + markerReserve)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers, tags, skipped-files note, JSON brackets/commas, and the omission line). No closed-form constant is needed: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget. Truncate the neutralised issue text to the allowance with a trailing `…[issue context truncated to fit the prompt budget]` marker, keeping the `<linked-issue>` tags balanced (marker inside the block). When the allowance cannot fit marker + tags (computed byte lengths, not an estimate), drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling).
+1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + markerReserve)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count — the issue block's own header and tags belong to the issue side, not framing, so nothing is double-counted) and `markerReserve` is exactly `byteLength(marker) + byteLength("<linked-issue>\n") + byteLength("\n</linked-issue>")`. No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget. Truncate the neutralised issue text to the allowance with a trailing `…[issue context truncated to fit the prompt budget]` marker, keeping the `<linked-issue>` tags balanced (marker inside the block). When the allowance cannot fit marker + tags (computed byte lengths, not an estimate), drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling).
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
@@ -130,8 +130,9 @@ Cut order, each leaving its explicit record:
    (`prompt <bytes> exceeds max_prompt_chars <budget> after bounded cuts`).
 `budgetPrompt` is exported (tests import it from `src/main.ts`, where it is defined).
 `skipped` passes through unchanged and `issueDropped` is returned (not derived by callers)
-because the single 6-arg `buildMessages` call needs all regions in one place and the
-dropped-issue case deserves its own log signal. The agent-mode linked-repos `conv.turns` user
+because the single 6-arg `buildMessages` call needs all regions in one place; the caller
+logs `linked issue context dropped to fit the <budget>-byte prompt budget` when
+`issueDropped` is true. The agent-mode linked-repos `conv.turns` user
 message (`:589`) sits outside the budget (agent-turn context, F11).
 
 The cut affects model context only: posting and artifacts use the full `fast`
@@ -164,7 +165,7 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 `MSG_CAP` bounds each finding and the overflow needs many findings or a small budget):
 
 - Oversized issue body truncates with the marker; tags stay balanced; rest intact.
-- Issue block dropped when the allowance cannot fit marker + tags: budget 3,200 with a ~2,700-byte diff and a ~5,000-byte issue → `issueDropped`, `issueBody` undefined, review proceeds without issue context (allowance = 3200 − (2700 + findings + framing) < marker + tags, while diff + framing ≈ 3,000 < budget — deterministic window).
+- Issue block dropped when the allowance cannot fit marker + tags: budget 3,200 with a ~2,900-byte diff, one small finding (~200 B), and a ~5,000-byte issue → allowance = 3200 − (2900 + 200 + framing ~250 + markerReserve 84) < 0 < marker + tags → `issueDropped`, `issueBody` undefined, review proceeds without issue context (diff + framing ≈ 3,150 < budget — deterministic; the finding pins the allowance so a zero-finding fixture cannot silently truncate instead).
 - Fast-findings overflow drops whole tail findings with an exact omitted count rendered
   as the prose line after the findings JSON; the surviving JSON parses.
 - Diff is never cut below `maxDiffChars` (over-budget fixture with maxed diff →
@@ -178,8 +179,8 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
   yet diff + note + framing ≈ 6,100 > 6,000 → skip (pins the branch where cuts are
   exhausted yet the total still overflows; `maxDiffChars: 5500` with the 5.2 KB file
   first in patch order so exactly it is included and 25 tiny files (~300 units each,
-  each above the ~200-unit leftover gap so all skip) skip — the test computes exact
-  `Buffer.byteLength` sums rather than asserting magic constants).
+  each above the ~270-unit leftover gap — 5500 − (5200 + ~30 header) — so all skip) skip
+  — the test computes exact `Buffer.byteLength` sums rather than asserting magic constants).
 - Pure-renderer tests in `tests/prompt.test.ts`: the `omitted` prose line renders after
   the findings JSON via the 6th param; the skipped-files list caps at 20 with the
   `…and <N> more` line (both pure `buildMessages` assertions, no budget needed).
