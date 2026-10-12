@@ -1,4 +1,4 @@
-import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, type Dirent, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
 import { AGENT_LIMITS } from "./agent-types.js";
@@ -281,7 +281,7 @@ export function matchGlob(path: string, glob: string): boolean {
   return prev[m];
 }
 
-interface WalkFile {
+export interface WalkFile {
   abs: string;
   rel: string;
 }
@@ -338,15 +338,8 @@ function zeroSkipped(): WalkSkipped {
   return { oversized: 0, binary: 0, overLimit: 0 };
 }
 
-interface DirentLike {
-  name: string;
-  isDirectory(): boolean;
-  isFile(): boolean;
-  isSymbolicLink(): boolean;
-}
-
 /** True for entries the walk deliberately skips without touching the counter. */
-function isWalkSkippedEntry(d: DirentLike): boolean {
+function isWalkSkippedEntry(d: Dirent): boolean {
   if (d.name.toLowerCase() === ".git") return true;
   if (d.isSymbolicLink()) return true;
   if (d.isDirectory()) return PRUNE_DIR_NAMES.has(d.name);
@@ -361,7 +354,7 @@ function isWalkSkippedEntry(d: DirentLike): boolean {
  * a conservative placeholder since their contents are unknowable without
  * listing.
  */
-function countQueuedRemainder(dirents: DirentLike[], from: number): number {
+function countQueuedRemainder(dirents: Dirent[], from: number): number {
   let n = 0;
   for (let i = from; i < dirents.length; i++) {
     if (isWalkSkippedEntry(dirents[i])) continue;
@@ -643,7 +636,7 @@ async function glob(args: Record<string, unknown>, ctx: ToolContext): Promise<{ 
 
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   const walked = walkPaths(resolvedRoot.root, resolvedRoot.root);
-  const paths = walked.paths.filter((p) => matchGlob(p, pattern)).sort();
+  const paths = walked.paths.filter((p) => matchGlob(p, pattern));
 
   const truncated = paths.length > GLOB_MAX_PATHS || walked.truncated;
   return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });

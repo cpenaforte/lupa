@@ -25350,7 +25350,7 @@ async function glob(args, ctx) {
     return errorResult(resolvedRoot.error);
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   const walked = walkPaths(resolvedRoot.root, resolvedRoot.root);
-  const paths = walked.paths.filter((p) => matchGlob(p, pattern)).sort();
+  const paths = walked.paths.filter((p) => matchGlob(p, pattern));
   const truncated = paths.length > GLOB_MAX_PATHS || walked.truncated;
   return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
 }
