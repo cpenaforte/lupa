@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { byteCheck, oversizeMessage, readCappedFileSync } from "../src/artifact-limits.js";
@@ -38,6 +38,38 @@ describe("readCappedFileSync", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("reads a full 64 KiB chunk boundary file with a large cap", () => {
+    const dir = scratch();
+    try {
+      const p = join(dir, "chunk.json");
+      writeFileSync(p, "y".repeat(65536), "utf8");
+      expect(readCappedFileSync(p, 65536)).toEqual({ ok: true, text: "y".repeat(65536) });
+      expect(readCappedFileSync(p, 100000)).toEqual({ ok: true, text: "y".repeat(65536) });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("handles multi-chunk files: 65537 bytes passes a large cap, oversize at a 65536 cap", () => {
+    const dir = scratch();
+    try {
+      const p = join(dir, "two-chunk.json");
+      writeFileSync(p, "z".repeat(65537), "utf8");
+      expect(readCappedFileSync(p, 100000)).toEqual({ ok: true, text: "z".repeat(65537) });
+      expect(readCappedFileSync(p, 65536)).toEqual({ ok: false, oversize: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a size-0-reporting source fully (/proc/self/cmdline, skipped when /proc is unavailable)", () => {
+    const proc = "/proc/self/cmdline";
+    if (!existsSync(proc)) return;
+    const expected = readFileSync(proc, "utf8");
+    expect(expected.length).toBeGreaterThan(0);
+    expect(readCappedFileSync(proc, 1024 * 1024)).toEqual({ ok: true, text: expected });
   });
 });
 

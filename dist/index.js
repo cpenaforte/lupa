@@ -24507,7 +24507,7 @@ import { existsSync as existsSync3, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 // lib/src/artifact-limits.js
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 
 // lib/src/inputs.js
 var LLM_PROVIDERS = [
@@ -24625,18 +24625,19 @@ function readOptionalInt(name, min) {
 function readCappedFileSync(path, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   const fd = openSync(path, "r");
   try {
-    const n = Math.min(maxBytes, fstatSync(fd).size) + 1;
-    const buf = Buffer.alloc(n);
-    let bytesRead = 0;
-    while (bytesRead < n) {
-      const r = readSync(fd, buf, bytesRead, n - bytesRead, null);
+    const parts = [];
+    let total = 0;
+    for (; ; ) {
+      const buf = Buffer.alloc(64 * 1024);
+      const r = readSync(fd, buf, 0, buf.length, null);
       if (r === 0)
         break;
-      bytesRead += r;
+      parts.push(buf.subarray(0, r));
+      total += r;
+      if (total > maxBytes)
+        return { ok: false, oversize: true };
     }
-    if (bytesRead > maxBytes)
-      return { ok: false, oversize: true };
-    return { ok: true, text: buf.subarray(0, bytesRead).toString("utf8") };
+    return { ok: true, text: Buffer.concat(parts).toString("utf8") };
   } finally {
     closeSync(fd);
   }
@@ -27675,6 +27676,17 @@ function cutContent(content, budget) {
   return fenceBackup(wholeLineCut(candidate));
 }
 function capBody(body, maxChars, markers) {
+  if (markers.length === 0 && codePointsOf(body) <= maxChars) {
+    let stale = false;
+    for (const line of body.split(/\r?\n/)) {
+      if (isTruncNoteLine(line)) {
+        stale = true;
+        break;
+      }
+    }
+    if (!stale)
+      return body;
+  }
   const note2 = truncNoteFor(maxChars);
   const contentLines = [];
   const lifted = [];

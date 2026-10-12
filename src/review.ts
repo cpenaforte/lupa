@@ -328,6 +328,19 @@ function cutContent(content: string, budget: number): string {
  * is appended. Throws RangeError when the markers alone exceed the cap.
  */
 export function capBody(body: string, maxChars: number, markers: string[]): string {
+  if (markers.length === 0 && codePointsOf(body) <= maxChars) {
+    let stale = false;
+    for (const line of body.split(/\r?\n/)) {
+      if (isTruncNoteLine(line)) {
+        stale = true;
+        break;
+      }
+    }
+    // Passthrough: no markers, no stale notes, fits the cap — return the
+    // body untouched (CRLF and marker-looking lines preserved as-is). Line
+    // normalization below only ever touches capped or marker-processed bodies.
+    if (!stale) return body;
+  }
   const note = truncNoteFor(maxChars);
   const contentLines: string[] = [];
   const lifted: string[] = [];

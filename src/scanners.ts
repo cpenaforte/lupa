@@ -275,6 +275,7 @@ function findingsExitCodes(label: string): number[] {
 /**
  * Interpret a scanner whose SARIF arrives on stdout. Fail-open: a non-zero exit (or
  * any exit) with empty/unparseable stdout is a `scanner-failed` warning, never a clean pass.
+ * The `maxBytes` byte check runs before parsing (after the missing/timedOut guards).
  * The timeout message names the actual `timeoutMs` budget the tool ran under.
  * Parsed findings are always kept; a failed invocation appends a `scanner-failed`
  * warning, never substituted. Explicit invocation success wins over a contradictory

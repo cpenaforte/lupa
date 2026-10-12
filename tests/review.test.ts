@@ -361,6 +361,21 @@ describe("capBody", () => {
     expect(capBody("lupa: no findings.", 60000, [])).toBe("lupa: no findings.");
   });
 
+  it("passes through a fitting CRLF body byte-for-byte (same reference)", () => {
+    const body = "line-one\r\nline-two\r\nline-three";
+    const out = capBody(body, 60000, []);
+    expect(out).toBe(body);
+    expect(out === body).toBe(true);
+  });
+
+  it("leaves marker-looking lines alone when nothing is capped and markers is empty", () => {
+    const marker = omissionMarkerFor(5, 200);
+    const body = `content\n${marker}`;
+    const out = capBody(body, 60000, []);
+    expect(out).toBe(body);
+    expect(out === body).toBe(true);
+  });
+
   it("cuts whole lines and keeps markers plus a trailing note inside the cap", () => {
     const body = ["lupa: 3 finding(s).", "", "line-aaaaaaaaaaaaaaaa", "line-bbbbbbbbbbbbbbbb", "line-cccccccccccccccc", "line-dddddddddddddddd"].join("\n");
     const marker = omissionMarkerFor(5, 200);
