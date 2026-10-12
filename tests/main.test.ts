@@ -1472,6 +1472,40 @@ describe("prompt budget", () => {
     expect(user).not.toContain(ISSUE_TRUNCATION_MARKER);
     expect(Buffer.byteLength(user, "utf8")).toBeLessThanOrEqual(noIssueBytes + overhead + 10);
   });
+  it("keeps a bare marker when the allowance equals the marker exactly", async () => {
+    // Boundary of the drop test above: allowance == markerBytes keeps a bare
+    // marker (no drop). Unit half mirrors the drop-test arithmetic.
+    const markerBytes = Buffer.byteLength(ISSUE_TRUNCATION_MARKER, "utf8");
+    expect(markerBytes).toBe(53);
+    const fast = [SCAN_FINDING];
+    const promptText = "diff text";
+    const nPrompt = neutralise(promptText);
+    const noIssueBytes = Buffer.byteLength(buildMessages(fast, nPrompt, undefined, [], undefined, 0).user, "utf8");
+    const overhead =
+      Buffer.byteLength(buildMessages(fast, nPrompt, ISSUE_TRUNCATION_MARKER, [], undefined, 0).user, "utf8") -
+      noIssueBytes -
+      markerBytes;
+    const unitBudget = noIssueBytes + overhead + markerBytes; // allowance == markerBytes exactly
+    const b = budgetPrompt(fast, promptText, "x".repeat(5000), [], unitBudget);
+    expect(b.issueDropped).toBe(false);
+    const unitUser = buildMessages(b.fast, b.promptText, b.issueBody, b.skipped, undefined, b.findingsOmitted).user;
+    expect(unitUser).toContain(ISSUE_TRUNCATION_MARKER);
+    expect(Buffer.byteLength(unitUser, "utf8")).toBeLessThanOrEqual(unitBudget);
+    // Live half: size maxPromptChars from a full-budget probe so the live
+    // allowance equals the marker exactly (the render is linear in the issue slot).
+    const issue = "y".repeat(5000);
+    const probe = await runWithMocks({ diff: DIFF_2900, issueBody: issue, prBody: "Fixes #7", scan: [SCAN_FINDING] });
+    expect(probe.llmCalled).toBe(1);
+    const budget =
+      Buffer.byteLength(probe.prompts!.user, "utf8") -
+      Buffer.byteLength(neutralise(issue), "utf8") +
+      markerBytes;
+    const r = await runWithMocks({ maxPromptChars: budget, diff: DIFF_2900, issueBody: issue, prBody: "Fixes #7", scan: [SCAN_FINDING] });
+    expect(r.prompts!.user).toContain("## Linked issue");
+    expect(r.prompts!.user).toContain(ISSUE_TRUNCATION_MARKER);
+    expect(Buffer.byteLength(r.prompts!.user, "utf8")).toBeLessThanOrEqual(budget);
+    expect(r.llmCalled).toBe(1);
+  });
   it("drops whole findings with an exact omitted count", async () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
     const r = await runWithMocks({ maxPromptChars: 1000, scan: many });
