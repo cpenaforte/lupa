@@ -11,13 +11,14 @@ valid tool-result envelopes.
 
 - Scope: F11 only (`src/agent.ts`, `src/llm.ts` agent probe paths, `src/agent-tools.ts`
   tool entry, `src/linked-repos.ts` clone timeouts, `src/main.ts` linked closure).
-  No adapter-protocol changes (adapters never see the deadline), no template or CI
-  changes.
+  No adapter-protocol changes (adapters never see the deadline; retry/sleep behavior
+  inside adapters is unchanged by construction) and no template or CI changes.
+  The 429/5xx retry overshoot is bounded by racing `hooks.call`, not by touching
+  adapters (ruled — see §2).
 - Deadline plumbing: explicit `deadlineMs` epoch-ms parameter (no shared mutable
-  state); every layer clamps its own timeout to the remaining budget. Residual,
-  stated: a per-turn timeout bounds newly started work; one in-flight clamped sleep
-  plus one clamped attempt may run past a deadline mid-turn — the next turn
-  re-checks. Bounded, documented, accepted.
+  state); every layer clamps its own timeout to the remaining budget, and every
+  `hooks.call` is raced against the absolute deadline (no residual past one settled
+  timer cleanup).
 - One absolute deadline per probe invocation (not per style); per-call byte checks
   bound round overshoot to one capped result; backstop replaces over-cap/corrupt
   tool output with an explicit error envelope.
@@ -61,10 +62,41 @@ deadlineMs?: number  // absolute epoch-ms; when present runAgent uses it verbati
   single-style paths are unchanged (one `runAgent` already means one deadline).
 - `agentCallFor` is unchanged (it picks `timeoutSeconds` only — adapters never see
   the deadline, so no adapter `o` type changes and no `tsc` breakage there).
-  Adapter retry/sleep behavior is unchanged by construction; the residual in the
-  Decisions stands.
+- Every `hooks.call` in `runAgent` is raced against the absolute deadline (see
+  "In-flight race" below) — this bounds adapter sleeps/retries without touching
+  adapters, replacing the old per-turn-timeout-only residual.
 - Existing `seenOpts` `toEqual({ timeoutSeconds })` assertions gain the `deadlineMs`
   field (intentional updates, named per task).
+
+### In-flight race (bounds adapter sleeps/retries without touching adapters)
+
+A per-turn `timeoutSeconds` clamp cannot bound a 429/5xx retry (full-timeout
+attempt + ≤5 s sleep + full-timeout retry ≈ 2× remaining + 5 s worst case), so
+every `hooks.call` in `runAgent` goes through one helper:
+
+```ts
+callWithDeadline(flags, opts, nowMs): Promise<{ reply: AgentReply; raced: boolean }>
+```
+
+- `ms = deadline - nowMs` (`nowMs` passed in from the already-read clock values at
+  each of the four call sites — no new `clock()` reads, so the `:166` `++reads`
+  fixture is safe).
+- `ms <= 0` → return `{ reply: timeoutResult, raced: true }` WITHOUT invoking
+  `hooks.call` (deterministic under fake clocks).
+- Else `Promise.race` between `hooks.call(...)` and a real-timer fallback resolving
+  the same timeout result. The timer is cleared on settle; the dangling inner promise
+  gets a noop-catch at race time (adapters resolve `LlmResult` by contract and never
+  reject — the branch is timer hygiene only).
+- `timeoutResult` is `{ ok: false, result: { ok: false, reason: "timeout", detail: <existing TIMEOUT_DETAIL> } }`
+  (reuse the constant, not a copy).
+- `raced === true` → `finish(timeoutResult, "budget", false)` at every site (same
+  stop as loop-level expiry — no string matching, no new reason codes). `raced`
+  false flows through the existing per-site handling untouched.
+
+Deterministic tests (no live timing): pre-expired deadline asserts `hooks.call`
+uncalled + `stop: "budget"`; fake-timer test advances past the deadline mid-call and
+asserts the race wins with `stop: "budget"`; far-future deadline + immediate hook
+asserts `raced: false` and normal handling.
 
 ### Tool/clone enforcement
 
@@ -73,6 +105,10 @@ deadlineMs?: number  // absolute epoch-ms; when present runAgent uses it verbati
 executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: number })
 ```
 
+- runAgent's tool loop supplies both on every call: `deadlineMs` is the run's
+  absolute deadline (the hop that makes the whole grep/glob/clone chain reachable
+  from the loop); `maxResultBytes` is the per-call effective cap from the byte
+  rules below. No other caller passes `limits` (existing 3-arg callers compile).
 - `deadlineMs` here is an absolute epoch (durations stay `timeoutMs`/`maxMs`
   everywhere — units stated at each conversion). Existing 3-arg callers compile.
 - grep path: entry-expired (`end - Date.now() <= 0`) returns the existing
@@ -111,7 +147,10 @@ executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: nu
   `capToolResult(output: string, maxBytes: number): string` — JSON parses AND
   `byteLength <= maxBytes` → passthrough unchanged; else →
   `{"error":"tool result exceeded the byte budget","truncated":true}` (exact).
-  Never corrupts, never exceeds. The old surrogate-safe test is superseded by
+  Never corrupts, never exceeds. runAgent invokes it with the nominal
+  `maxResultBytes` (not the per-call remaining — remaining-capped outputs are
+  smaller and pass trivially; the backstop catches tool bugs, not budget math).
+  The old surrogate-safe test is superseded by
   backstop multibyte unit tests (named per task).
 - Forced round-start gate unchanged (terminal mechanism). `bytes`/`turnBytes`
   accounting uses final output lengths.
@@ -125,6 +164,10 @@ timeouts — no fake clocks there):
 - runAgent with a pre-expired `AgentBudget.deadlineMs` stops before the first turn
   (no `hooks.call`); scripted hook advancing the fake clock past the deadline
   mid-conversation stops the loop after the current turn (no further calls).
+- Race: pre-expired deadline asserts `hooks.call` UNCALLED + `stop: "budget"`;
+  fake-timer advance past the deadline mid-call asserts the race wins with
+  `stop: "budget"` (deterministic — no live timing); far-future deadline asserts
+  normal handling (`raced: false` path).
 - Fake clock at 10,500 ms remaining pins `timeoutSeconds === 10` in `seenOpts`
   (floor rule).
 - Multi-round accumulation with per-call remaining caps: totals stay exactly bounded;
