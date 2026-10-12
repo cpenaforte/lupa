@@ -160,18 +160,18 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promis
   const fullContent = selected.map((l, i) => `${start + i}: ${l}`).join("\n");
 
   const base = { path: rel, start_line: start, end_line: actualEnd, total_lines: total };
-  const serialize = (content: string, truncated: boolean): string =>
-    JSON.stringify({ ...base, truncated, content });
+  const serialize = (content: string): string =>
+    JSON.stringify({ ...base, truncated: false, content });
   const serializeTruncated = (cut: string): string => {
     const idx = cut.lastIndexOf("\n");
     const complete = idx >= 0;
     const visible = complete ? cut.slice(0, idx) : cut;
-    const endLine = complete ? start + visible.split("\n").length - 1 : start - 1;
-    return JSON.stringify({ ...base, end_line: endLine, truncated: true, content: visible + TRUNCATION_MARKER });
+    const visibleEnd = complete ? start + visible.split("\n").length - 1 : start - 1;
+    return JSON.stringify({ ...base, end_line: visibleEnd, truncated: true, content: visible + TRUNCATION_MARKER });
   };
 
-  if (Buffer.byteLength(serialize(fullContent, false), "utf8") <= AGENT_LIMITS.resultBytes) {
-    return okResult(JSON.parse(serialize(fullContent, false)));
+  if (Buffer.byteLength(serialize(fullContent), "utf8") <= AGENT_LIMITS.resultBytes) {
+    return okResult(JSON.parse(serialize(fullContent)));
   }
 
   let lo = 0;

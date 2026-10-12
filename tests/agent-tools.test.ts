@@ -161,6 +161,7 @@ describe("read_file", () => {
     const parsed = JSON.parse(r.output);
     expect(parsed.truncated).toBe(true);
     expect(parsed.content.length).toBeGreaterThan(0);
+    expect(parsed.content.startsWith("2: x")).toBe(true);
     expect(parsed.end_line).toBe(1);
   });
 });

@@ -25003,16 +25003,16 @@ async function readFile(args, ctx) {
   const actualEnd = selected.length ? start + selected.length - 1 : start - 1;
   const fullContent = selected.map((l, i) => `${start + i}: ${l}`).join("\n");
   const base = { path: rel, start_line: start, end_line: actualEnd, total_lines: total };
-  const serialize = (content, truncated) => JSON.stringify({ ...base, truncated, content });
+  const serialize = (content) => JSON.stringify({ ...base, truncated: false, content });
   const serializeTruncated = (cut) => {
     const idx = cut.lastIndexOf("\n");
     const complete = idx >= 0;
     const visible = complete ? cut.slice(0, idx) : cut;
-    const endLine2 = complete ? start + visible.split("\n").length - 1 : start - 1;
-    return JSON.stringify({ ...base, end_line: endLine2, truncated: true, content: visible + TRUNCATION_MARKER });
+    const visibleEnd = complete ? start + visible.split("\n").length - 1 : start - 1;
+    return JSON.stringify({ ...base, end_line: visibleEnd, truncated: true, content: visible + TRUNCATION_MARKER });
   };
-  if (Buffer.byteLength(serialize(fullContent, false), "utf8") <= AGENT_LIMITS.resultBytes) {
-    return okResult(JSON.parse(serialize(fullContent, false)));
+  if (Buffer.byteLength(serialize(fullContent), "utf8") <= AGENT_LIMITS.resultBytes) {
+    return okResult(JSON.parse(serialize(fullContent)));
   }
   let lo = 0;
   let hi = fullContent.length;
