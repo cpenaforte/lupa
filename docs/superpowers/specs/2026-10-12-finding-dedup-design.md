@@ -76,7 +76,10 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
 ### Prompt contract and schema
 
 - The sent array is the POST-CUT fast list (`b.fast` after F10 budget cuts):
-  IDs are indices into exactly what the model sees. Tail indices cut by the
+  IDs are indices into exactly what the model sees, rendered as an `"id"`
+  field on each finding object with ALL other fields complete and untruncated
+  (full message + suggestion bodies — the model judges on substantive
+  content, never bare IDs or locations). Tail indices cut by the
   budget are not sendable — verdicts referencing them are unknown by
   construction. Published output is unchanged when no verdicts return; the
   PROMPT gains IDs + verdict instructions ONLY in the single-shot call path
