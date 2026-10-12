@@ -48,11 +48,9 @@ stay stable and short):
 - `semgrep`, `trivy`, `gitleaks`, `osv-scanner` (the `fromStdout` LABEL —
   never `tool`, which is `"docker"` — applied by the caller wrapping
   `parseSarif` results, not inside `parseSarif`), linter SUCCESS findings
-  (gofmt per-file): `source` = the fixed id (`sourceForLabel()` in
-  `fastpath.ts` strips lockfile interpolation — `osv-scanner (lock)` →
-  `"osv-scanner"` — used at EVERY construction site including `warning()`
-  and `byteCheck`, so lockfile paths never reach the contract),
-  `confidence: 90`, `evidence: { analyzer: <same fixed id> }` (name only).
+  (gofmt per-file, `runGitleaks` parsed results): `source` = the fixed id
+  (`"gofmt"`, `"gitleaks"`, … — like all fixed ids), `confidence: 90`,
+  `evidence: { analyzer: <same fixed id> }` (name only).
   "Success" means files parsed: gofmt per-file findings are success-shaped
   even under nonzero exits (only timeout/signal delegate to the failure
   path) — confidence 90 either way.
@@ -83,12 +81,14 @@ stay stable and short):
   `confidence` from a nullable structured `confidence` field (same pattern
   as `duplicateOf` — schema, `googleSchema`-safe shape, added to the
   `required` lists, absent stays absent; invalid values drop the FIELD,
-  never the finding). No separate agent schema: required keys constrain the
+  never the finding). Agent-mode findings carry NO provenance via a shared
+  `stripProvenance()` helper (fastpath.ts) applied at BOTH agent exit
+  points — after `agent.ts`'s `toFindings` call AND on slowPath's agent
+  branch (which covers the probe-memo path that bypasses `toFindings`
+  entirely). No separate agent schema: required keys constrain the
   model's output and models emit them (dedup's required verdict keys set
-  this precedent without incident); the agent strip covers the rest. Agent-mode findings carry NO provenance: `agent.ts`
-  strips the three fields after its `toFindings` call (one explicit step —
-  the shared parser cannot know its caller); agent prompt/contract untouched,
-  revisit with Q01 structured output (seam noted, not built). Response
+  this precedent without incident).
+  revisit with Q01 structured output (seam noted, not built; agent SYSTEM prompt/contract untouched — only the user message carries provenance, intended). Response
   schema, `prompt.test.ts` required pins, and the converted-schema
   expectation update are named per task.
 - `evidence.snippet`: assigned by NO producer in v1 (reserved contract
@@ -111,11 +111,12 @@ provenance must never drop silently mid-pipeline)
   absent stays absent through sanitize, redact, merge, and funnel — no stage
   invents values.
 - `survivor` (dedup merge) carries provenance with per-field rules:
-  `source` = distinct member sources `"+"`-joined in group order (collapse
-  identical; joined value re-capped at 100 like `rule`); `confidence` = max
-  (absent ONLY if all members absent — no invented values); `evidence` =
-  `{ snippet: first defined, analyzer: distinct joined "+" re-capped at 100 }`,
-  absent when no member defines any evidence field (never an empty object).
+  `source` = present member sources `"+"`-joined in group order (collapse
+  identical; re-capped at 100 like `rule`; absent iff ALL members absent);
+  `confidence` = max (absent ONLY if all members absent — no invented
+  values); `evidence` = `{ snippet: first defined, analyzer: distinct
+  present analyzers joined "+" re-capped at 100 }`, absent when no member
+  defines any evidence field (never an empty object).
 - `toFindings` assigns `source: "llm"` + carries `confidence` (single-shot
   only). `redactFindings` spreads (keeps) + redacts `evidence.*`.
   `parseSarif`/`warning()`/`runL0`/L2 interpreters/`byteCheck`/`L2_SKIPPED`
@@ -139,15 +140,18 @@ provenance must never drop silently mid-pipeline)
   patch block); partials: source-only → `` `src:<source>` ``,
   confidence-only → `` `conf <n>` ``, neither → no trailer. `confidence: 0`
   renders (`conf 0` — never truthiness-tested; pinned by test).
-- General-body items: same trailer inline. The trailer is part of item text:
+- General-body items: same trailer inline, AFTER any `Suggested:` block
+  (never inside it). The trailer is part of item text:
   it renders BEFORE any `capBody` cut (never appended post-cap) and may be
   truncated with the item (the truncation note witnesses).
 - Fallback report: `- Source:` / `- Confidence:` / `- Evidence:` rows after
   the `- Message/evidence:` row (present fields only; values via the
   existing `field()` fenced helper like neighboring rows; `evidence` =
   `analyzer: <name>` line when present + fenced snippet when present).
-- SARIF results: `properties` with `confidence`/`source` when EITHER is
-  present; omitted entirely when both absent (`message.text` unchanged).
+- SARIF results: `properties` carries `confidence` and `source` each
+  independently iff present (confidence-only → `{confidence}`;
+  source-only → `{source}`); omitted entirely when both absent
+  (`message.text` unchanged).
 - `findings.json`: stores everything (already does — new fields ride along;
   ~60% growth accepted residual: inputs are byte-capped upstream and the
   8 MiB Flow B read cap still guards).
