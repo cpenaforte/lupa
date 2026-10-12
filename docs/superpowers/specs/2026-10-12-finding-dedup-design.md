@@ -56,12 +56,15 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
 - New sibling parser `parseVerdicts(parsed: unknown): DedupVerdicts`
   (`llm.ts`, exported, unit-tested): takes the ALREADY-PARSED response
   object (adapters parse once via `parseContent` — fence handling inherited,
-  no double parse). Drops unknown indices, self-pairs, dangling pointers,
-  non-pairs, and wrong-length pairs (each drop increments `malformed`); null
-  and absent verdict keys both mean "no verdict" (schema-less providers and
-  the Google no-schema fallback never emit them — that is normal, not
-  malformed). `toFindings`, `sanitizeFinding`, `isFinding`, and the Finding
-  contract are untouched.
+  no double parse). Shape validation ONLY: drops negativity/non-integer
+  indices, self-pairs, non-pairs, and wrong-length pairs (each drop
+  increments `malformed`). Referent checks (unknown sent indices, dangling
+  pointers) belong to the CALLER holding the arrays — `slowPath` range-checks
+  against the kept count, the merge range-checks against `findings.length`
+  (see below). Null and absent verdict keys both mean "no verdict"
+  (schema-less providers and the Google no-schema fallback never emit them —
+  that is normal, not malformed). `toFindings`, `sanitizeFinding`,
+  `isFinding`, and the Finding contract are untouched.
 - Every adapter attaches the whole `parseVerdicts(parsed)` object on the
   `LlmResult` it builds (absent only where there is no parsed JSON body);
   the probe carries the WINNING style's result, verdicts included (a
@@ -69,7 +72,8 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
   a losing style's verdicts never leak).
 - `slowPath` returns `{ findings, verdicts? } | undefined`
   (`Promise<{ findings: Finding[]; verdicts?: DedupVerdicts } | undefined>`);
-  on success it converts links to absolute (`allIndex = fast.length + r`),
+  on success it converts links to absolute (`allIndex = fast.length + r`
+  using the UNCUT `fast` parameter — never `b.fast.length`),
   drops verdicts with sent index ≥ `b.fast.length` (cut tail — unseen by
   construction) counting them into `malformed`, and warns
   `lupa: ignored <n> malformed dedup verdict(s)` (exact shape) iff
@@ -161,8 +165,6 @@ either set, so the F15 "full set" tests stay green unchanged.
    (publication surface); `findings.json` keeps the pre-merge set (F15
    artifact contract intact).
 
-### Verdict persistence across flows
-
 ### Verdict persistence across flows (inside pr-meta.json — no template change)
 
 The artifact upload list is explicit and template changes are out of scope,
@@ -191,10 +193,12 @@ nothing, silently).
   (`core.info` + step summary): `lupa: dedup skipped (slow path
   unavailable); scanner findings published unmerged` (exact). README dedup
   section documents it.
-- Malformed `duplicates` section / unknown indices / dangling pointers:
-  counted in `parseVerdicts` (`malformed` count); the slow path logs one
+- Malformed `duplicates` section (shape-bad entries): counted in
+  `parseVerdicts` (`malformed` count); referent failures (unknown sent
+  indices, dangling pointers) are counted at the range checks (slowPath
+  cut-tail, merge out-of-range). The slow path logs one
   `core.warning("lupa: ignored <n> malformed dedup verdict(s)")` (exact
-  shape) and drops the entries; all findings kept.
+  shape) for the parse+send counts and drops the entries; all findings kept.
 
 ## 3. Tests
 
@@ -204,7 +208,7 @@ including the converted-schema expectation in `adapters-google.test.ts`)
 and the merge function directly (`review.test.ts`):
 - Canary-exact pair (gitleaks + semgrep `github-pat` on one file:line → one
   comment, `high`, rule `"github-pat"`, secret still redacted) + Flow B twin
-  (same verdicts via `verdicts.json` fixture).
+  (same verdicts via a pr-meta fixture carrying the verdicts key).
 - Model-finding `duplicateOf` a scanner finding → one comment citing both.
 - Transitive triple → one; cross-file pair ignored with warning (locations
   preserved); partially-valid pair dropped whole; unknown-ID and
