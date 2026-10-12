@@ -24901,6 +24901,18 @@ function codePointSafeCut(s, n) {
   const cut = code >= 56320 && code <= 57343 ? n - 1 : n;
   return s.slice(0, cut);
 }
+function largestFittingCount(total, cap, byteLengthAt) {
+  let lo = 0;
+  let hi = total;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLengthAt(mid) <= cap)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return lo;
+}
 function realpathExistingAncestor(p) {
   let cur = p;
   for (; ; ) {
@@ -24944,17 +24956,8 @@ function resolveWithinRoot(root, rel) {
 function errorResult(message) {
   let msg = message;
   if (Buffer.byteLength(msg, "utf8") > ERROR_MESSAGE_CAP) {
-    let lo = 0;
-    let hi = msg.length;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      const candidate = codePointSafeCut(msg, mid) + TRUNCATION_MARKER;
-      if (Buffer.byteLength(candidate, "utf8") <= ERROR_MESSAGE_CAP)
-        lo = mid;
-      else
-        hi = mid - 1;
-    }
-    msg = codePointSafeCut(msg, lo) + TRUNCATION_MARKER;
+    const n = largestFittingCount(msg.length, ERROR_MESSAGE_CAP, (k) => Buffer.byteLength(codePointSafeCut(msg, k) + TRUNCATION_MARKER, "utf8"));
+    msg = codePointSafeCut(msg, n) + TRUNCATION_MARKER;
   }
   return { output: JSON.stringify({ error: msg }), isError: true };
 }
@@ -24981,8 +24984,8 @@ async function rootFor(args, ctx, deadlineMs) {
     return { root };
   return { error: root.error };
 }
-async function readFile(args, ctx, opts, endMs) {
-  const resolvedRoot = await rootFor(args, ctx, endMs);
+async function readFile(args, ctx, opts) {
+  const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   const rel = typeof args.path === "string" ? args.path : "";
@@ -25030,17 +25033,8 @@ async function readFile(args, ctx, opts, endMs) {
   if (Buffer.byteLength(serialize(fullContent), "utf8") <= cap) {
     return okResult(JSON.parse(serialize(fullContent)));
   }
-  let lo = 0;
-  let hi = fullContent.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    const candidate = serializeTruncated(codePointSafeCut(fullContent, mid));
-    if (Buffer.byteLength(candidate, "utf8") <= cap)
-      lo = mid;
-    else
-      hi = mid - 1;
-  }
-  return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, lo))));
+  const n = largestFittingCount(fullContent.length, cap, (k) => Buffer.byteLength(serializeTruncated(codePointSafeCut(fullContent, k)), "utf8"));
+  return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, n))));
 }
 async function listDir(args, ctx, endMs, maxBytes) {
   const resolvedRoot = await rootFor(args, ctx, endMs);
@@ -25083,16 +25077,8 @@ async function listDir(args, ctx, endMs, maxBytes) {
   if (Buffer.byteLength(serializeList(sliced, overCap), "utf8") <= byteCap) {
     return okResult({ path: rel, entries: sliced, truncated: overCap });
   }
-  let lo = 0;
-  let hi = sliced.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serializeList(sliced.slice(0, mid), true), "utf8") <= byteCap)
-      lo = mid;
-    else
-      hi = mid - 1;
-  }
-  return okResult({ path: rel, entries: sliced.slice(0, lo), truncated: true });
+  const n = largestFittingCount(sliced.length, byteCap, (k) => Buffer.byteLength(serializeList(sliced.slice(0, k), true), "utf8"));
+  return okResult({ path: rel, entries: sliced.slice(0, n), truncated: true });
 }
 var GREP_TIMEOUT_MS = 5e3;
 var GREP_MAX_MATCHES = 100;
@@ -25374,17 +25360,9 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs
   }));
   const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
   const serialize = (list, truncated2) => JSON.stringify({ matches: list, truncated: truncated2, files_scanned: filesScanned, skipped: walked.skipped });
-  let lo = 0;
-  let hi = capped.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= byteCap)
-      lo = mid;
-    else
-      hi = mid - 1;
-  }
-  const truncated = hitLimit || walked.truncated || lo < capped.length;
-  return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
+  const n = largestFittingCount(capped.length, byteCap, (k) => Buffer.byteLength(serialize(capped.slice(0, k), true), "utf8"));
+  const truncated = hitLimit || walked.truncated || n < capped.length;
+  return okResult(JSON.parse(serialize(capped.slice(0, n), truncated)));
 }
 async function grep(args, ctx, opts) {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
@@ -25415,16 +25393,8 @@ async function glob(args, ctx, endMs, maxBytes) {
   if (Buffer.byteLength(serializeGlob(sliced, overCap), "utf8") <= byteCap) {
     return okResult({ paths: sliced, truncated: overCap });
   }
-  let lo = 0;
-  let hi = sliced.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serializeGlob(sliced.slice(0, mid), true), "utf8") <= byteCap)
-      lo = mid;
-    else
-      hi = mid - 1;
-  }
-  return okResult({ paths: sliced.slice(0, lo), truncated: true });
+  const n = largestFittingCount(sliced.length, byteCap, (k) => Buffer.byteLength(serializeGlob(sliced.slice(0, k), true), "utf8"));
+  return okResult({ paths: sliced.slice(0, n), truncated: true });
 }
 var TOOL_DEFS = [
   {
@@ -25486,7 +25456,7 @@ async function executeTool(name, args, ctx, limits) {
   try {
     switch (name) {
       case "read_file":
-        return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes }, limits?.deadlineMs);
+        return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes, endMs: limits?.deadlineMs });
       case "list_dir":
         return await listDir(a, ctx, limits?.deadlineMs, limits?.maxResultBytes);
       case "grep":

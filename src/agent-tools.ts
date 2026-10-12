@@ -42,6 +42,24 @@ function codePointSafeCut(s: string, n: number): string {
 }
 
 /**
+ * Binary-search the largest n in [0, total] whose candidate fits in `cap`
+ * bytes. `byteLengthAt(n)` returns the UTF-8 byte length of the candidate
+ * built from the first n units (items or chars, already code-point-safe at
+ * the call site). Pure search — call sites keep their own full-fit fast
+ * path with the real truncated flag, so default paths stay byte-identical.
+ */
+function largestFittingCount(total: number, cap: number, byteLengthAt: (n: number) => number): number {
+  let lo = 0;
+  let hi = total;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLengthAt(mid) <= cap) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
  * Realpath of `p` when it exists, otherwise of its nearest existing ancestor.
  * Catches an escaping symlinked directory even when the requested leaf does
  * not exist yet.
@@ -95,15 +113,12 @@ export function resolveWithinRoot(root: string, rel: string): string | null {
 function errorResult(message: string): { output: string; isError: boolean } {
   let msg = message;
   if (Buffer.byteLength(msg, "utf8") > ERROR_MESSAGE_CAP) {
-    let lo = 0;
-    let hi = msg.length;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      const candidate = codePointSafeCut(msg, mid) + TRUNCATION_MARKER;
-      if (Buffer.byteLength(candidate, "utf8") <= ERROR_MESSAGE_CAP) lo = mid;
-      else hi = mid - 1;
-    }
-    msg = codePointSafeCut(msg, lo) + TRUNCATION_MARKER;
+    const n = largestFittingCount(
+      msg.length,
+      ERROR_MESSAGE_CAP,
+      (k) => Buffer.byteLength(codePointSafeCut(msg, k) + TRUNCATION_MARKER, "utf8"),
+    );
+    msg = codePointSafeCut(msg, n) + TRUNCATION_MARKER;
   }
   return { output: JSON.stringify({ error: msg }), isError: true };
 }
@@ -130,8 +145,8 @@ async function rootFor(args: Record<string, unknown>, ctx: ToolContext, deadline
   return { error: root.error };
 }
 
-async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: { maxBytes?: number }, endMs?: number): Promise<{ output: string; isError: boolean }> {
-  const resolvedRoot = await rootFor(args, ctx, endMs);
+async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: { maxBytes?: number; endMs?: number }): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" ? args.path : "";
@@ -188,15 +203,12 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: 
     return okResult(JSON.parse(serialize(fullContent)));
   }
 
-  let lo = 0;
-  let hi = fullContent.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    const candidate = serializeTruncated(codePointSafeCut(fullContent, mid));
-    if (Buffer.byteLength(candidate, "utf8") <= cap) lo = mid;
-    else hi = mid - 1;
-  }
-  return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, lo))));
+  const n = largestFittingCount(
+    fullContent.length,
+    cap,
+    (k) => Buffer.byteLength(serializeTruncated(codePointSafeCut(fullContent, k)), "utf8"),
+  );
+  return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, n))));
 }
 
 interface DirEntry {
@@ -249,14 +261,12 @@ async function listDir(args: Record<string, unknown>, ctx: ToolContext, endMs?: 
   if (Buffer.byteLength(serializeList(sliced, overCap), "utf8") <= byteCap) {
     return okResult({ path: rel, entries: sliced, truncated: overCap });
   }
-  let lo = 0;
-  let hi = sliced.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serializeList(sliced.slice(0, mid), true), "utf8") <= byteCap) lo = mid;
-    else hi = mid - 1;
-  }
-  return okResult({ path: rel, entries: sliced.slice(0, lo), truncated: true });
+  const n = largestFittingCount(
+    sliced.length,
+    byteCap,
+    (k) => Buffer.byteLength(serializeList(sliced.slice(0, k), true), "utf8"),
+  );
+  return okResult({ path: rel, entries: sliced.slice(0, n), truncated: true });
 }
 
 export const GREP_TIMEOUT_MS = 5000;
@@ -669,15 +679,13 @@ export async function grepInRoot(
   const serialize = (list: GrepMatch[], truncated: boolean): string =>
     JSON.stringify({ matches: list, truncated, files_scanned: filesScanned, skipped: walked.skipped });
 
-  let lo = 0;
-  let hi = capped.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= byteCap) lo = mid;
-    else hi = mid - 1;
-  }
-  const truncated = hitLimit || walked.truncated || lo < capped.length;
-  return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
+  const n = largestFittingCount(
+    capped.length,
+    byteCap,
+    (k) => Buffer.byteLength(serialize(capped.slice(0, k), true), "utf8"),
+  );
+  const truncated = hitLimit || walked.truncated || n < capped.length;
+  return okResult(JSON.parse(serialize(capped.slice(0, n), truncated)));
 }
 
 async function grep(args: Record<string, unknown>, ctx: ToolContext, opts?: { timeoutMs?: number; endMs?: number; maxBytes?: number }): Promise<{ output: string; isError: boolean }> {
@@ -722,14 +730,12 @@ async function glob(args: Record<string, unknown>, ctx: ToolContext, endMs?: num
   if (Buffer.byteLength(serializeGlob(sliced, overCap), "utf8") <= byteCap) {
     return okResult({ paths: sliced, truncated: overCap });
   }
-  let lo = 0;
-  let hi = sliced.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serializeGlob(sliced.slice(0, mid), true), "utf8") <= byteCap) lo = mid;
-    else hi = mid - 1;
-  }
-  return okResult({ paths: sliced.slice(0, lo), truncated: true });
+  const n = largestFittingCount(
+    sliced.length,
+    byteCap,
+    (k) => Buffer.byteLength(serializeGlob(sliced.slice(0, k), true), "utf8"),
+  );
+  return okResult({ paths: sliced.slice(0, n), truncated: true });
 }
 
 export const TOOL_DEFS: readonly ToolDef[] = [
@@ -799,7 +805,7 @@ export async function executeTool(
   try {
     switch (name) {
       case "read_file":
-        return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes }, limits?.deadlineMs);
+        return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes, endMs: limits?.deadlineMs });
       case "list_dir":
         return await listDir(a, ctx, limits?.deadlineMs, limits?.maxResultBytes);
       case "grep":

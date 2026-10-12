@@ -756,6 +756,11 @@ describe("F11 tool-layer deadlines and byte caps", () => {
     expect(lp.truncated).toBe(true);
     expect(lp.entries.length).toBeLessThan(10);
     expect(Buffer.byteLength(l.output, "utf8")).toBeLessThanOrEqual(300);
+    const g = await executeTool("glob", { pattern: "**/*" }, ctxFor(root), { maxResultBytes: 100 });
+    const gp = JSON.parse(g.output);
+    expect(gp.truncated).toBe(true);
+    expect(gp.paths.length).toBeLessThan(10);
+    expect(Buffer.byteLength(g.output, "utf8")).toBeLessThanOrEqual(100);
   });
   it("resolveRoot forwards the deadline to ensureLinked", async () => {
     const root = tempRoot();
