@@ -71,7 +71,8 @@ export interface WalkSkipped {
 }
 ```
 
-- `walkPaths(root, startAbs, limits?)`: names only — no `stat` size checks, no
+- `walkPaths(root, startAbs, limits?)`: names only — files only (directories are
+  traversed, never listed — same listed set as today's glob), no `stat` size checks, no
   binary scan (same `maxFiles`/`deadlineMs` semantics as `walkFiles`, so `glob`
   inherits the 10 s default bound too). Skips `.git` segments, symlinks, and the prune set. Returns
   `{ paths: string[] (rel, sorted), truncated: boolean, skipped: WalkSkipped }`
@@ -83,7 +84,9 @@ export interface WalkSkipped {
   prune set, `maxFiles`, and `deadlineMs`. `statSync`- and `readdirSync`-failure skips
   count in no bucket. A file start path counts as one examined unit, goes through
   eligibility, and records its exclusion reason (`skipped.oversized`/`binary`)
-  instead of returning all-zero silence. `isBinaryFile` is exported for tests;
+  instead of returning all-zero silence. The limit check precedes eligibility
+  everywhere including file-start (an oversized file with `maxFiles: 0` reports
+  `overLimit: 1`, all skip buckets zero). `isBinaryFile` is exported for tests;
   unreadable files fold into `binary` (open failure reads as binary). Returns
   `{ files: WalkFile[], truncated: boolean, skipped: WalkSkipped }` with real
   counts. `grepInRoot(root, args, timeoutMs?, limits?)` threads the optional limits
