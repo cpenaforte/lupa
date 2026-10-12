@@ -113,10 +113,18 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   A lined finding is `introduced` iff its file+line hits a RIGHT-side hunk
   line with `kind === "add"` (touched lines only: `ctx` context lines and
   `LEFT` deletion fallbacks keep their inline display but never gate). A
-  lineless finding is `introduced` iff its file is in the diff file set
-  (file-level membership — `sensitive-path`/`lockfile-without-manifest` on
-  PR-touched files keep blocking; `file: ""` repo notes never match).
-  `blocking = introduced + merged members whose key is reopened` (order
+  lineless finding is introduced iff its file is present in the diff: present
+  means the FileDiff entry is NOT marked deleted AND (its hunks text is empty
+  OR some parsed hunk line for the file has kind add). Rationale: deletions
+  introduce nothing — a lineless hit on a deleted file or a pure
+  line-removal file never blocks (Q03 later drops heuristics-on-deletion
+  entirely); hunks-less entries (added-empty, mode-only, rename,
+  added-binary) always count, since git headers carrying new/deleted mode are
+  dropped upstream of FileDiff. parseDiffFiles sets FileDiff deleted marker
+  from the deleted file mode header (optional field — existing pins for live
+  files are unaffected). Empty-file repo notes never match.
+  `blocking = merged.filter(f => introduced(f) || reopened.has(key(f)))`
+  (single pass in merged order, so a finding that is both is counted once;
   preserved; reopened matching runs over merged in ANY position, so a
   resolved thread whose line drifted to context/LEFT still re-blocks while
   the issue persists). Internally `mapToComments` is refactored onto the
@@ -142,7 +150,10 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   the next run may see unmerged members (same persisting issue at the same
   file+line must still reopen; literal-`+` rules don't exist in any producer,
   accepted). File+line exact, thread line = `line ?? originalLine` (both
-  absent → no match). Anything else → no reopen (fail-safe toward
+  absent → no match). Scope ruling: ANY own resolved thread with a persisting
+  finding re-blocks, not only threads from REQUEST_CHANGES reviews — the
+  operative policy sentence (resolved + persists → re-raise) governs over the
+  loose past-block framing. Anything else → no reopen (fail-safe toward
   non-blocking). Reopened findings keep their display placement with a marker:
   general-body items render `**reopened**` (never promoted inline — off-diff
   lines are uncommentable); inline items (ctx/LEFT drift) render the same
@@ -162,9 +173,7 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
 - **Self identity.** Primary: `octokit.rest.users.getAuthenticated()` login,
   called with the same token that posts. Fallback (defined path when the
   primary 403s on installation tokens): the login of the newest review on
-  this PR whose body starts with `lupa:` (via `pulls.listReviews` — repo-read
-  scope the run already has; our bodies always open with the `lupa:` summary
-  or `FALLBACK_SUMMARY`). Both sides `normalizeBot`-compared. Both failing →
+  this PR whose body starts with the lupa summary prefix (via paginated pulls listReviews with the existing paginate helper, per_page 100 — newest match wins, so long-lived PRs past one page still resolve — repo-read scope the run already has; our bodies always open with the summary prefix or the fallback summary). Both sides `normalizeBot`-compared. Both failing →
   `undefined` → skip reopen with a warning. Failure mode is fail-OPEN
   (feature inert, never a false block). Residual: threads posted under a
   different token identity (e.g. repo switched GITHUB_TOKEN → App) won't
@@ -238,7 +247,7 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   note (finding literals unchanged), `synthetic-deletion-removed-unsafe-branch`
   exitCode 2 → 0 (LEFT-only warning now non-blocking; inline LEFT display
   unchanged), all other exitCode expectations re-verified (added-line cases
-  unchanged);
+  unchanged); diff-test deleted-section pins gain the new deleted marker (live-file pins unaffected);
   `README.md` gate table (blocking = in-diff-or-reopened highs), dedup-paragraph
   gate sentence (blocking subset of merged, was "full pre-merge set"), dry-run
   paragraph (event from blocking set), new note + reopen documentation;
