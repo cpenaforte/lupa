@@ -42,18 +42,32 @@ aligned):
 ```ts
 // llm.ts, alongside LlmResult:
 interface DedupVerdicts { pairs: Array<[number, number]>; links: Array<[number, number]> }
-// links: [responsePosition, sentIndex] from per-finding duplicateOf pointers
+// links: [responsePosition, sentIndex] from per-finding duplicateOf pointers.
+// responsePosition is the 0-based index within the RESPONSE findings array;
+// the merge maps it to all[fast.length + responsePosition].
 interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts; … }
 ```
 
-- `toFindings` (or a sibling parser — named per task) returns
-  `{ findings, verdicts }`; unknown indices, self-pairs, dangling pointers,
-  and non-pair entries are dropped from `verdicts` HERE (counted for the
-  malformed warning below), so downstream only sees valid verdicts.
-- Every adapter passes `verdicts` through on its `LlmResult` (absent = no
-  verdicts; agent-mode and non-JSON paths leave it absent — the agent prompt
-  carries no dedup contract, so agent runs never merge).
-- `sanitizeFinding`, `isFinding`, and the Finding contract are untouched.
+- New sibling parser `parseVerdicts(rawText: string): { verdicts: DedupVerdicts; malformed: number }`
+  (`llm.ts`, exported, unit-tested): reads the SAME raw response text as
+  `toFindings` (never the sanitized findings — sanitizers rebuild from known
+  fields and would strip the evidence). Drops unknown indices, self-pairs,
+  dangling pointers, non-pairs, and wrong-length pairs HERE (each drop
+  increments `malformed`); null and absent verdict keys both mean "no
+  verdict" (schema-less providers and the Google no-schema fallback never
+  emit them — that is normal, not malformed). `toFindings`, `sanitizeFinding`,
+  `isFinding`, and the Finding contract are untouched.
+- Every adapter attaches `verdicts: parseVerdicts(raw)` on the `LlmResult`
+  it builds (absent only where there is no raw JSON text); the probe carries
+  the WINNING style's result, verdicts included (a schema-caused 400 walks
+  the other styles first — pinned behavior, unchanged).
+- `slowPath` returns `{ findings, verdicts } | undefined`
+  (`Promise<{ findings: Finding[]; verdicts: DedupVerdicts } | undefined>`);
+  the agent-mode return carries `verdicts` absent (no contract there — agent
+  runs never merge, and log nothing about it, by design); every slow-path
+  skip returns `undefined` as today.
+- `PublishArgs` gains `verdicts?: DedupVerdicts`; `publishReview` returns
+  `Promise<{ merged: Finding[] }>` (callers may ignore it).
 
 ### Prompt contract and schema
 
@@ -61,45 +75,55 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
   IDs are indices into exactly what the model sees. Tail indices cut by the
   budget are not sendable — verdicts referencing them are unknown by
   construction. Published output is unchanged when no verdicts return; the
-  PROMPT gains IDs + verdict instructions (ID bytes count against the F10
-  budget like any prompt bytes — the cut point moves).
-- Strict-provider schema (nullable-required, replacing the impossible
-  "optional" shape):
+  PROMPT gains IDs + verdict instructions ONLY in the single-shot call path
+  (the shared `buildMessages` builder is untouched, so agent prompts never
+  see IDs — agent mode has no verdict source). ID bytes count against the F10
+  budget like any prompt bytes — the cut point moves.
+- Strict-provider schema (no `prefixItems` anywhere — length checks live in
+  the parser, keeping every adapter's converter untouched):
   ```json
   "duplicates": { "type": ["array", "null"],
-    "items": { "type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "minItems": 2, "maxItems": 2 } },
+    "items": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 } },
   "duplicateOf": { "type": ["integer", "null"] }
   ```
   Both keys join the item/top-level `required` lists they belong to (the
-  `prompt.test.ts` required-list pins update — named per task). A 400 from
-  a strict provider falls back through the existing probe path. Model
+  `prompt.test.ts` required-list pins AND the `adapters-google.test.ts`
+  converted-schema expectation update — named per task). A 400 from
+  a strict provider falls back through the existing probe path (Google: the
+  in-adapter retry without schema, whose keyless reply parses as
+  no-verdicts). Model
   findings use `duplicateOf` to restate sent findings (response findings
   have no sent ID to pair with).
 
-### Deterministic merge (`mergeDuplicates`, `review.ts`, exported)
+### Deterministic merge (`mergeDuplicates(findings, verdicts)`, `review.ts`, exported)
 
 Merge point: inside `publishReview`, AFTER gate inputs are fixed —
-`eventFor`/`exitFor` keep receiving the FULL pre-merge set (F15 tests
-unchanged), and gate outcomes are provably identical on the merged set
-(severity-max preserves `some high` and `some non-info`; verified case by
-case — the merged set only changes counts, never the predicates).
+`eventFor(fullSet)`, `summaryFor(fullSet)`, and the dry-run `high=` count
+keep the full pre-merge set (already order-free calls — no reordering
+needed); `mapToComments`/`buildBody` take the merged set. `publishReview`
+returns the merged set for the `sarif.json` line (no second merge anywhere
+— re-merging shifted positions would be unsound). `exitFor` sites outside
+(Flow A/B) are untouched. Gate outcomes are provably identical on either
+set, so the F15 "full set" tests stay green unchanged.
 
 1. Verdict groups union by transitive closure over member positions
    (pairs of sent indices; links of response positions to sent indices).
+   Group member order is position order (sent indices, then response
+   positions) — every ordered rule below follows it.
 2. Same-location precondition: members must share `file`, and lines must be
    both-undefined or equal — else the pair/link is ignored with a warning
    (a wrong model pair must never swallow an unrelated location).
 3. Partially-valid pairs are dropped whole (the valid member stays alone —
    never merge on partial evidence).
-4. Survivor per group, in first-member-position order (stable, deterministic):
-   `file`/`line` = the defined member's (precondition makes them coherent);
-   `rule` = distinct member rules joined with `"+"` in group order
-   (identical rules collapse: `[github-pat, github-pat]` → `"github-pat"`);
-   `severity` = max; `message` = members in group order as
-   `` `[${rule}] ${message}` `` joined with `"\n\n"` (no text rewritten),
-   then re-capped with the existing message cap + marker (bounded output
-   beats completeness); `suggestion` = first defined suggestion in group
-   order.
+4. Survivor per group, groups in first-member-position order (stable,
+   deterministic): `file`/`line` = the defined member's (precondition makes
+   them coherent); `rule` = distinct member rules joined with `"+"` in group
+   order, then re-capped at `RULE_CAP` like any rule (identical rules
+   collapse: `[github-pat, github-pat]` → `"github-pat"`); `severity` = max;
+   `message` = members in group order as `` `[${rule}] ${message}` `` joined
+   with `"\n\n"` (no text rewritten), then re-capped with the existing
+   message cap + marker (bounded output beats completeness); `suggestion` =
+   first defined suggestion in group order.
 5. F15 funnel (top-N → inline → body) runs on the merged set; marker counts
    reflect post-merge totals. `sarif.json` is built from the merged set
    (publication surface); `findings.json` keeps the pre-merge set (F15
@@ -108,23 +132,34 @@ case — the merged set only changes counts, never the predicates).
 ### Verdict persistence across flows
 
 - Flow A: the artifact writes the pre-merge set AND `verdicts.json`
-  (`{pairs, links}`, validated arrays of int-pairs).
-- Flow B: reads `verdicts.json` best-effort (missing/malformed → warning +
-  no merge — fail-soft, same family as the verdict rules) and merges in the
-  same `publishReview` point. Fork-PR comments dedup identically.
+  (`{pairs, links}`, validated arrays of int-pairs). Flow A always writes
+  `verdicts.json`, even `{pairs: [], links: []}` when there is no LLM —
+  a missing file is never a normal state.
+- Flow B: reads `verdicts.json` best-effort under the F15 artifact read cap
+  (oversize/unparseable → warning + no merge) and range-checks every index
+  against `findings.length` (out-of-range = malformed, dropped with the
+  count); then merges in the same `publishReview` point. Fork-PR comments
+  dedup identically.
 
 ### Failure behavior
 
-- Slow path skipped (no key): no judge exists → duplicates stay.
-  `core.info("lupa: dedup skipped (slow path unavailable); scanner findings published unmerged")` (exact) + README dedup section documents it.
+- Slow path skipped (any reason — no key, empty model, unresolvable
+  endpoint, unlisted model): no judge exists → duplicates stay. The
+  existing skip paths call `note()`; the dedup line goes through it too
+  (`core.info` + step summary): `lupa: dedup skipped (slow path
+  unavailable); scanner findings published unmerged` (exact). README dedup
+  section documents it.
 - Malformed `duplicates` section / unknown indices / dangling pointers:
-  counted at parse, one warning, entries dropped, all findings kept.
+  counted in `parseVerdicts` (`malformed` count); the slow path logs one
+  `core.warning("lupa: ignored <n> malformed dedup verdict(s)")` (exact
+  shape) and drops the entries; all findings kept.
 
 ## 3. Tests
 
 Mocked-LLM, deterministic (no live provider), verdicts expressed through the
-`okChat`-style mocked reply content (`llm.test.ts` + adapter tests) and the
-merge function directly (`review.test.ts`):
+`okChat`-style mocked reply content (`llm.test.ts` + adapter tests,
+including the converted-schema expectation in `adapters-google.test.ts`)
+and the merge function directly (`review.test.ts`):
 - Canary-exact pair (gitleaks + semgrep `github-pat` on one file:line → one
   comment, `high`, rule `"github-pat"`, secret still redacted) + Flow B twin
   (same verdicts via `verdicts.json` fixture).
