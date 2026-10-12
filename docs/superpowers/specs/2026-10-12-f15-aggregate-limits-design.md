@@ -79,9 +79,10 @@ publication by the funnel.)
   `src/main.ts:350`, gitleaks report at `src/scanners.ts:431`, `readPrMeta` at
   `src/diff.ts:187`): read at most `max + 1` bytes
   (explicit-length read, never a stat-then-read pair); `bytesRead > max` means
-  oversize without ever holding the whole file. (`diff.patch` is explicitly
-  excluded: F10 owns diff sizing and its truncation fixtures pin whole-file
-  reads.)
+  oversize without ever holding the whole file. Readers stay synchronous
+  (`openSync`/`readSync`); no caller or test changes shape, only gains an
+  optional capped argument. (`diff.patch` is explicitly excluded: F10 owns
+  diff sizing and its truncation fixtures pin whole-file reads.)
 - In-memory texts (semgrep stdout at `src/scanners.ts:284`, SBOM stdout — checked
   at the top of the SBOM branch, before `isCycloneDx` at `:371`, gitleaks
   report text at `:438`): `Buffer.byteLength(text) > max` means oversize,
@@ -151,7 +152,11 @@ Input: the full redacted set (gates already computed or computed from it —
    terminates); the trunc-note is plain text and always last. Truncation drops
    are witnessed by the note only (no per-item count — stated).
    `capBody` takes the markers as an argument and guarantees them inside the
-   cap (content is cut to `max − markers`); callers never hand-reserve. `body = buildBody(general,
+   cap (content is cut to `max − markers`); callers never hand-reserve.
+   Markers are always appended in argument order (omission first, trunc-note
+   last) — even when the content fits, so a passed-through body keeps its
+   omission count. The fold path removes `> Omitted:` lines from the body
+   before passing them as markers (never duplicated). `body = buildBody(general,
    summary)`; then markers, then cap (markers are always inside the cap):
    - `omitted > 0` → `> Omitted: ${omitted} finding(s) omitted to fit the ${max}-finding publication limit.` (exact)
    - body over `maxChars` → cut content to fit, append `> Note: review body truncated to the ${max}-character limit.` (exact)
@@ -168,11 +173,13 @@ at the existing call sites.
 ### Off-diff fold stays under the cap
 
 `postReview` folds inline comments into the body on a 422 off-diff retry —
-after the cap above. So `PostReviewOptions.maxBodyChars` is a REQUIRED key
-(inside the still-optional `opts?` — anyone passing options must pass the cap,
-so the re-cap can never be silently disabled), `Gateway.createReview`'s opts
-gain it (interface at `src/main.ts:81`, call site `:774`, `realGateway`
-forwards it at `:1030-1031`, test fakes updated — named per task), and the
+after the cap above. `PostReviewOptions.maxBodyChars?: number` defaults to
+`DEFAULT_MAX_REVIEW_BODY_CHARS` (60000, same value as the input default) when
+absent, so the re-cap always runs — production passes it explicitly from
+`publishReview`, and existing no-opts test calls keep working with identical
+behavior on small fixtures. `Gateway.createReview`'s opts gain the optional
+key (interface at `src/main.ts:81`, call site `:774` passes
+`env.inputs.maxReviewBodyChars`, `realGateway` forwards it at `:1030-1031`).
 fold path re-runs the shared `capBody` after folding: strip lines matching
 the trunc-note template (`^> Note: review body truncated to the \d+-character
 limit\.$` — stale notes from the pre-fold cap), extract the `> Omitted:`
@@ -193,21 +200,21 @@ silently — stated residual.
   `buildFallbackReport(findings, { maxBytes: remaining })` where `remaining =
   1048576 − bytes already in the file − 1` (`statSync`, missing → 0; the −1 is
   the trailing `\n` the append adds — without it a full-size report overflows
-  by one byte). The 1 MiB figure is the platform ceiling; uploads above it Whole-record cuts only (no split
-  UTF-8, no open fences — inherited from F07); its `> Omitted:` marker is the
-  truncation signal, no extra note. `remaining` too small for even the heading
-  (F07 throws): catch, `core.warning`, skip the write — observability degrades
-  loudly in logs while the posted review is unaffected.
+  by one byte). The 1 MiB figure is the platform ceiling; uploads above it
+  abort. Whole-record cuts only (no split UTF-8, no open fences — inherited
+  from F07); its `> Omitted:` marker is the truncation signal, no extra note.
+  `remaining` too small for even the heading (F07 throws): catch,
+  `core.warning`, skip the write — observability degrades loudly in logs while
+  the posted review is unaffected.
 - Issue-fallback body (`postIssueFallback`, a publication surface with the same
   65535 ceiling): published from the RETAINED set (priority-ordered,
   publication-capped — the same findings the review shows), with the
   publication `> Omitted:` marker prepended when `omitted > 0`:
   `buildFallbackReport(retained, { maxBytes: maxReviewBodyChars − markerBytes
   − 2 })`, marker first, then the report (its native marker covers any further
-  byte overflow). Same set, same marker vocabulary as the review.
-  (bytes, existing helper — conservative: the code-point
-  value as a byte cap is stricter for multibyte text, never looser). Wired at
-  the F07 call site in `main.ts`.
+  byte overflow). Same set, same marker vocabulary as the review
+  (conservative units: the code-point value as a byte cap is stricter for
+  multibyte text, never looser). Wired at the F07 call site in `main.ts`.
 - Flow B gets every bound automatically (same `readFindings`, same
   `publishReview`).
 
@@ -234,8 +241,8 @@ no live GitHub, no docker). Small limits ride on constructed inputs objects
   no-newline case (mid-line code-point cut); truncation marker inside the cap;
   marker-too-big throws (unit-level on `capBody`, since inputs floor it away).
 - Off-diff fold fixture: folded body re-capped, exactly one trunc-note, last;
-  stale pre-fold note stripped (two-note output fails the test).
-- Off-diff fold fixture: folded body re-capped, trunc-note last.
+  stale pre-fold note stripped (two-note output fails the test); omission
+  count preserved through the re-cap.
 - Issue-fallback funnel (retained set + publication marker + byte reservation),
   summary 1 MiB cap (oversized fixture → capped report + native marker, write
   skipped with warning when nothing fits) + Flow B bounds (same funnel via
