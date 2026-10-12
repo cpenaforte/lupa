@@ -12,6 +12,7 @@ vi.mock("@actions/core", async (importOriginal) => {
 import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
+import type { DedupVerdicts } from "../src/llm.js";
 import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
 import {
   DEFAULT_MAX_ARTIFACT_BYTES,
@@ -233,6 +234,8 @@ interface MockOpts {
   /** Issue body returned by the getIssueBody fake (default "issue text"). */
   issueBody?: string;
   llm?: Finding[];
+  /** Verdicts returned by the mocked slow-path LLM seams (single-shot only; agent seams never carry verdicts). */
+  llmVerdicts?: DedupVerdicts;
   headMoves?: boolean;
   /** getPr throws once the call count exceeds this number. */
   failGetPrAfter?: number;
@@ -325,7 +328,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.llmCalled += 1;
         rec.llmVia = "style";
         rec.prompts = messages as { system: string; user: string };
-        return { ok: true, findings: o.llm ?? [LLM_FINDING] };
+        return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmVerdicts !== undefined ? { verdicts: o.llmVerdicts } : {}) };
       },
       callWithProbe:
         o.realLlm === true
@@ -343,7 +346,7 @@ async function runWithMocks(o: MockOpts = {}) {
               } catch {
                 // No early payload on disk; leave earlyFindingsRaw unset.
               }
-              return { ok: true, findings: o.llm ?? [LLM_FINDING] };
+              return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmVerdicts !== undefined ? { verdicts: o.llmVerdicts } : {}) };
             },
       callByStyleAgent: async (_ep, conv, opts, toolCtx) => {
         rec.agentCalled += 1;
@@ -411,6 +414,8 @@ interface PrivOpts {
   metaPr?: number;
   prsByHead?: number[];
   findings?: unknown[];
+  /** Verdicts carried by the pr-meta.json fixture (absent = the missing-key silent passthrough). */
+  metaVerdicts?: DedupVerdicts;
   staleDuringPost?: boolean;
   metaHead?: string;
   /** Extra top-level keys merged into pr-meta.json (artifact-field tests). */
@@ -442,6 +447,7 @@ async function runPrivileged(o: PrivOpts = {}) {
       base_sha: SHA_BASE,
       head_repo_full_name: "o/r",
       is_fork: false,
+      ...(o.metaVerdicts !== undefined ? { verdicts: o.metaVerdicts } : {}),
       ...o.metaExtra,
     }),
   );
@@ -1824,5 +1830,237 @@ ${FUNNEL_DIFF_LINES.join("\n")}
     await expect(runPrivileged({ findings: five, maxArtifactBytes: 300 })).rejects.toThrow(
       "lupa: findings.json exceeds the artifact read limit (300 bytes)",
     );
+  });
+});
+
+describe("dedup merge and flow wiring", () => {
+  const CUT_DIFF = [
+    "diff --git a/f.ts b/f.ts",
+    "index 111..222 100644",
+    "--- a/f.ts",
+    "+++ b/f.ts",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    "",
+  ].join("\n");
+  // Exact truncateDiff(filterForPrompt(parseDiffFiles(CUT_DIFF))) text: pinned by the probe below.
+  const CUT_PROMPT_TEXT = "--- f.ts\n@@ -1 +1 @@\n-a\n+b\n";
+
+  const sentKept = (user: string): unknown[] =>
+    JSON.parse(user.split("\n\n").find((l) => l.startsWith("[")) as string) as unknown[];
+
+  it("slowPath passes verdicts through with links converted to absolute indices and merges at publish", async () => {
+    const scan: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "scan-a", message: "first evidence" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "scan-b", message: "second evidence" },
+    ];
+    const llm: Finding[] = [{ severity: "warning", file: "src/a.ts", line: 2, rule: "llm-c", message: "third evidence" }];
+    const r = await runWithMocks({ scan, llm, llmVerdicts: { pairs: [[0, 1]], links: [[0, 0]], malformed: 0 } });
+    expect(r.posted).toBe(true);
+    // fast.length is 2 (no L0/L2 on the default DIFF), so response index 0 converts to absolute 2.
+    expect(readPrMeta(r.artifactDir)!.verdicts).toEqual({ pairs: [[0, 1]], links: [[2, 0]], malformed: 0 });
+    // All three merge into one inline comment; the summary head keeps the full pre-merge count.
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    expect(r.reviews[0]!.comments[0]!.body).toContain("scan-a+scan-b+llm-c");
+    expect(r.reviews[0]!.body).toContain("lupa: 3 finding(s).");
+    // The single-shot prompt carries ids and the verdict instructions.
+    expect(r.prompts!.user).toContain('"id":0');
+    expect(r.prompts!.system).toContain("duplicates");
+  });
+
+  it("slowPath warns on malformed verdicts and keeps every finding", async () => {
+    vi.mocked(core.warning).mockClear();
+    const scan: Finding[] = [{ severity: "warning", file: "src/a.ts", line: 2, rule: "scan-a", message: "kept" }];
+    const r = await runWithMocks({ scan, llmVerdicts: { pairs: [], links: [], malformed: 2 } });
+    expect(r.posted).toBe(true);
+    expect(vi.mocked(core.warning).mock.calls.map((c) => String(c[0]))).toContain("lupa: ignored 2 malformed dedup verdict(s)");
+    expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
+    expect(JSON.stringify(r.reviews)).toContain("kept");
+    expect(JSON.stringify(r.reviews)).toContain("llm message");
+  });
+
+  it("drops cut-tail verdicts with a warning and keeps every finding", async () => {
+    const N = 5;
+    const K = 3;
+    const many: Finding[] = Array.from({ length: N }, (_, i) => ({
+      severity: "warning" as const,
+      file: "f.ts",
+      rule: `cut-${i}`,
+      message: `evidence ${i} ` + "x".repeat(200),
+    }));
+    // Premise guard: the CUT_DIFF prompt replication the budget math below depends on.
+    const probe = await runWithMocks({ diff: CUT_DIFF, scan: many, llm: [] });
+    expect(probe.prompts!.user).toContain(CUT_PROMPT_TEXT);
+    // Measure serialized sizes in-test: largest budget whose single-shot (with-ids) render keeps exactly K.
+    const fast = many.map(sanitizeFinding);
+    const fullBytes = Buffer.byteLength(
+      buildMessages(fast, CUT_PROMPT_TEXT, undefined, [], undefined, 0, { withIds: true }).user,
+      "utf8",
+    );
+    let B = fullBytes;
+    while (B > 0 && budgetPrompt(fast, CUT_PROMPT_TEXT, undefined, [], B, { withIds: true }).fast.length > K) B -= 1;
+    expect(budgetPrompt(fast, CUT_PROMPT_TEXT, undefined, [], B, { withIds: true }).fast.length).toBe(K);
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({
+      diff: CUT_DIFF,
+      scan: many,
+      llm: [],
+      maxPromptChars: B,
+      llmVerdicts: { pairs: [[0, K]], links: [], malformed: 0 },
+    });
+    expect(r.llmCalled).toBe(1);
+    // Sent index K was cut from the prompt (kept == K): the pair drops whole, counted as malformed.
+    expect(vi.mocked(core.warning).mock.calls.map((c) => String(c[0]))).toContain("lupa: ignored 1 malformed dedup verdict(s)");
+    expect(readPrMeta(r.artifactDir)!.verdicts).toEqual({ pairs: [], links: [], malformed: 1 });
+    // Nothing merged, nothing lost: all N findings publish.
+    expect(r.reviews[0]!.body).toContain(`lupa: ${N} finding(s).`);
+    const dumped = JSON.stringify(r.reviews);
+    for (let i = 0; i < N; i++) expect(dumped).toContain(`cut-${i}`);
+  });
+
+  it("empty verdicts publish byte-identical output to the unmerged funnel", async () => {
+    const scan: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "scan-a", message: "first" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "scan-b", message: "second" },
+    ];
+    const llm: Finding[] = [{ severity: "warning", file: "src/a.ts", line: 2, rule: "llm-c", message: "third" }];
+    const a = await runWithMocks({ scan, llm });
+    const b = await runWithMocks({ scan, llm, llmVerdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(b.reviews).toEqual(a.reviews);
+    expect(b.body).toBe(a.body);
+  });
+
+  it("Flow A pr-meta carries empty verdicts when no LLM ran", async () => {
+    const r = await runWithMocks({ llmApiKey: "", scan: [{ ...LLM_FINDING, rule: "fast-only" }] });
+    expect(r.findingsFrom).toBe("fastpath");
+    expect(readPrMeta(r.artifactDir)!.verdicts).toEqual({ pairs: [], links: [], malformed: 0 });
+  });
+
+  it("merges before the funnel with gates, summary, and dry-run on the full set; sarif matches merged", async () => {
+    const scan: Finding[] = [
+      { severity: "high", file: "src/a.ts", line: 2, rule: "h1", message: "high evidence" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "w1", message: "warning evidence" },
+    ];
+    const verdicts: DedupVerdicts = { pairs: [[0, 1]], links: [], malformed: 0 };
+    const r = await runWithMocks({ scan, llm: [], llmVerdicts: verdicts, failLevel: "high" });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.comments).toHaveLength(1);
+    expect(r.reviews[0]!.comments[0]!.body).toContain("h1+w1");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("high evidence");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("warning evidence");
+    expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
+    expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(r.exitCode).toBe(1);
+    // Gate-equivalence: the unmerged twin gates identically.
+    const plain = await runWithMocks({ scan, llm: [], failLevel: "high" });
+    expect(plain.reviews[0]!.event).toBe(r.reviews[0]!.event);
+    expect(plain.exitCode).toBe(r.exitCode);
+    // SARIF alert count equals the merged count.
+    const sarif = JSON.parse(readFileSync(join(r.artifactDir, "sarif.json"), "utf8")) as {
+      runs: { results: { ruleId: string }[] }[];
+    };
+    expect(sarif.runs[0]!.results).toHaveLength(1);
+    expect(sarif.runs[0]!.results[0]!.ruleId).toBe("h1+w1");
+    // Dry-run counts the full set (high=1) with funnel positions from the merged set.
+    const info = vi.mocked(core.info);
+    info.mockClear();
+    const dry = await runWithMocks({ scan, llm: [], llmVerdicts: verdicts, failLevel: "high", postComment: false });
+    const line = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
+    expect(line).toBe(
+      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1, omitted=0)",
+    );
+    expect(dry.body).toBeUndefined();
+  });
+
+  it("F15 omission marker counts the post-merge top-N cut", async () => {
+    const scan: Finding[] = Array.from({ length: 4 }, (_, i) => ({
+      severity: "warning" as const,
+      file: "",
+      rule: `m${i}`,
+      message: `repo evidence ${i}`,
+    }));
+    const r = await runWithMocks({ scan, llm: [], llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 }, maxFindings: 2 });
+    // Merged 4 -> 3, top-2 retained: omitted is 3 - 2 = 1, never the naive 4 - 2 = 2.
+    expect(r.reviews[0]!.body).toContain("lupa: 4 finding(s).");
+    expect(r.reviews[0]!.body).toContain("> Omitted: 1 finding(s) omitted to fit the 2-finding publication limit.");
+    expect(r.reviews[0]!.body).not.toContain("> Omitted: 2 finding(s)");
+  });
+
+  it("Flow B merges the canary via pr-meta verdicts; a missing key posts unmerged", async () => {
+    const findings: Finding[] = [
+      { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: "Artifact: leak [REDACTED]" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "github-pat", message: "detected secret [REDACTED]" },
+    ];
+    const merged = await runPrivileged({ findings, metaVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    expect(merged.posted).toBe(true);
+    expect(merged.payloads[0]!.comments).toHaveLength(1);
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("**high**");
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("[github-pat]");
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("[REDACTED]");
+    const plain = await runPrivileged({ findings });
+    expect(plain.posted).toBe(true);
+    expect(plain.payloads[0]!.comments).toHaveLength(2);
+  });
+
+  it("agent duplicates stay unmerged with byte-identical prompts at the cut", async () => {
+    const llm: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "dup-a", message: "same evidence a" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "dup-b", message: "same evidence b" },
+    ];
+    const r = await runWithMocks({ llmAgent: true, scan: [], llm });
+    expect(r.posted).toBe(true);
+    expect(r.agentCalled).toBe(1);
+    expect(r.reviews[0]!.comments).toHaveLength(2);
+    expect((r.agentConv as { user: string }).user).not.toContain('"id"');
+    // Same findings kept as base at the cut: the agent render measures exactly the no-ids render.
+    const many: Finding[] = Array.from({ length: 6 }, (_, i) => ({
+      severity: "warning" as const,
+      file: "f.ts",
+      rule: `abase-${i}`,
+      message: `agent evidence ${i} ` + "y".repeat(200),
+    }));
+    const fast = many.map(sanitizeFinding);
+    const fullBytes = Buffer.byteLength(buildMessages(fast, CUT_PROMPT_TEXT, undefined, [], undefined, 0).user, "utf8");
+    let B = fullBytes;
+    while (B > 0 && budgetPrompt(fast, CUT_PROMPT_TEXT, undefined, [], B).fast.length >= many.length) B -= 1;
+    const expected = budgetPrompt(fast, CUT_PROMPT_TEXT, undefined, [], B);
+    expect(expected.fast.length).toBeLessThan(many.length);
+    const cut = await runWithMocks({ diff: CUT_DIFF, maxPromptChars: B, llmAgent: true, scan: many, llm: [] });
+    expect(sentKept((cut.agentConv as { user: string }).user)).toHaveLength(expected.fast.length);
+    expect((cut.agentConv as { user: string }).user).not.toContain('"id"');
+  });
+
+  it("no-LLM runs note the skipped dedup exactly", async () => {
+    const info = vi.mocked(core.info);
+    info.mockClear();
+    const r = await runWithMocks({ llmApiKey: "" });
+    expect(r.posted).toBe(true);
+    expect(info.mock.calls.map((c) => String(c[0]))).toContain(
+      "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged",
+    );
+    expect(readFileSync(r.summaryPath, "utf8")).toContain(
+      "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged",
+    );
+  });
+
+  it("budgetPrompt measures with ID bytes when asked and exactly as base otherwise", () => {
+    const fast: Finding[] = Array.from({ length: 3 }, (_, i) => ({
+      severity: "warning" as const,
+      file: "src/a.ts",
+      line: 2,
+      rule: `r${i}`,
+      message: "m".repeat(200),
+    }));
+    const text = "diff text";
+    expect(budgetPrompt(fast, text, undefined, [], 100000, { withIds: false })).toEqual(
+      budgetPrompt(fast, text, undefined, [], 100000),
+    );
+    // Budget sized to the exact without-ids render: without-ids keeps all, with-ids must cut.
+    const fullBytes = Buffer.byteLength(buildMessages(fast, neutralise(text), undefined, [], undefined, 0).user, "utf8");
+    expect(budgetPrompt(fast, text, undefined, [], fullBytes).fast).toHaveLength(fast.length);
+    const cut = budgetPrompt(fast, text, undefined, [], fullBytes, { withIds: true });
+    expect(cut.fast.length).toBeLessThan(fast.length);
+    expect(cut.findingsOmitted).toBeGreaterThan(0);
   });
 });

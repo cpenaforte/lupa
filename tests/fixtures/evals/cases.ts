@@ -404,7 +404,8 @@ export const evalCases: readonly EvalCase[] = [
     patchFixture: "positive-authz.patch",
     llmError: { reason: "content-filter", detail: "synthetic refusal" },
     expected: {
-      promptDiffSnippet: "+  return record;", findings: [], exitCode: 0, summary: "lupa: no findings.",
+      promptDiffSnippet: "+  return record;", findings: [], exitCode: 0,
+      summary: "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged\nlupa: no findings.",
       publication: { kind: "review", payload: cleanPayload },
     },
   },

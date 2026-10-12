@@ -216,3 +216,54 @@ describe("linkedIssueNumber", () => {
     expect(linkedIssueNumber("Fixes #12abc")).toBeNull();
   });
 });
+
+describe("buildMessages withIds (dedup)", () => {
+  const F = [
+    { severity: "high" as const, file: "a.ts", line: 1, rule: "r1", message: "m1".repeat(50), suggestion: "s1".repeat(50) },
+    { severity: "warning" as const, file: "b.ts", rule: "r2", message: "m2" },
+  ];
+  const sentJson = (m: { user: string }): unknown[] =>
+    JSON.parse(m.user.split("\n\n").find((l) => l.startsWith("[")) as string) as unknown[];
+
+  it("renders an id field first with all other fields complete and untruncated", async () => {
+    const { buildMessages } = await import("../src/prompt.js");
+    const m = buildMessages(F, "DIFF", undefined, [], undefined, 0, { withIds: true });
+    const parsed = sentJson(m) as Array<Record<string, unknown>>;
+    expect(parsed).toHaveLength(2);
+    expect(Object.keys(parsed[0]!)[0]).toBe("id");
+    expect(parsed[0]).toEqual({ id: 0, ...F[0] });
+    expect(parsed[1]).toEqual({ id: 1, ...F[1] });
+    expect(parsed[0]!.message).toBe("m1".repeat(50));
+    expect(parsed[0]!.suggestion).toBe("s1".repeat(50));
+  });
+
+  it("is off by default and byte-identical with explicit withIds:false", async () => {
+    const { buildMessages } = await import("../src/prompt.js");
+    const base = buildMessages(F, "DIFF");
+    expect(JSON.stringify(sentJson(base)[0])).not.toContain('"id"');
+    const explicit = buildMessages(F, "DIFF", undefined, [], undefined, 0, { withIds: false });
+    expect(explicit.user).toBe(base.user);
+    expect(explicit.system).toBe(base.system);
+  });
+
+  it("appends the dedup instructions to the system text only for the single-shot path", async () => {
+    const { buildMessages, DEDUP_INSTRUCTIONS } = await import("../src/prompt.js");
+    expect(buildMessages([], "D").system).not.toContain(DEDUP_INSTRUCTIONS);
+    const single = buildMessages([], "D", undefined, [], undefined, 0, { withIds: true });
+    expect(single.system).toContain(DEDUP_INSTRUCTIONS);
+    const agent = buildMessages([], "D", undefined, [], { maxTurns: 10 });
+    const agentExplicit = buildMessages([], "D", undefined, [], { maxTurns: 10 }, 0, { withIds: false });
+    expect(agentExplicit.user).toBe(agent.user);
+    expect(agentExplicit.system).toBe(agent.system);
+    expect(agent.system).not.toContain(DEDUP_INSTRUCTIONS);
+  });
+});
+
+describe("DEDUP_INSTRUCTIONS", () => {
+  it("names the verdict fields, 0-based indices, and pair arrays", async () => {
+    const { DEDUP_INSTRUCTIONS } = await import("../src/prompt.js");
+    for (const token of ["duplicates", "duplicateOf", "0-based", "pair"]) {
+      expect(DEDUP_INSTRUCTIONS).toContain(token);
+    }
+  });
+});

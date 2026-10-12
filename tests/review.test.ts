@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, isTruncNoteLine, mapToComments, omissionMarkerFor, prioritizeFindings, redactFindings, truncNoteFor } from "../src/review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, isTruncNoteLine, mapToComments, mergeDuplicates, omissionMarkerFor, prioritizeFindings, redactFindings, truncNoteFor } from "../src/review.js";
 import { parseHunks } from "../src/diff.js";
+import type { DedupVerdicts } from "../src/llm.js";
 import type { Finding } from "../src/fastpath.js";
 
 // a.ts: line 3 is a deletion (LEFT 3), line 4 an addition (RIGHT 4); line 99 is outside every hunk.
@@ -447,5 +448,156 @@ describe("capBody", () => {
   it("throws RangeError when the markers alone exceed the cap", () => {
     const big = `> Omitted: ${"9".repeat(50)} finding(s) omitted to fit the 200-finding publication limit.`;
     expect(() => capBody("body", 10, [big])).toThrow(RangeError);
+  });
+});
+
+describe("mergeDuplicates", () => {
+  const F = (
+    severity: Finding["severity"],
+    file: string,
+    line: number | undefined,
+    rule: string,
+    message: string,
+    suggestion?: string,
+  ): Finding => ({
+    severity,
+    file,
+    ...(line !== undefined ? { line } : {}),
+    rule,
+    message,
+    ...(suggestion !== undefined ? { suggestion } : {}),
+  });
+  const V = (pairs: Array<[number, number]> = [], links: Array<[number, number]> = [], malformed = 0): DedupVerdicts => ({
+    pairs,
+    links,
+    malformed,
+  });
+
+  it("merges the canary pair into one high finding with a collapsed rule and redaction kept", () => {
+    const gitleaks = F("high", "src/leak.py", 7, "github-pat", "Artifact: leak.py … Match: [REDACTED]");
+    const semgrep = F("warning", "src/leak.py", 7, "github-pat", "github-pat has detected secret for file /src/leak.py: [REDACTED]");
+    const { merged, dropped } = mergeDuplicates([gitleaks, semgrep], V([[0, 1]]));
+    expect(dropped).toBe(0);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ severity: "high", file: "src/leak.py", line: 7, rule: "github-pat" });
+    expect(merged[0]!.message).toContain("Artifact: leak.py");
+    expect(merged[0]!.message).toContain("has detected secret");
+    expect(merged[0]!.message).toContain("[REDACTED]");
+  });
+
+  it("merges a model finding into a scanner finding via an absolute duplicateOf link", () => {
+    const scan = F("warning", "src/a.ts", 1, "scan-rule", "scanner evidence");
+    const other = F("info", "src/a.ts", 9, "other-rule", "unrelated");
+    const model = F("warning", "src/a.ts", 1, "llm-rule", "model restatement");
+    const { merged, dropped } = mergeDuplicates([scan, other, model], V([], [[2, 0]]));
+    expect(dropped).toBe(0);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]!.rule).toBe("scan-rule+llm-rule");
+    expect(merged[0]!.message).toContain("scanner evidence");
+    expect(merged[0]!.message).toContain("model restatement");
+    expect(merged[1]).toEqual(other);
+  });
+
+  it("closes transitively over absolute positions (triple to one)", () => {
+    const fs = [F("info", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1"), F("high", "a.ts", 1, "r2", "m2")];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 1], [1, 2]]));
+    expect(dropped).toBe(0);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.severity).toBe("high");
+    expect(merged[0]!.rule).toBe("r0+r1+r2");
+  });
+
+  it("checks the precondition per pair before closure: A~B merges while cross-file B~C leaves C alone", () => {
+    const a = F("warning", "a.ts", 1, "ra", "ma");
+    const b = F("warning", "a.ts", 1, "rb", "mb");
+    const c = F("warning", "b.ts", 1, "rc", "mc");
+    const { merged, dropped } = mergeDuplicates([a, b, c], V([[0, 1], [1, 2]]));
+    expect(dropped).toBe(1);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]!.rule).toBe("ra+rb");
+    expect(merged[0]!.message).toContain("ma");
+    expect(merged[0]!.message).toContain("mb");
+    expect(merged[1]).toEqual(c);
+  });
+
+  it("ignores a same-file pair on different lines and counts it", () => {
+    const fs = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 2, "r1", "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 1]]));
+    expect(dropped).toBe(1);
+    expect(merged).toEqual(fs);
+  });
+
+  it("ignores a pair mixing a defined and an undefined line", () => {
+    const fs = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", undefined, "r1", "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 1]]));
+    expect(dropped).toBe(1);
+    expect(merged).toEqual(fs);
+  });
+
+  it("merges line-less findings on the same file", () => {
+    const fs = [F("warning", "a.ts", undefined, "r0", "m0"), F("warning", "a.ts", undefined, "r1", "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 1]]));
+    expect(dropped).toBe(0);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.line).toBeUndefined();
+  });
+
+  it("drops a partially-valid pair whole: the valid member stays alone", () => {
+    const fs = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 5]]));
+    expect(dropped).toBe(1);
+    expect(merged).toEqual(fs);
+  });
+
+  it("drops an out-of-range link whole and counts it", () => {
+    const fs = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V([], [[7, 8]]));
+    expect(dropped).toBe(1);
+    expect(merged).toEqual(fs);
+  });
+
+  it("re-caps joined rules at the rule cap with the marker", () => {
+    const fs = [F("warning", "a.ts", 1, "r".repeat(60), "m0"), F("warning", "a.ts", 1, "s".repeat(60), "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 1]]));
+    expect(dropped).toBe(0);
+    expect(Array.from(merged[0]!.rule).length).toBeLessThanOrEqual(100);
+    expect(merged[0]!.rule).toContain("…[truncated]");
+  });
+
+  it("re-caps joined messages at the message cap with the marker", () => {
+    const fs = [F("warning", "a.ts", 1, "r", "m".repeat(1500)), F("warning", "a.ts", 1, "r", "n".repeat(1500))];
+    const { merged, dropped } = mergeDuplicates(fs, V([[0, 1]]));
+    expect(dropped).toBe(0);
+    expect(Array.from(merged[0]!.message).length).toBeLessThanOrEqual(2000);
+    expect(merged[0]!.message).toContain("…[truncated]");
+  });
+
+  it("keeps the first defined suggestion in group order", () => {
+    const withFirst = [F("warning", "a.ts", 1, "r0", "m0", "fix-a"), F("warning", "a.ts", 1, "r1", "m1", "fix-b")];
+    expect(mergeDuplicates(withFirst, V([[0, 1]])).merged[0]!.suggestion).toBe("fix-a");
+    const withSecond = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1", "fix-b")];
+    expect(mergeDuplicates(withSecond, V([[0, 1]])).merged[0]!.suggestion).toBe("fix-b");
+    const withNone = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1")];
+    expect(mergeDuplicates(withNone, V([[0, 1]])).merged[0]!.suggestion).toBeUndefined();
+  });
+
+  it("emits groups in first-member-position order (stable, deterministic)", () => {
+    const fs = [F("info", "a.ts", 1, "ra", "ma"), F("info", "a.ts", 1, "rb", "mb"), F("info", "b.ts", 2, "rc", "mc"), F("info", "b.ts", 2, "rd", "md")];
+    const { merged } = mergeDuplicates(fs, V([[2, 3], [0, 1]]));
+    expect(merged).toHaveLength(2);
+    expect(merged[0]!.message).toContain("ma");
+    expect(merged[1]!.message).toContain("mc");
+  });
+
+  it("passes empty verdicts through untouched", () => {
+    const fs = [F("warning", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1")];
+    const { merged, dropped } = mergeDuplicates(fs, V());
+    expect(dropped).toBe(0);
+    expect(merged).toEqual(fs);
+  });
+
+  it("takes the maximum severity across the group", () => {
+    const fs = [F("info", "a.ts", 1, "r0", "m0"), F("warning", "a.ts", 1, "r1", "m1")];
+    expect(mergeDuplicates(fs, V([[0, 1]])).merged[0]!.severity).toBe("warning");
   });
 });

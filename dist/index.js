@@ -24744,6 +24744,15 @@ ${f.hunks}
   }
   return { text: parts.join(""), skipped };
 }
+function isVerdictPair(v) {
+  return Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isInteger(n) && n >= 0);
+}
+function isVerdicts(v) {
+  if (typeof v !== "object" || v === null || Array.isArray(v))
+    return false;
+  const r = v;
+  return Array.isArray(r.pairs) && r.pairs.every(isVerdictPair) && Array.isArray(r.links) && r.links.every(isVerdictPair) && typeof r.malformed === "number" && Number.isInteger(r.malformed) && r.malformed >= 0;
+}
 var PR_META_FILE = "pr-meta.json";
 function writePrMeta(m, dir) {
   writeFileSync(join(dir, PR_META_FILE), JSON.stringify(m, null, 2) + "\n", "utf8");
@@ -24768,17 +24777,30 @@ function readPrMeta(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   if (typeof v.pr_number !== "number" || typeof v.head_sha !== "string" || typeof v.base_sha !== "string" || typeof v.head_repo_full_name !== "string" || typeof v.is_fork !== "boolean" || !Number.isInteger(v.pr_number) || v.pr_number < 1 || !/^[0-9a-f]{40}$/i.test(v.head_sha) || !/^[0-9a-f]{40}$/i.test(v.base_sha)) {
     throw new Error(`Invalid ${PR_META_FILE} in ${dir}`);
   }
+  if ("verdicts" in v && v.verdicts !== void 0 && !isVerdicts(v.verdicts)) {
+    throw new Error(`Invalid ${PR_META_FILE} in ${dir}`);
+  }
   return {
     pr_number: v.pr_number,
     head_sha: v.head_sha,
     base_sha: v.base_sha,
     head_repo_full_name: v.head_repo_full_name,
-    is_fork: v.is_fork
+    is_fork: v.is_fork,
+    ...v.verdicts !== void 0 ? { verdicts: v.verdicts } : {}
   };
 }
 
 // lib/src/fastpath.js
 import { basename as basename2 } from "node:path";
+var MSG_CAP = 2e3;
+var RULE_CAP = 100;
+var TRUNC_MARK = "\u2026[truncated]";
+function capText(s, cap) {
+  const cps = Array.from(s);
+  if (cps.length <= cap)
+    return s;
+  return cps.slice(0, cap - Array.from(TRUNC_MARK).length).join("") + TRUNC_MARK;
+}
 var LARGE_FILE_BYTES = 500 * 1024;
 var TODO_RE = /\b(TODO|FIXME|XXX)\b/;
 var ENV_TEMPLATES = /* @__PURE__ */ new Set([".env.example", ".env.sample", ".env.template"]);
@@ -25653,13 +25675,18 @@ function agentAddendum(maxTurns) {
     `Tool budget: up to ${maxTurns} tool-call rounds. When you have enough evidence, respond with ONLY the JSON findings object matching the schema; no prose, no tool calls.`
   ].join("\n");
 }
-function buildMessages(fast, diffText, issueBody, skipped = [], agent, omitted = 0) {
+var DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null).`;
+function buildMessages(fast, diffText, issueBody, skipped = [], agent, omitted = 0, opts) {
+  const withIds = opts?.withIds === true && agent === void 0;
   const system = agent ? `${SYSTEM}
 
-${agentAddendum(agent.maxTurns)}` : SYSTEM;
+${agentAddendum(agent.maxTurns)}` : withIds ? `${SYSTEM}
+
+${DEDUP_INSTRUCTIONS}` : SYSTEM;
   const parts = [];
   parts.push("## Fast findings (deterministic checks already run)");
-  parts.push(JSON.stringify(fast).replace(/</g, "\\u003c") + (omitted > 0 ? `
+  const sent = withIds ? fast.map((f, id) => ({ id, ...f })) : fast;
+  parts.push(JSON.stringify(sent).replace(/</g, "\\u003c") + (omitted > 0 ? `
 
 Omitted ${omitted} fast finding(s) to fit the prompt budget.` : ""));
   if (skipped.length > 0) {
@@ -27677,6 +27704,85 @@ function buildBody(general, summary2) {
 **Findings not placed inline:**
 ${items.join("\n")}`;
 }
+var MERGE_SEVERITY_RANK = { info: 0, warning: 1, high: 2 };
+function mergeable(a, b) {
+  if (a.file !== b.file)
+    return false;
+  if (a.line === void 0 || b.line === void 0)
+    return a.line === void 0 && b.line === void 0;
+  return a.line === b.line;
+}
+function survivor(members) {
+  const first = members[0];
+  let line;
+  for (const m of members) {
+    if (m.line !== void 0) {
+      line = m.line;
+      break;
+    }
+  }
+  const rules = [];
+  for (const m of members)
+    if (!rules.includes(m.rule))
+      rules.push(m.rule);
+  let severity = first.severity;
+  for (const m of members) {
+    if (MERGE_SEVERITY_RANK[m.severity] > MERGE_SEVERITY_RANK[severity])
+      severity = m.severity;
+  }
+  const out = {
+    severity,
+    file: first.file,
+    rule: capText(rules.join("+"), RULE_CAP),
+    message: capText(members.map((m) => `[${m.rule}] ${m.message}`).join("\n\n"), MSG_CAP)
+  };
+  if (line !== void 0)
+    out.line = line;
+  for (const m of members) {
+    if (m.suggestion !== void 0) {
+      out.suggestion = m.suggestion;
+      break;
+    }
+  }
+  return out;
+}
+function mergeDuplicates(findings, verdicts) {
+  const parent = findings.map((_, i) => i);
+  const root = (x) => parent[x] === x ? x : parent[x] = root(parent[x]);
+  let dropped = 0;
+  const consider = (a, b) => {
+    if (!Number.isInteger(a) || !Number.isInteger(b)) {
+      dropped += 1;
+      return;
+    }
+    const fa = findings[a];
+    const fb = findings[b];
+    if (fa === void 0 || fb === void 0 || !mergeable(fa, fb)) {
+      dropped += 1;
+      return;
+    }
+    const ra = root(a);
+    const rb = root(b);
+    if (ra !== rb)
+      parent[rb] = ra;
+  };
+  for (const [a, b] of verdicts.pairs)
+    consider(a, b);
+  for (const [a, b] of verdicts.links)
+    consider(a, b);
+  const groups = /* @__PURE__ */ new Map();
+  for (let i = 0; i < findings.length; i++) {
+    const r = root(i);
+    const g = groups.get(r);
+    if (g === void 0)
+      groups.set(r, [i]);
+    else
+      g.push(i);
+  }
+  const ordered = [...groups.values()].sort((x, y) => x[0] - y[0]);
+  const merged = ordered.map((members) => members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])));
+  return { merged, dropped };
+}
 var SEVERITY_RANK = { high: 0, warning: 1, info: 2 };
 function prioritizeFindings(findings) {
   return findings.map((finding, index) => ({ finding, index })).sort((a, b) => SEVERITY_RANK[a.finding.severity] - SEVERITY_RANK[b.finding.severity] || a.index - b.index).map(({ finding }) => finding);
@@ -28553,11 +28659,8 @@ async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFAULT_
 // lib/src/main.js
 var SHA_RE = /^[0-9a-f]{40}$/;
 var SEVERITIES2 = /* @__PURE__ */ new Set(["info", "warning", "high"]);
-var MSG_CAP = 2e3;
 var SUGGESTION_CAP = 4e3;
 var FILE_CAP = 200;
-var RULE_CAP = 100;
-var TRUNC_MARK = "\u2026[truncated]";
 var L2_SKIPPED = {
   severity: "info",
   file: "",
@@ -28732,12 +28835,6 @@ function readFindings(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
 function writeFindings(dir, findings) {
   writeFileSync3(join6(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
 }
-function capText(s, cap) {
-  const cps = Array.from(s);
-  if (cps.length <= cap)
-    return s;
-  return cps.slice(0, cap - Array.from(TRUNC_MARK).length).join("") + TRUNC_MARK;
-}
 var CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 var CONTROL_ALL = /[\u0000-\u001f\u007f]/g;
 function unsafePath(file) {
@@ -28777,10 +28874,10 @@ function cutToBytes(s, maxBytes) {
   }
   return s.slice(0, end);
 }
-function budgetPrompt(fast, promptText, issueBody, skipped, budget) {
+function budgetPrompt(fast, promptText, issueBody, skipped, budget, opts) {
   const nPrompt = neutralise(promptText);
   const nIssueFull = issueBody !== void 0 && issueBody.trim() !== "" ? neutralise(issueBody) : void 0;
-  const render = (f, ib, omitted2) => buildMessages(f, nPrompt, ib, skipped, void 0, omitted2).user;
+  const render = (f, ib, omitted2) => buildMessages(f, nPrompt, ib, skipped, void 0, omitted2, opts).user;
   let curIssue = nIssueFull;
   let issueDropped = false;
   let kept = [...fast];
@@ -28885,8 +28982,8 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
     warning(`model check inconclusive (${check.detail ?? "unknown error"}); continuing`);
   }
   const promptFast = fast.map(sanitizeFinding);
-  const b = budgetPrompt(promptFast, promptText, issueBody, skipped, i.maxPromptChars);
-  const messages = buildMessages(b.fast, b.promptText, b.issueBody, b.skipped, i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : void 0, b.findingsOmitted);
+  const b = budgetPrompt(promptFast, promptText, issueBody, skipped, i.maxPromptChars, { withIds: !i.llmAgent });
+  const messages = buildMessages(b.fast, b.promptText, b.issueBody, b.skipped, i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : void 0, b.findingsOmitted, { withIds: !i.llmAgent });
   const promptBytes = Buffer.byteLength(messages.user, "utf8");
   if (promptBytes > i.maxPromptChars) {
     warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
@@ -28957,14 +29054,35 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
       warning(`slow path failed (${res2.reason}): ${res2.detail}`);
       return void 0;
     }
-    return res2.findings;
+    return { findings: res2.findings };
   }
   const res = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts) : await deps.analysis.callByStyle(ep, messages, llmOpts);
   if (!res.ok) {
     warning(`slow path failed (${res.reason}): ${res.detail}`);
     return void 0;
   }
-  return res.findings;
+  const verdicts = res.verdicts;
+  if (verdicts === void 0)
+    return { findings: res.findings };
+  const kept = b.fast.length;
+  let malformed = verdicts.malformed;
+  const pairs = [];
+  for (const [a, c] of verdicts.pairs) {
+    if (c >= kept || a >= kept)
+      malformed += 1;
+    else
+      pairs.push([a, c]);
+  }
+  const links = [];
+  for (const [r, s] of verdicts.links) {
+    if (s >= kept)
+      malformed += 1;
+    else
+      links.push([fast.length + r, s]);
+  }
+  if (malformed > 0)
+    warning(`lupa: ignored ${malformed} malformed dedup verdict(s)`);
+  return { findings: res.findings, verdicts: { pairs, links, malformed } };
 }
 function runtimeSecrets(env) {
   return [env.inputs.githubToken, env.inputs.llmApiKey].filter((s) => s !== "");
@@ -28987,9 +29105,12 @@ ${items.join("\n")}`;
 async function publishReview(a) {
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
-  const ordered = prioritizeFindings(fullSet);
+  const { merged, dropped } = a.verdicts === void 0 ? { merged: fullSet, dropped: 0 } : mergeDuplicates(fullSet, a.verdicts);
+  if (dropped > 0)
+    warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
+  const ordered = prioritizeFindings(merged);
   const retained = ordered.slice(0, inputs.maxFindings);
-  const omitted = fullSet.length - retained.length;
+  const omitted = merged.length - retained.length;
   const omissionMarker = omitted > 0 ? omissionMarkerFor(omitted, inputs.maxFindings) : void 0;
   const { inline, general } = mapToComments(retained, parseHunks(a.hunks));
   const postedInline = inline.slice(0, inputs.maxInlineComments);
@@ -29158,13 +29279,19 @@ async function runFlowA(env, deps, out) {
     }
   }
   const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
+  if (llm === void 0) {
+    note(env, out, "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged");
+  }
   out.slowPathSkipped = llm === void 0;
   out.findingsFrom = llm === void 0 ? "fastpath" : "llm";
-  const all = [...fast, ...llm ?? []].map(sanitizeFinding);
+  const verdicts = llm === void 0 ? { pairs: [], links: [], malformed: 0 } : llm.verdicts;
+  const all = [...fast, ...llm?.findings ?? []].map(sanitizeFinding);
   const redacted = redactFindings(all, runtimeSecrets(env));
   writeFindings(env.artifactDir, redacted);
-  writeFileSync3(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
-  await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
+  writePrMeta(verdicts === void 0 ? meta : { ...meta, verdicts }, env.artifactDir);
+  const { merged: sarifSet } = verdicts === void 0 ? { merged: redacted } : mergeDuplicates(redacted, verdicts);
+  writeFileSync3(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(sarifSet), null, 2) + "\n", "utf8");
+  await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts });
   if (!out.staleSkipped)
     out.exitCode = exitFor(env.inputs.failLevel, all);
 }
@@ -29204,7 +29331,7 @@ async function runFlowB(env, deps, out) {
   }
   const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
-  await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha });
+  await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
   if (!out.staleSkipped)
     out.exitCode = exitFor(env.inputs.failLevel, findings);
 }

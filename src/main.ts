@@ -15,7 +15,7 @@ import {
   type FileDiff,
   type PrMeta,
 } from "./diff.js";
-import { runL0, type Finding } from "./fastpath.js";
+import { capText, MSG_CAP, RULE_CAP, runL0, TRUNC_MARK, type Finding } from "./fastpath.js";
 import { runL2 } from "./l2.js";
 import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
 import { AGENT_LIMITS, type Conversation } from "./agent-types.js";
@@ -36,11 +36,12 @@ import {
   callWithProbe,
   callWithProbeAgent as runProbeAgent,
   ensureOllama,
+  type DedupVerdicts,
   type LlmResult,
 } from "./llm.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, omissionMarkerFor, prioritizeFindings, redactFindings, type InlineComment, type ReviewPayload } from "./review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, prioritizeFindings, redactFindings, type InlineComment, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 import { readCappedFileSync } from "./artifact-limits.js";
 
@@ -150,11 +151,8 @@ interface EventFields {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const SEVERITIES: ReadonlySet<string> = new Set(["info", "warning", "high"]);
-const MSG_CAP = 2000;
 const SUGGESTION_CAP = 4000;
 const FILE_CAP = 200;
-const RULE_CAP = 100;
-const TRUNC_MARK = "…[truncated]";
 /** Emitted in place of L2 execution on fork PRs with secrets in scope. */
 const L2_SKIPPED: Finding = {
   severity: "info",
@@ -371,16 +369,6 @@ function writeFindings(dir: string, findings: Finding[]): void {
 // Finding sanitizing (R7). LLM output and the privileged artifact are untrusted text.
 // ---------------------------------------------------------------------------
 
-/**
- * Caps by code points (not UTF-16 units), so a cut never splits a surrogate pair.
- * The cap includes the truncation marker.
- */
-function capText(s: string, cap: number): string {
-  const cps = Array.from(s);
-  if (cps.length <= cap) return s;
-  return cps.slice(0, cap - Array.from(TRUNC_MARK).length).join("") + TRUNC_MARK;
-}
-
 /** C0 and DEL controls except TAB and LF (kept for multi-line messages and suggestions). */
 const CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 /** Every C0 and DEL control, for single-line fields (file, rule). */
@@ -460,11 +448,12 @@ export function budgetPrompt(
   issueBody: string | undefined,
   skipped: string[],
   budget: number,
+  opts?: { withIds?: boolean },
 ): { fast: Finding[]; promptText: string; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean } {
   const nPrompt = neutralise(promptText);
   const nIssueFull = issueBody !== undefined && issueBody.trim() !== "" ? neutralise(issueBody) : undefined;
   const render = (f: Finding[], ib: string | undefined, omitted: number): string =>
-    buildMessages(f, nPrompt, ib, skipped, undefined, omitted).user;
+    buildMessages(f, nPrompt, ib, skipped, undefined, omitted, opts).user;
 
   let curIssue = nIssueFull;
   let issueDropped = false;
@@ -551,6 +540,8 @@ function summaryFor(findings: Finding[]): string {
  * Slow path (LLM). Returns undefined when it is skipped: no key, nothing to send, bad config,
  * an absent model, or a failed call. Every skip is a warning; the fast path still posts.
  * The LLM key is intentional API use; the model is given no tools.
+ * On success the verdict envelope carries the model's duplicate judgements with links
+ * converted to absolute all-list indices; the agent-mode return carries no verdicts (no merge, by design).
  */
 async function slowPath(
   env: RunEnv,
@@ -562,7 +553,7 @@ async function slowPath(
   issueBody: string | undefined,
   skipped: string[],
   prBody: string,
-): Promise<Finding[] | undefined> {
+): Promise<{ findings: Finding[]; verdicts?: DedupVerdicts } | undefined> {
   const i = env.inputs;
   if (i.llmApiKey === "") {
     core.info("no llm_api_key: slow path skipped");
@@ -610,7 +601,7 @@ async function slowPath(
     core.warning(`model check inconclusive (${check.detail ?? "unknown error"}); continuing`);
   }
   const promptFast = fast.map(sanitizeFinding);
-  const b = budgetPrompt(promptFast, promptText, issueBody, skipped, i.maxPromptChars);
+  const b = budgetPrompt(promptFast, promptText, issueBody, skipped, i.maxPromptChars, { withIds: !i.llmAgent });
   const messages = buildMessages(
     b.fast,
     b.promptText,
@@ -618,6 +609,7 @@ async function slowPath(
     b.skipped,
     i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : undefined,
     b.findingsOmitted,
+    { withIds: !i.llmAgent },
   );
   const promptBytes = Buffer.byteLength(messages.user, "utf8");
   if (promptBytes > i.maxPromptChars) {
@@ -704,7 +696,7 @@ async function slowPath(
       core.warning(`slow path failed (${res.reason}): ${res.detail}`);
       return undefined;
     }
-    return res.findings;
+    return { findings: res.findings };
   }
   const res: LlmResult =
     i.llmApiStyle === "auto" && i.llmPath === ""
@@ -714,7 +706,25 @@ async function slowPath(
     core.warning(`slow path failed (${res.reason}): ${res.detail}`);
     return undefined;
   }
-  return res.findings;
+  const verdicts = res.verdicts;
+  if (verdicts === undefined) return { findings: res.findings };
+  // Links convert to absolute all-list indices against the UNCUT fast list (never b.fast.length).
+  // Verdicts naming a cut-tail sent index (≥ b.fast.length) name findings the model never saw:
+  // dropped whole and counted as malformed. All findings are kept regardless.
+  const kept = b.fast.length;
+  let malformed = verdicts.malformed;
+  const pairs: Array<[number, number]> = [];
+  for (const [a, c] of verdicts.pairs) {
+    if (c >= kept || a >= kept) malformed += 1;
+    else pairs.push([a, c]);
+  }
+  const links: Array<[number, number]> = [];
+  for (const [r, s] of verdicts.links) {
+    if (s >= kept) malformed += 1;
+    else links.push([fast.length + r, s]);
+  }
+  if (malformed > 0) core.warning(`lupa: ignored ${malformed} malformed dedup verdict(s)`);
+  return { findings: res.findings, verdicts: { pairs, links, malformed } };
 }
 
 // Artifact redaction is runtime-key masking only: the run's own github_token and
@@ -733,6 +743,7 @@ interface PublishArgs {
   findings: Finding[];
   hunks: FileDiff[];
   headSha: string;
+  verdicts?: DedupVerdicts;
 }
 
 /**
@@ -759,11 +770,17 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[]): string
 async function publishReview(a: PublishArgs): Promise<void> {
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
+  // Dedup merge before the funnel. Gate inputs keep the full pre-merge set (provably
+  // identical outcomes); the funnel — top-N, inline, body — runs on the merged set, and
+  // omission counts reflect the post-merge cut (merged-away findings are represented, never omitted).
+  const { merged, dropped } =
+    a.verdicts === undefined ? { merged: fullSet, dropped: 0 } : mergeDuplicates(fullSet, a.verdicts);
+  if (dropped > 0) core.warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
   // Publication funnel: top-N by severity, then the inline cap (excess folds
   // to the body), then the body char cap. Gates keep the full pre-cap set.
-  const ordered = prioritizeFindings(fullSet);
+  const ordered = prioritizeFindings(merged);
   const retained = ordered.slice(0, inputs.maxFindings);
-  const omitted = fullSet.length - retained.length;
+  const omitted = merged.length - retained.length;
   const omissionMarker = omitted > 0 ? omissionMarkerFor(omitted, inputs.maxFindings) : undefined;
   const { inline, general } = mapToComments(retained, parseHunks(a.hunks));
   const postedInline = inline.slice(0, inputs.maxInlineComments);
@@ -968,14 +985,24 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   }
 
   const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
+  if (llm === undefined) {
+    note(env, out, "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged");
+  }
   out.slowPathSkipped = llm === undefined;
   out.findingsFrom = llm === undefined ? "fastpath" : "llm";
-  const all = [...fast, ...(llm ?? [])].map(sanitizeFinding);
+  // No judge ran (no LLM): the verdicts key still lands on pr-meta as the empty object.
+  // Agent runs carry no verdicts and merge nothing, by design.
+  const verdicts: DedupVerdicts | undefined =
+    llm === undefined ? { pairs: [], links: [], malformed: 0 } : llm.verdicts;
+  const all = [...fast, ...(llm?.findings ?? [])].map(sanitizeFinding);
   const redacted = redactFindings(all, runtimeSecrets(env));
   writeFindings(env.artifactDir, redacted);
-  writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(redacted), null, 2) + "\n", "utf8");
+  writePrMeta(verdicts === undefined ? meta : { ...meta, verdicts }, env.artifactDir);
+  // SARIF is a publication surface: the same pure merge over the same inputs as the funnel.
+  const { merged: sarifSet } = verdicts === undefined ? { merged: redacted } : mergeDuplicates(redacted, verdicts);
+  writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(sarifSet), null, 2) + "\n", "utf8");
 
-  await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha });
+  await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts });
   if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, all);
 }
 
@@ -1028,7 +1055,9 @@ async function runFlowB(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   }
   const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
-  await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha });
+  // A missing verdicts key means no judge ran: silent no-merge. Out-of-range indices
+  // range-check inside the publishReview merge (dropped with the count).
+  await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
   if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, findings);
 }
 
