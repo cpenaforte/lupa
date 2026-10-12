@@ -74,7 +74,7 @@ export interface WalkSkipped {
 ```
 
 - `walkPaths(root, startAbs, limits?)`: names only — files only (directories are
-  traversed, never listed — same listed set as today's glob), no `stat` size checks, no
+  traversed, never listed — files only, no eligibility filter), no `stat` size checks, no
   binary scan (same `maxFiles`/`deadlineMs` semantics as `walkFiles`, so `glob`
   inherits the 10 s default bound too). Skips `.git` segments, symlinks, and the prune set. Returns
   `{ paths: string[] (rel, sorted), truncated: boolean, skipped: WalkSkipped }`
