@@ -248,7 +248,7 @@ describe("workflow templates", () => {
     // (leading YAML indent allowed; an echo-prefix or trailing text fails).
     expect(guardBlock).toContain('cat >> "$GITHUB_STEP_SUMMARY" <<\'EOF\'');
     expect(guardBlock).toMatch(new RegExp(`^[ \\t]*${escaped}$`, "m"));
-    expect(guardBlock).toContain("EOF");
+    expect(guardBlock).toMatch(/^[ \t]*EOF$/m);
     // Annotation echoes the identical line with the ::notice:: prefix.
     expect(guardBlock).toContain("::notice::" + sentence);
     expect(guardBlock).toContain(`echo "::notice::${sentence}"`);
