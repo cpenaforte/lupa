@@ -24787,15 +24787,19 @@ function l2Argv(name) {
 }
 var execTool = (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS) => new Promise((resolve2) => {
   execFile(cmd, args, { cwd, maxBuffer: MAX_BUFFER, timeout: timeoutMs }, (err, stdout, stderr) => {
+    const out = String(stdout);
     if (!err)
-      return resolve2(void 0);
+      return resolve2({ failure: void 0, stdout: out });
     const e = err;
     const code = typeof e.code === "string" || typeof e.code === "number" ? e.code : null;
     resolve2({
-      code,
-      signal: e.signal ?? null,
-      output: `${String(stdout)}${String(stderr)}`,
-      timedOut: e.killed === true
+      failure: {
+        code,
+        signal: e.signal ?? null,
+        output: `${out}${String(stderr)}`,
+        timedOut: e.killed === true
+      },
+      stdout: out
     });
   });
 });
@@ -24810,28 +24814,51 @@ function describeFailure(name, f, timeoutMs) {
     return `${name} reported issues (exit ${f.code})`;
   return `${name} exited abnormally`;
 }
-async function runOne(name, dir, spawn, timeoutMs) {
-  const { cmd, args } = l2Argv(name);
-  const failure = await spawn(cmd, args, dir, timeoutMs);
+function interpretDefault(name, failure, _stdout, _changed, timeoutMs) {
   if (!failure)
-    return void 0;
+    return [];
   if (failure.code === "ENOENT")
-    return void 0;
+    return [];
   const detail = failure.output.trim().split("\n").slice(0, 5).join("\n");
-  return {
-    severity: "warning",
-    file: "",
-    rule: name,
-    message: `${describeFailure(name, failure, timeoutMs)}${detail ? `:
+  return [
+    {
+      severity: "warning",
+      file: "",
+      rule: name,
+      message: `${describeFailure(name, failure, timeoutMs)}${detail ? `:
 ${detail}` : ""}`
-  };
+    }
+  ];
 }
-async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS) {
+function interpretGofmt(name, failure, stdout, changed, timeoutMs = L2_TIMEOUT_MS) {
+  const files = stdout.split("\n").filter((line) => line !== "").map((line) => line.startsWith("./") ? line.slice(2) : line).filter((file) => changed.has(file));
+  if (files.length > 0) {
+    return files.map((file) => ({
+      severity: "warning",
+      file,
+      rule: "gofmt",
+      message: `gofmt: ${file} is not formatted (run gofmt -w ${file})`
+    }));
+  }
+  if (failure)
+    return interpretDefault(name, failure, stdout, changed, timeoutMs);
+  return [];
+}
+var interpreters = {
+  gofmt: interpretGofmt
+};
+async function runOne(name, dir, spawn, timeoutMs, changed) {
+  const { cmd, args } = l2Argv(name);
+  const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs);
+  if (failure?.code === "ENOENT")
+    return [];
+  const interpret = interpreters[name] ?? interpretDefault;
+  return interpret(name, failure, stdout, changed, timeoutMs);
+}
+async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set()) {
   const findings = [];
   for (const name of detectL2Tools(dir)) {
-    const f = await runOne(name, dir, spawn, timeoutMs);
-    if (f)
-      findings.push(f);
+    findings.push(...await runOne(name, dir, spawn, timeoutMs, changedFiles));
   }
   return findings;
 }

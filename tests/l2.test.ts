@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectL2Tools, execTool, L2_TIMEOUT_MS, l2Argv, runL2, type ToolFailure } from "../src/l2.js";
+import { detectL2Tools, execTool, L2_TIMEOUT_MS, l2Argv, runL2 } from "../src/l2.js";
 
 const tmpDirs: string[] = [];
 function makeTmp(files: Record<string, string> = {}, dirs: string[] = []): string {
@@ -84,9 +84,9 @@ describe("L2 detection by config presence", () => {
 describe("runL2 behavior", () => {
   it("missing binary (ENOENT, stubbed spawner) over a go.mod-only dir → []", async () => {
     const calls: string[] = [];
-    const spawn = async (cmd: string): Promise<ToolFailure> => {
+    const spawn = async (cmd: string) => {
       calls.push(cmd);
-      return { code: "ENOENT", signal: null, output: "" };
+      return { failure: { code: "ENOENT", signal: null, output: "" }, stdout: "" };
     };
     expect(await runL2("tests/fixtures/go", spawn)).toEqual([]);
     expect(calls).toEqual(["gofmt", "go"]);
@@ -131,18 +131,61 @@ describe("runL2 behavior", () => {
   });
 
   it("clean run (exit 0) → tool invoked via the seam, yields no findings", async () => {
-    // Spawner returns undefined === exit 0. Recording the call proves the tool was
+    // Spawner returns { failure: undefined } === exit 0. Recording the call proves the tool was
     // actually invoked (not silently skipped as ENOENT).
     const calls: Array<{ cmd: string; args: string[]; cwd: string; timeoutMs?: number }> = [];
-    const spawn = async (cmd: string, args: string[], cwd: string, timeoutMs?: number): Promise<ToolFailure | undefined> => {
+    const spawn = async (cmd: string, args: string[], cwd: string, timeoutMs?: number) => {
       calls.push({ cmd, args, cwd, timeoutMs });
-      return undefined;
+      return { failure: undefined, stdout: "" };
     };
     expect(await runL2("tests/fixtures/go", spawn)).toEqual([]);
     expect(calls).toEqual([
       { cmd: "gofmt", args: ["-l", "."], cwd: "tests/fixtures/go", timeoutMs: L2_TIMEOUT_MS },
       { cmd: "go", args: ["vet", "./..."], cwd: "tests/fixtures/go", timeoutMs: L2_TIMEOUT_MS },
     ]);
+  });
+  it("gofmt exit 0 with a file list reports one warning per changed file", async () => {
+    const spawn = async () => ({ failure: undefined, stdout: "a.go\nsub/b.go\nc.go\n" });
+    const findings = await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go", "sub/b.go"]));
+    expect(findings).toEqual([
+      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+      { severity: "warning", file: "sub/b.go", rule: "gofmt", message: "gofmt: sub/b.go is not formatted (run gofmt -w sub/b.go)" },
+    ]);
+  });
+  it("gofmt ignores unchanged files, empty output, and ./ prefixes", async () => {
+    const onlyUnchanged = async () => ({ failure: undefined, stdout: "other.go\n" });
+    expect(await runL2("tests/fixtures/go", onlyUnchanged, 1000, new Set(["a.go"]))).toEqual([]);
+    const empty = async () => ({ failure: undefined, stdout: "" });
+    expect(await runL2("tests/fixtures/go", empty, 1000, new Set(["a.go"]))).toEqual([]);
+    const dotted = async () => ({ failure: undefined, stdout: "./a.go\n" });
+    expect(await runL2("tests/fixtures/go", dotted, 1000, new Set(["a.go"]))).toEqual([
+      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+    ]);
+    // Omitted changedFiles defaults to an empty set: silence, never a whole-repo dump.
+    const listed = async () => ({ failure: undefined, stdout: "a.go\nsub/b.go\n" });
+    expect(await runL2("tests/fixtures/go", listed, 1000)).toEqual([]);
+  });
+  it("gofmt nonzero exit with a file list still reports the files", async () => {
+    const spawn = async (cmd: string) =>
+      cmd === "gofmt"
+        ? { failure: { code: 2, signal: null, output: "boom" }, stdout: "a.go\n" }
+        : { failure: undefined, stdout: "" };
+    expect(await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go"]))).toEqual([
+      { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+    ]);
+  });
+  it("real execTool captures success stdout (shell stub, no Go toolchain)", async () => {
+    const bin = makeTmp({ gofmt: "#!/bin/sh\nprintf 'a.go\\n'\n" });
+    chmodSync(join(bin, "gofmt"), 0o755);
+    const oldPath = process.env.PATH;
+    process.env.PATH = bin; // `go` is absent here → ENOENT → skipped
+    try {
+      expect(await runL2("tests/fixtures/go", execTool, 10000, new Set(["a.go"]))).toEqual([
+        { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
+      ]);
+    } finally {
+      process.env.PATH = oldPath;
+    }
   });
 });
 
