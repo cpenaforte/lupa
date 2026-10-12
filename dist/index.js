@@ -27165,12 +27165,12 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     const ms = deadline - nowMs;
     if (ms <= 0)
       return Promise.resolve({ reply: timeoutReply(), raced: true });
+    const inner = hooks.call(conv, flags, opts);
+    inner.then(void 0, () => {
+    });
     let timer;
     const timeoutP = new Promise((resolve2) => {
       timer = setTimeout(() => resolve2({ reply: timeoutReply(), raced: true }), ms);
-    });
-    const inner = hooks.call(conv, flags, opts);
-    inner.then(void 0, () => {
     });
     return Promise.race([inner.then((reply) => ({ reply, raced: false })), timeoutP]).finally(() => {
       clearTimeout(timer);

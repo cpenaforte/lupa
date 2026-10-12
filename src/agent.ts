@@ -135,14 +135,17 @@ export async function runAgent(
   ): Promise<{ reply: AgentReply; raced: boolean }> => {
     const ms = deadline - nowMs;
     if (ms <= 0) return Promise.resolve({ reply: timeoutReply(), raced: true });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeoutP = new Promise<{ reply: AgentReply; raced: boolean }>((resolve) => {
-      timer = setTimeout(() => resolve({ reply: timeoutReply(), raced: true }), ms);
-    });
+    // The model call starts before the race timer so a synchronous throw
+    // cannot leak a live timer (async adapters are unaffected: the timer
+    // still guards the in-flight promise identically).
     const inner = hooks.call(conv, flags, opts);
     // Adapters resolve by contract and never reject; this is timer hygiene
     // for the dangling promise after a race win.
     inner.then(undefined, () => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutP = new Promise<{ reply: AgentReply; raced: boolean }>((resolve) => {
+      timer = setTimeout(() => resolve({ reply: timeoutReply(), raced: true }), ms);
+    });
     return Promise.race([inner.then((reply) => ({ reply, raced: false as const })), timeoutP]).finally(() => {
       clearTimeout(timer);
     });
@@ -272,7 +275,8 @@ export async function runAgent(
     for (let i = 0; i < reply.toolCalls.length; i++) {
       const call = reply.toolCalls[i]!;
       if (i >= maxCalls) {
-        // Unchanged behavior, bookkeeping-excluded: no byte counting.
+        // Too-many-calls record is loop-generated bookkeeping: excluded
+        // from `bytes` (content outputs alone are counted).
         turnsArr.push({
           role: "tool",
           id: call.id,

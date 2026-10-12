@@ -13,6 +13,28 @@ import type { ToolContext } from "../src/agent-tools.js";
 
 vi.mock("@actions/core", () => ({ warning: vi.fn(), info: vi.fn() }));
 
+// Records every runAgent budget seen through the agent-mode probe so the
+// shared-deadline test can pin that all probed styles receive the same
+// absolute deadlineMs. Delegates to the real runAgent; existing tests are
+// unaffected.
+vi.mock("../src/agent.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/agent.js")>();
+  const budgets = ((globalThis as Record<string, unknown>)["__probeBudgets"] ??= []) as Array<
+    Parameters<typeof actual.runAgent>[2]
+  >;
+  return {
+    ...actual,
+    runAgent: (...args: Parameters<typeof actual.runAgent>) => {
+      budgets.push(args[2]);
+      return actual.runAgent(...args);
+    },
+  };
+});
+
+function probeBudgets(): Array<{ deadlineMs?: number }> {
+  return (globalThis as Record<string, unknown>)["__probeBudgets"] as Array<{ deadlineMs?: number }>;
+}
+
 // ---------- helpers ----------
 
 const FINDING = { severity: "warning", file: "src/a.ts", line: 2, rule: "logic", message: "m", suggestion: "sug" };
@@ -187,6 +209,33 @@ describe("callWithProbeAgent", () => {
     const w = warnings()[0]!;
     expect(w).toContain("ap6-model");
     for (const s of PROBE_ORDER) expect(w).toContain(s);
+  });
+
+  it("probed styles share one probe deadline instead of restarting it", async () => {
+    probeBudgets().length = 0;
+    // Advance the real clock on every read: a per-style recompute would
+    // land later than the first style's deadline, so equality pins sharing.
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => (now += 1000));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        // Turn-0 404 on chat advances the probe; responses then succeeds.
+        if (u.endsWith("/chat/completions")) return new Response("not found", { status: 404 });
+        return new Response(JSON.stringify(RESPONSES_OK), { status: 200 });
+      }),
+    );
+    const r = await callWithProbeAgent("opencode-zen", "ap-deadline-model", ZEN, "k", conv(), AGENT_O, TOOL_CTX);
+    expect(r.result).toEqual({ ok: true, findings: [FINDING] });
+    expect(r.via).toBe("openai-responses");
+    // Exactly two styles ran (chat advanced, responses succeeded).
+    expect(probeBudgets()).toHaveLength(2);
+    const first = probeBudgets()[0]!.deadlineMs;
+    expect(first).toBeDefined();
+    // The second probed style receives the FIRST style's deadline (shared,
+    // not restarted): strict equality, no wall-clock arithmetic.
+    expect(probeBudgets()[1]!.deadlineMs).toBe(first);
   });
 });
 

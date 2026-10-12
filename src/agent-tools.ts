@@ -620,6 +620,12 @@ function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeou
  * `args.pattern`, returning matching lines. The match itself runs in a
  * worker thread with a hard timeout so a catastrophic model-authored regex is
  * terminated instead of hanging the job.
+ *
+ * `endMs` is an absolute epoch-ms deadline (same clock as `Date.now()`):
+ * entry-expired or walk-consumed deadlines return the "grep timed out"
+ * error without spawning the worker. `maxBytes` is a per-call cap on the
+ * serialized result bytes; tail matches are dropped (`truncated: true`)
+ * to fit.
  */
 export async function grepInRoot(
   root: string,

@@ -323,7 +323,7 @@ describe("runAgent", () => {
     expect(h.ncalls()).toBe(0);
   });
 
-  it("a call in flight when the deadline passes loses the race with stop=budget", async () => {
+  it("real-timer fallback: a call in flight when the deadline passes loses the race with stop=budget", async () => {
     vi.useFakeTimers();
     try {
       const root = tempRoot();
