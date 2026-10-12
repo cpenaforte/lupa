@@ -48,7 +48,8 @@ export interface WalkLimits {
   // non-regular entries are never examined and never counted), not just returned
   deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked at the
   // top of each directory iteration including the first (a non-positive deadline
-  // fires immediately — test-seam use); known granularity: one synchronous directory
+  // fires immediately — test-seam use; an unvisited start directory counts as one
+  // queued unit); known granularity: one synchronous directory
   // read plus its entry loop cannot be preempted, so the walk can overshoot the bound
   // by one directory's processing time
 }
@@ -72,12 +73,16 @@ export interface WalkSkipped {
   `GLOB_MAX_PATHS` (200), keeps `{paths, truncated}`; `truncated` is true when the
   pattern matches exceed the cap OR the walk hit a limit.
 - `walkFiles(root, startAbs, limits?)`: as today (size + binary eligibility) plus
-  prune set, `maxFiles`, and `deadlineMs`. `statSync`-failure skips count in no
-  bucket. Returns
+  prune set, `maxFiles`, and `deadlineMs`. `statSync`- and `readdirSync`-failure skips
+  count in no bucket. A file start path goes through eligibility and records its
+  exclusion reason (`skipped.oversized`/`binary`) instead of returning all-zero
+  silence. Returns
   `{ files: WalkFile[], truncated: boolean, skipped: WalkSkipped }` with real
   counts. `grepInRoot(root, args, timeoutMs?, limits?)` threads the optional limits
   to its walk, ORs walk truncation into its `truncated` flag and adds the
   `skipped` object to its response: `{matches, truncated, files_scanned, skipped}`.
+  Both byte-budget `serialize` calls include the fixed `skipped` object so the final
+  response stays within `AGENT_LIMITS.resultBytes`.
   The `glob` argument filters after the walk, so `skipped.oversized`/`binary` count
   walk-excluded files even when they would not have matched the glob — the counts
   describe the walk, not the filter (intended: exclusions stay visible regardless of
@@ -107,8 +112,11 @@ re-reads at worst (overlap), never skips.
 ### Prune set
 
 `node_modules`, `vendor`, `target`, `.venv`, `venv`, `__pycache__` — matched as
-exact entry names (file or directory, any depth), same mechanism as the existing
-`.git` entry check. The prune applies to child entries under the walk start; the
+exact DIRECTORY entry names (any depth), same mechanism as the existing
+`.git` entry check. Only directories are pruned: a FILE with a prune-set name
+(e.g. a script called `target`) is listed by `glob` and eligibility-checked by
+`grep` like any other file — dependencies are directories, and silently dropping
+a named file with `truncated: false` would be the concealment F13 removes. The prune applies to child entries under the walk start; the
 start path itself is never pruned (`path: "vendor"` still searches). Case-sensitive
 except `.git`, which keeps its case-insensitive rule. Non-regular nodes (fifos,
 sockets, and anything that is neither file, dir, nor symlink) are skipped: never
