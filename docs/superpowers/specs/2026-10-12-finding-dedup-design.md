@@ -153,7 +153,10 @@ either set, so the F15 "full set" tests stay green unchanged.
    with `"\n\n"` (no text rewritten), then re-capped with the existing
    message cap + marker (bounded output beats completeness); `suggestion` =
    first defined suggestion in group order.
-5. F15 funnel (top-N → inline → body) runs on the merged set; marker counts
+5. F15 funnel (top-N → inline → body) runs on the merged set; the omission
+   marker counts ONLY the top-N cut (`merged.length − topN.length`) —
+   merged-away findings are represented inside survivors, never counted as
+   omitted (a naive `fullSet − retained` overcounts them); marker counts
    reflect post-merge totals. `sarif.json` is built from the merged set
    (publication surface); `findings.json` keeps the pre-merge set (F15
    artifact contract intact).
@@ -164,8 +167,12 @@ either set, so the F15 "full set" tests stay green unchanged.
 
 The artifact upload list is explicit and template changes are out of scope,
 so verdicts ride the already-uploaded `pr-meta.json`: `PrMeta` gains
-`verdicts?: DedupVerdicts` (`readPrMeta` ignores other unknown keys as
-today; the verdicts shape is validated like the rest).
+`verdicts?: DedupVerdicts`, and `readPrMeta` returns it (validated shape:
+`{pairs, links}` arrays of non-negative-int pairs plus non-negative-int
+`malformed`; anything else under a PRESENT key throws like any contract
+violation — a corrupt advisory block refuses like a corrupt binding field,
+fail-closed and consistent; a MISSING key means "no judge ran" and merges
+nothing, silently).
 
 - Flow A: `pr-meta.json` is (re)written with verdicts after the slow path
   (always written, even `{pairs: [], links: [], malformed: 0}` when there is

@@ -32,8 +32,8 @@
 ### Task 67: Dedup verdict plumbing (schema, parser, transport)
 
 **Files:**
-- Modify: `src/prompt.ts` (schema + IDs/instructions at the single-shot call site only), `src/llm.ts` (`DedupVerdicts`, `parseVerdicts`, `LlmResult.verdicts`), `src/adapters/messages.ts:236`, `src/adapters/responses.ts:242`, `src/adapters/google.ts:387`, `src/llm.ts:405` (attach `verdicts: parseVerdicts(text)`; `agent.ts:62` untouched by design)
-- Test: `tests/llm.test.ts` (parse units via `okChat` content), `tests/prompt.test.ts` (required-list pins), `tests/adapters-google.test.ts` (converted-schema expectation)
+- Modify: `src/prompt.ts` (schema + IDs/instructions at the single-shot call site only), `src/llm.ts` (`DedupVerdicts`, `parseVerdicts`, `LlmResult.verdicts`), `src/adapters/messages.ts:240`, `src/adapters/responses.ts:246`, `src/adapters/google.ts:391`, `src/llm.ts:409` (attach `verdicts: parseVerdicts(parsed)`; `agent.ts:62` untouched by design)
+- Test: `tests/llm.test.ts` (parse units via `okChat` content + callLlm pins), `tests/prompt.test.ts` (required-list + `Object.keys` pins), `tests/adapters-google.test.ts` (converted-schema expectation incl. `minItems`/`maxItems` passthrough + 6 toEqual pins), `tests/adapters-messages.test.ts`, `tests/adapters-responses.test.ts`, `tests/adapters-routing.test.ts`, `tests/agent-probe.test.ts`, `tests/probe-routing.test.ts` (toEqual pins gain `verdicts`)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
@@ -43,14 +43,14 @@
 **Exact behavior:**
 - Schema: top-level `duplicates` + per-item `duplicateOf`, both `{type: [<t>, "null"]}` with `items: {type:"integer"}` + `minItems: 2, maxItems: 2` on the pairs array (NO `prefixItems` — length-checked in the parser; keeps every adapter converter untouched); both keys in their `required` lists. IDs + verdict instructions render ONLY in the single-shot message path: `slowPath` passes `{ withIds: true }` through `budgetPrompt` into `buildMessages` (ID bytes move the cut point); the agent-mode branch rebuilds its messages without IDs (fewer bytes than measured — still within budget); `DEDUP_INSTRUCTIONS` is appended to the system text at the single-shot invocations only. `withIds: true` adds an `"id"` field FIRST (`{id, ...f}`) to each sent finding object with ALL other fields complete and untruncated (full message + suggestion bodies).
 - `parseVerdicts(parsed)`: null/absent keys → empty verdicts, `malformed: 0`; drops negativity/non-integer indices, self-pairs, dangling pointers, non-pairs, wrong-length pairs (each drop `malformed++`). Fence handling inherited from the single `parseContent` call upstream (no double parse).
-- Adapters + `llm.ts:405`: `return { ok: true, findings, verdicts: parseVerdicts(parsed) }` (`parsed` is the in-scope variable at all four sites; at `llm.ts` the text variable is `reply.text`). `agent.ts:62` untouched (no verdicts by design).
+- Adapters + `llm.ts:409` (`return` line; `toFindings` at `:405`): `return { ok: true, findings, verdicts: parseVerdicts(parsed) }` (`parsed` is the in-scope variable at all four sites). `agent.ts:62` untouched (no verdicts by design).
 
 - [ ] **Step 1: Write the failing tests**
   - `tests/llm.test.ts` via `okChat` content: pairs + pointers extracted; null/absent → empty; unknown/self/malformed dropped with counts; wrong-length pair dropped.
   - `tests/prompt.test.ts`: required lists include the new keys (update existing pins, incl. the `Object.keys(item.properties)` pin); `withIds: true` renders `"id":<n>` FIRST alongside complete message/suggestion bodies, instructions name `duplicates`/`duplicateOf` + 0-based indices + pair arrays; default/`withIds` absent renders no `id` fields (agent path unchanged). `budgetPrompt` without opts measures exactly as today (existing cut-point tests untouched).
   - `tests/adapters-google.test.ts`: converted expectation gains the nullable `duplicates`/`duplicateOf` (via `googleSchema` recursion + `nullable: true`, `minItems`/`maxItems` passed through).
-  - Probe: extend one `callWithProbe` routing test (scripted 400-then-ok) asserting the WINNING style's verdicts surface and the loser's do not.
   - `toEqual` pins carrying `{ ok: true, findings: [...] }` gain the `verdicts` key: `tests/adapters-messages.test.ts`, `tests/adapters-responses.test.ts`, `tests/adapters-routing.test.ts`, `tests/agent-probe.test.ts`, `tests/probe-routing.test.ts`, `tests/llm.test.ts` callLlm pins (suite pinpoints any other).
+  - Probe: extend one `callWithProbe` routing test (scripted 400-then-ok) asserting the WINNING style's verdicts surface and the loser's do not.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -69,7 +69,7 @@ Expected: PASS all green (evals after build); build clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/prompt.ts src/llm.ts src/adapters/messages.ts src/adapters/responses.ts src/adapters/google.ts tests/llm.test.ts tests/prompt.test.ts tests/adapters-google.test.ts dist/index.js
+git add src/prompt.ts src/llm.ts src/adapters/messages.ts src/adapters/responses.ts src/adapters/google.ts tests/llm.test.ts tests/prompt.test.ts tests/adapters-google.test.ts tests/adapters-messages.test.ts tests/adapters-responses.test.ts tests/adapters-routing.test.ts tests/agent-probe.test.ts tests/probe-routing.test.ts dist/index.js
 git commit -m "feat: LLM duplicate verdicts in schema, parser, and transport"
 ```
 
@@ -78,13 +78,8 @@ git commit -m "feat: LLM duplicate verdicts in schema, parser, and transport"
 ### Task 68: Deterministic merge and flow wiring
 
 **Files:**
-- Modify: `src/fastpath.ts` (receive `MSG_CAP`, `RULE_CAP`, `TRUNC_MARK`, `capText` — main.ts imports them; behavior unchanged), `src/review.ts` (`mergeDuplicates`), `src/main.ts` (slowPath envelope + absolute conversion + warnings, `PublishArgs.verdicts`, `publishReview` merge + return, `verdicts.json` write/read, sarif from merged, Flow B, README note), `README.md` (dedup section: no-LLM behavior)
-- Test: `tests/review.test.ts` (merge units), `tests/main.test.ts` (flows), `tests/fastpath.test.ts` (caps move is transparent — no new tests)
-- Rebuild: `dist/index.js`
-
-**Files:**
-- Modify: `src/fastpath.ts` (receive `MSG_CAP`, `RULE_CAP`, `TRUNC_MARK`, `capText` — main.ts imports them; behavior unchanged), `src/review.ts` (`mergeDuplicates`), `src/main.ts` (slowPath envelope + absolute conversion + warnings, `PublishArgs.verdicts`, `publishReview` merge, `PrMeta.verdicts` write/read, sarif from merged, Flow B, README note), `src/diff.ts` (`PrMeta.verdicts?: DedupVerdicts`), `README.md` (dedup section + `:155` "no cross-scanner dedupe" rewrite)
-- Test: `tests/review.test.ts` (merge units), `tests/main.test.ts` (flows), `tests/fastpath.test.ts` (caps move is transparent — no new tests), `tests/diff.test.ts` (verdicts round-trip through pr-meta)
+- Modify: `src/fastpath.ts` (receive `MSG_CAP`, `RULE_CAP`, `TRUNC_MARK`, `capText` — main.ts imports them; behavior unchanged), `src/review.ts` (`mergeDuplicates`), `src/main.ts` (slowPath envelope + absolute conversion + warnings, `PublishArgs.verdicts`, `publishReview` merge, `PrMeta.verdicts` write/read, sarif from merged, Flow B, no-LLM `note()`), `src/diff.ts` (`PrMeta.verdicts?: DedupVerdicts` + `readPrMeta` return + shape validation), `README.md` (dedup section + `:155` "no cross-scanner dedupe" rewrite)
+- Test: `tests/review.test.ts` (merge units), `tests/main.test.ts` (flows), `tests/fastpath.test.ts` (caps move is transparent — no new tests), `tests/diff.test.ts` (verdicts round-trip through pr-meta; malformed verdicts throw like any contract violation)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
@@ -94,13 +89,13 @@ git commit -m "feat: LLM duplicate verdicts in schema, parser, and transport"
 **Exact behavior:**
 - `mergeDuplicates`: check-then-union ORDER — same-file + line-compatible precondition tested PER PAIR/LINK before closure (A~B valid + B~C cross-file → C stays alone, A+B merge; e.g. pinned in test); transitive closure over ABSOLUTE positions; partial pairs dropped whole; survivor (first-member-position order): defined file/line, distinct rules `"+"`-joined then `RULE_CAP`-recapped, severity max, `` `[rule] message` `` `"\n\n"`-joined then message-recapped, first defined suggestion; unmergeable (incl. out-of-range) counted in `dropped`.
 - `slowPath` returns `{ findings, verdicts? } | undefined` (agent return: verdicts absent); converts links to absolute (`fast.length + r`); drops verdicts with sent index ≥ `b.fast.length` (cut tail — unseen by construction) counting them into `malformed`; warns `lupa: ignored <n> malformed dedup verdict(s)` iff `malformed > 0`. Caller `:970` destructures (`llm?.findings ?? []`, verdicts pass-through); `findingsFrom` logic unchanged.
-- Flow A writes pre-merge `findings.json` + rewrites `pr-meta.json` WITH verdicts after the slow path (always — even `{pairs: [], links: [], malformed: 0}`). `PublishArgs.verdicts?`; `publishReview`: gates/summary/dry-run on fullSet, `merged` for funnel, NO return-type change; `dropped > 0` → `core.warning("lupa: ignored <n> unmergeable dedup verdict(s)")`; sarif from a `mergeDuplicates(redacted, verdicts)` call in `runFlowA` (same pure inputs as the funnel merge — identical result, never on already-merged output). Flow B reads verdicts from `pr-meta.json` best-effort under the F15 read cap (missing key → silent no-merge; malformed shape → warning + no merge) with index range-check vs `findings.length`, then the same point. Agent path: no verdicts, no merge, no note (by design).
+- Flow A writes pre-merge `findings.json` + rewrites `pr-meta.json` WITH verdicts after the slow path (always — even `{pairs: [], links: [], malformed: 0}`); `readPrMeta` returns the validated verdicts (present-but-malformed shape throws like any pr-meta violation; missing key = silent no-merge). `PublishArgs.verdicts?`; `publishReview`: gates/summary/dry-run on fullSet, `merged` for funnel with omission counts from MERGED lengths (`merged.length − topN.length`; merged-away are represented, never omitted), NO return-type change; `dropped > 0` → `core.warning("lupa: ignored <n> unmergeable dedup verdict(s)")`; sarif from a `mergeDuplicates(redacted, verdicts)` call in `runFlowA` (same pure inputs as the funnel merge — identical result, never on already-merged output). Flow B reads verdicts from `pr-meta.json` (missing key → silent no-merge), then the same point. Agent path: no verdicts, no merge, no note (by design).
 - No-LLM skip: `note()` in `runFlowA` at the `:970` call site when `llm === undefined` (existing summary assertions may gain the appended line — suite pinpoints; update as named). README dedup section + `:155` rewrite (dedupe now exists via this design).
 - F15 compatibility: existing F15 tests run unchanged (assert in the report, no new tests).
 
 - [ ] **Step 1: Write the failing tests**
   - `tests/review.test.ts`: canary pair → one (high, collapsed rule, redacted kept); `duplicateOf` link (absolute index); transitive triple; cross-file ignore + count (A~B merges while B~C cross-file leaves C alone); partial drop; out-of-range drop; rule re-cap; message re-cap; order stability; empty verdicts passthrough.
-  - `tests/main.test.ts`: slowPath envelope + absolute conversion + malformed warning (incl. cut-tail drop: N fast findings with computed `maxPromptChars` so kept==K — measure serialized sizes in-test — pair `[0,K]` dropped with warning, all kept); Flow A pr-meta carries verdicts (incl. empty-verdicts case); publishReview merge before funnel with gates/summary/dry-run on fullSet; sarif count == merged; Flow B twin via pr-meta verdicts fixture + missing-key silent passthrough; agent duplicates unmerged; high+warning gate-equivalence; no-LLM exact note via `note()`.
+  - `tests/main.test.ts`: slowPath envelope + absolute conversion + malformed warning (incl. cut-tail drop: N fast findings with computed `maxPromptChars` so kept==K — measure serialized sizes in-test — pair `[0,K]` dropped with warning, all kept); empty-verdicts publishReview output equals the unmerged funnel output (byte-identical — merge is a no-op without verdicts); Flow A pr-meta carries verdicts (incl. empty-verdicts case); publishReview merge before funnel with gates/summary/dry-run on fullSet; sarif count == merged; F15 marker counts on the merged set (omitted reflects post-merge top-N cut); Flow B twin via pr-meta verdicts fixture + missing-key silent passthrough; agent duplicates unmerged; high+warning gate-equivalence; no-LLM exact note via `note()`.
   - `tests/diff.test.ts`: pr-meta verdicts round-trip (unknown keys still lenient).
   - F15 compatibility: existing F15 tests run unchanged (assert in the report, no new tests).
 
