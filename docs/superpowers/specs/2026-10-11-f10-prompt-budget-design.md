@@ -54,18 +54,18 @@ skipped-files note, and section framing are accounted for automatically.
 ```yaml
 # action.yml, beside max_diff_chars
 max_prompt_chars:
-  description: "Maximum UTF-8 bytes for the assembled single-shot LLM user message (diff + fast findings + linked-issue context, excluding the fixed system prompt). Requests that stay over budget after bounded cuts are skipped with a warning. Note: max_diff_chars is counted in UTF-16 code units, not bytes."
+  description: "Maximum UTF-8 bytes for the assembled single-shot LLM user message: diff text, fast-findings JSON, linked-issue context, section headers, and the skipped-files note (the fixed ~1.5 KB system prompt is excluded). Requests that stay over budget after bounded cuts are skipped with a warning. Note: max_diff_chars is counted in UTF-16 code units, not bytes."
   required: false
   default: "120000"
 ```
 
 `ActionInputs.maxPromptChars: number` (required, like `maxDiffChars`) via
 `readInt("max_prompt_chars", 120000, 1)`. README documents it beside
-`max_diff_chars` with the unit note. The three typed `ActionInputs` literals
-(`tests/main.test.ts:173`, `tests/evals/harness.ts:32`,
-`tests/evals-live/live-manual.test.ts:45`) gain the field — listed as plan change
-sites. Budget covers the user message only; the fixed system prompt (~2 KB) is
-excluded by design (stated, not counted).
+`max_diff_chars` with the unit note. The two typed `ActionInputs` literals in the
+tracked suite (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`) gain the field —
+listed as plan change sites. Budget covers the user message only; the fixed system
+prompt (~1.5 KB, plus ~400 B agent addendum on that path) is excluded by design
+(stated, not counted).
 
 ### Budget enforcement
 
@@ -79,29 +79,29 @@ budgetPrompt(
   issueBody: string | undefined,
   skipped: string[],
   budget: number,
-): { fast: Finding[]; issueBody: string | undefined; skipped: string[]; findingsOmitted: number }
+): { fast: Finding[]; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean }
 ```
 
 It takes the same structured regions `buildMessages` renders (never string surgery
-on the assembled message — `buildMessages` stays pure and signature-stable), applies
-the cuts below, and the caller re-renders via the unchanged `buildMessages`, then
-appends the omission prose line when `findingsOmitted > 0`:
+on the assembled message). `buildMessages` gains one optional trailing parameter,
+`omitted: number = 0`, rendering the prose line after the findings JSON when > 0:
 
 ```
 Omitted <M> fast finding(s) to fit the prompt budget.
 ```
 
-(a prose line after the findings array, mirroring the existing `## Diff budget note`
-pattern — the findings JSON stays homogeneous). Both the single-shot (`:530`) and
-agent-mode (`:576`) assembly sites share the helper for the initial message; agent
-tool-round accumulation is F11 and out of scope (no agent-path budget test).
+(still a pure function; existing 4-arg callers and tests are unaffected). The caller
+re-renders via the unchanged-shape `buildMessages(..., omitted)`; measurement happens
+on that final string, so the omission line is inside the budget. Both the single-shot
+(`:530`) and agent-mode (`:576`, threading its `{ maxTurns }` through) assembly sites
+share the helper for the initial message; agent tool-round accumulation is F11 and
+out of scope (no agent-path budget test). Ordering within the slow path is unchanged:
+key/model/endpoint checks and `checkModelListed` (`:520`) run first, then assembly +
+budget, then the probe call — "no LLM call" holds either way.
 
 Cut order, each leaving its explicit record:
 
-1. **Linked-issue context**: byte-truncate the neutralised issue text with a
-   trailing `…[issue context truncated to fit the prompt budget]` marker, keeping
-   the `<linked-issue>` tags balanced (marker inside the block). The cut is
-   code-point-safe (surrogate-safe, reusing the existing cut helper approach).
+1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + markerReserve)`, all in bytes on the assembled regions. Truncate the neutralised issue text to the allowance with a trailing `…[issue context truncated to fit the prompt budget]` marker, keeping the `<linked-issue>` tags balanced (marker inside the block). When the allowance cannot fit marker + tags (~100 bytes), drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling).
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
@@ -129,7 +129,7 @@ Prompt and both artifact writes (`:805` early, `:822` merged — re-sanitizing i
 idempotent) then share identical pre-sanitized evidence. The deterministic eval
 fixtures carry clean synthetic data (no control characters, short fields, safe
 paths), which `sanitizeFinding` passes through unchanged — the eval suite staying
-green proves the identity on fixtures (required verification). `redactFindings`
+green proves the identity on fixtures (required verification). Early-artifact note: `:805` changes from `redact(raw)` to `redact(sanitize(raw))` — a secret straddling the 2,000-code-point `MSG_CAP` now persists partially there, exactly the straddle exposure `:822` already had (stated, not hidden). `redactFindings`
 ordering (F02) is untouched, and the prompt path stays unredacted (pre-existing;
 stated explicitly, out of scope).
 
@@ -141,16 +141,23 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 `MSG_CAP` bounds each finding and the overflow needs many findings or a small budget):
 
 - Oversized issue body truncates with the marker; tags stay balanced; rest intact.
+- Issue block dropped when the allowance cannot fit marker + tags (tiny budget + issue → `issueDropped`, `issueBody` undefined, review proceeds without issue context).
 - Fast-findings overflow drops whole tail findings with an exact omitted count rendered
-  as the prose line; the surviving JSON parses.
+  as the prose line after the findings JSON; the surviving JSON parses.
 - Diff is never cut below `maxDiffChars` (over-budget fixture with maxed diff →
   slow-path skip, not a cut diff).
 - Still-over-budget-after-cuts skips with the size-naming warning; no LLM call.
+  Fixture: ASCII diff at default `maxDiffChars` scale with `maxPromptChars: 1000`
+  (diff section alone exceeds the budget — deterministic, no multibyte needed).
+- Multibyte floor: CJK-heavy diff at 60,000 UTF-16 units (~180,000 bytes) with default
+  120,000-byte budget skips — this is intended default-config behavior for
+  non-ASCII-heavy PRs, pinned so the unit fix cannot regress.
+- Skipped-files cap: >20 skipped paths render 20 + the `…and <N> more` line.
+- `tests/inputs.test.ts`: `maxPromptChars` defaults to 120,000; small/zero/negative
+  values are floored by `readInt` (floor 1); non-numeric rejected like its neighbors.
 - Control characters / over-long fields in fast findings are stripped/capped in the
   captured prompt (pre-LLM sanitization).
-- `ActionInputs` fixture updates (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`,
-  `tests/evals-live/live-manual.test.ts:45` — the last is untracked throwaway; update
-  only if touched).
+- `ActionInputs` fixture updates (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`).
 - Default 120,000 leaves all existing suite fixtures untouched; full eval suite green
   (sanitize identity on fixtures).
 
