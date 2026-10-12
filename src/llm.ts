@@ -806,12 +806,17 @@ export async function callWithProbeAgent(
     maxSeconds: o.maxSeconds,
   };
 
+  // One absolute deadline per probe invocation: every probed style shares
+  // it instead of restarting the clock (real-clock; the agent loop derives
+  // per-call timeouts from it).
+  const deadlineMs = Date.now() + o.maxSeconds * 1000;
+
   const runStyle = async (style: ResolvedApiStyle) => {
     const ep = buildEndpointForStyle(provider, model, baseUrl, key, style, o.prNumber ?? null, o.userBase ?? false);
     const outcome = await runAgent(
       conv,
       toolCtx,
-      { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds },
+      { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, deadlineMs },
       { call: agentCallFor(ep, agentOpts), log: core.info },
     );
     return { outcome, via: style };

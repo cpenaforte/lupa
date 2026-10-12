@@ -12,13 +12,15 @@ export interface AgentBudget {
   maxResultBytes?: number;
   maxTotalBytes?: number;
   maxCallsPerTurn?: number;
+  /** Absolute epoch-ms deadline; when present runAgent uses it verbatim. */
+  deadlineMs?: number;
 }
 
 export interface AgentHooks {
   call: (
     conv: Conversation,
     flags: { allowTools: boolean; allowFormat: boolean },
-    callOpts: { timeoutSeconds: number },
+    callOpts: { timeoutSeconds: number; deadlineMs: number },
   ) => Promise<AgentReply>;
   log: (msg: string) => void;
   clock?: () => number;
@@ -41,6 +43,10 @@ const REPAIR_NOTE =
 const TIMEOUT_DETAIL = "agent budget exhausted";
 const NO_TOOLS = { allowTools: false, allowFormat: true } as const;
 const WITH_TOOLS = { allowTools: true, allowFormat: false } as const;
+/** Byte length of the "\n[truncated]" marker: below this no content output fits. */
+const MARKER_BYTES = 12;
+/** Backstop envelope replacing over-cap or corrupt tool output (65 B, valid JSON). */
+const OVER_BUDGET_ENVELOPE = '{"error":"tool result exceeded the byte budget","truncated":true}';
 
 function statusOf(result: LlmResult): number | undefined {
   return !result.ok && result.reason === "http-error" ? result.status : undefined;
@@ -61,27 +67,19 @@ function tryParseFinal(text: string): LlmResult {
 }
 
 /**
- * Cut `output` to at most `maxResultBytes` UTF-8 bytes without splitting a
- * code point: binary-search the longest string prefix whose UTF-8 byte
- * length fits, then step back if the cut lands inside a surrogate pair
- * (mirrors `codePointSafeCut` in agent-tools.ts). A raw byte cut could
- * split a multibyte sequence and decode to U+FFFD.
+ * Backstop for tool output: output that parses as JSON and fits in
+ * `maxBytes` UTF-8 bytes passes through unchanged; over-cap or corrupt
+ * (non-JSON) output is replaced with a fixed error envelope so the model
+ * always sees valid JSON within the byte allowance.
  */
-function capOutput(output: string, maxResultBytes: number): string {
-  if (Buffer.byteLength(output, "utf8") <= maxResultBytes) return output;
-  let lo = 0;
-  let hi = output.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(output.slice(0, mid), "utf8") <= maxResultBytes) lo = mid;
-    else hi = mid - 1;
+export function capToolResult(output: string, maxBytes: number): string {
+  try {
+    JSON.parse(output);
+  } catch {
+    return OVER_BUDGET_ENVELOPE;
   }
-  let cut = lo;
-  if (cut > 0 && cut < output.length) {
-    const code = output.charCodeAt(cut);
-    if (code >= 0xdc00 && code <= 0xdfff) cut -= 1;
-  }
-  return output.slice(0, cut) + "\n[truncated]";
+  if (Buffer.byteLength(output, "utf8") <= maxBytes) return output;
+  return OVER_BUDGET_ENVELOPE;
 }
 
 export async function runAgent(
@@ -92,7 +90,7 @@ export async function runAgent(
 ): Promise<AgentOutcome> {
   const clock = hooks.clock ?? Date.now;
   const start = clock();
-  const deadline = start + budget.maxSeconds * 1000;
+  const deadline = budget.deadlineMs ?? start + budget.maxSeconds * 1000;
   const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
   const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
   const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
@@ -112,12 +110,42 @@ export async function runAgent(
     hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1000}s`);
     return { result, stop, probeAdvance, toolsUnsupported, turns, calls, bytes, elapsedMs: ms };
   };
-  const timeoutFor = (remaining: number): number => Math.min(budget.timeoutSeconds, Math.ceil(remaining / 1000));
+  const timeoutFor = (remaining: number): number =>
+    Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)));
   const timedOut = (): AgentOutcome | null => {
     if (deadline - clock() < 10_000) {
       return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
     }
     return null;
+  };
+  const timeoutLlmResult = (): LlmResult => ({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL });
+  const timeoutReply = (): AgentReply => ({ ok: false, result: timeoutLlmResult() });
+
+  /**
+   * Races one model call against the absolute deadline. `nowMs` is passed in
+   * from the already-read clock values at each call site (never read here).
+   * `ms <= 0` returns the timeout result WITHOUT invoking `hooks.call`; else
+   * a real-timer fallback resolves the same timeout result, the timer is
+   * cleared on settle, and the dangling inner promise gets a noop catch.
+   */
+  const callWithDeadline = (
+    flags: { allowTools: boolean; allowFormat: boolean },
+    opts: { timeoutSeconds: number; deadlineMs: number },
+    nowMs: number,
+  ): Promise<{ reply: AgentReply; raced: boolean }> => {
+    const ms = deadline - nowMs;
+    if (ms <= 0) return Promise.resolve({ reply: timeoutReply(), raced: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutP = new Promise<{ reply: AgentReply; raced: boolean }>((resolve) => {
+      timer = setTimeout(() => resolve({ reply: timeoutReply(), raced: true }), ms);
+    });
+    const inner = hooks.call(conv, flags, opts);
+    // Adapters resolve by contract and never reject; this is timer hygiene
+    // for the dangling promise after a race win.
+    inner.then(undefined, () => {});
+    return Promise.race([inner.then((reply) => ({ reply, raced: false as const })), timeoutP]).finally(() => {
+      clearTimeout(timer);
+    });
   };
 
   const appendAssistant = (reply: { text: string; toolCalls: ToolCall[]; rawItems?: unknown[] }): void => {
@@ -133,12 +161,15 @@ export async function runAgent(
     const expired = timedOut();
     if (expired) return expired;
     const remaining = deadline - clock();
-    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes;
+    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
     const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
     if (forced) turnsArr.push({ role: "user", text: BUDGET_NOTE });
     const turnStart = clock();
     const turnIndex = turns;
-    const reply = await hooks.call(conv, flags, { timeoutSeconds: timeoutFor(remaining) });
+    const nowMs = deadline - remaining;
+    const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
+    if (first.raced) return finish(timeoutLlmResult(), "budget", false);
+    const reply = first.reply;
 
     if (!reply.ok) {
       const status = statusOf(reply.result);
@@ -148,7 +179,14 @@ export async function runAgent(
         if (status === 400) {
           const retryExpired = timedOut();
           if (retryExpired) return retryExpired;
-          const retry = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+          const retryRemaining = deadline - clock();
+          const retried = await callWithDeadline(
+            { ...NO_TOOLS },
+            { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline },
+            deadline - retryRemaining,
+          );
+          if (retried.raced) return finish(timeoutLlmResult(), "budget", false);
+          const retry = retried.reply;
           if (!retry.ok) {
             const s2 = statusOf(retry.result);
             toolsUnsupported = true;
@@ -164,7 +202,14 @@ export async function runAgent(
           turnsArr.push({ role: "user", text: REPAIR_NOTE });
           const repairExpired = timedOut();
           if (repairExpired) return repairExpired;
-          const fixed = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+          const repairRemaining = deadline - clock();
+          const repaired = await callWithDeadline(
+            { ...NO_TOOLS },
+            { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline },
+            deadline - repairRemaining,
+          );
+          if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
+          const fixed = repaired.reply;
           if (!fixed.ok) {
             toolsUnsupported = true;
             return finish(fixed.result, "error", false);
@@ -204,7 +249,14 @@ export async function runAgent(
       const repairExpired = timedOut();
       if (repairExpired) return repairExpired;
       const repairStart = clock();
-      const fixed = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+      const repairRemaining = deadline - clock();
+      const repaired = await callWithDeadline(
+        { ...NO_TOOLS },
+        { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline },
+        deadline - repairRemaining,
+      );
+      if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
+      const fixed = repaired.reply;
       if (!fixed.ok) return finish(fixed.result, "error", false);
       appendAssistant(fixed);
       turns += 1;
@@ -219,21 +271,44 @@ export async function runAgent(
     let turnBytes = 0;
     for (let i = 0; i < reply.toolCalls.length; i++) {
       const call = reply.toolCalls[i]!;
-      let output: string;
-      let isError: boolean;
-      if (i < maxCalls) {
-        const res = await executeTool(call.name, call.args, toolCtx);
-        output = res.output;
-        isError = res.isError;
-        calls += 1;
-      } else {
-        output = `{"error":"too many tool calls in one turn (max ${maxCalls})"}`;
-        isError = true;
+      if (i >= maxCalls) {
+        // Unchanged behavior, bookkeeping-excluded: no byte counting.
+        turnsArr.push({
+          role: "tool",
+          id: call.id,
+          name: call.name,
+          output: `{"error":"too many tool calls in one turn (max ${maxCalls})"}`,
+          isError: true,
+        });
+        continue;
       }
-      output = capOutput(output, maxResultBytes);
-      const n = Buffer.byteLength(output, "utf8");
-      bytes += n;
-      turnBytes += n;
+      const remainingBytes = maxTotalBytes - bytes;
+      if (remainingBytes < MARKER_BYTES) {
+        // Below this no content output can fit: skip execution without
+        // incrementing `calls`; the record itself is bookkeeping-excluded.
+        turnsArr.push({
+          role: "tool",
+          id: call.id,
+          name: call.name,
+          output: `{"error":"tool result budget exhausted (max ${maxTotalBytes} bytes)"}`,
+          isError: true,
+        });
+        continue;
+      }
+      const effective = Math.min(maxResultBytes, remainingBytes);
+      const res = await executeTool(call.name, call.args, toolCtx, {
+        deadlineMs: Date.now() + Math.max(0, deadline - clock()),
+        maxResultBytes: Math.min(maxResultBytes, remainingBytes),
+      });
+      calls += 1;
+      const output = capToolResult(res.output, effective);
+      const replaced = output !== res.output;
+      const isError = res.isError || replaced;
+      if (!replaced) {
+        const n = Buffer.byteLength(output, "utf8");
+        bytes += n;
+        turnBytes += n;
+      }
       turnsArr.push(
         isError
           ? { role: "tool", id: call.id, name: call.name, output, isError: true }

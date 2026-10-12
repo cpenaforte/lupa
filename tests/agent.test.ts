@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentReply } from "../src/llm.js";
 import type { Conversation, ToolCall } from "../src/agent-types.js";
 import type { ToolContext } from "../src/agent-tools.js";
-import { runAgent } from "../src/agent.js";
+import { capToolResult, runAgent } from "../src/agent.js";
 import type { AgentBudget, AgentHooks } from "../src/agent.js";
 
 const created: string[] = [];
@@ -39,7 +39,7 @@ interface Harness {
   conv: Conversation;
   logs: string[];
   seenFlags: Array<{ allowTools: boolean; allowFormat: boolean }>;
-  seenOpts: Array<{ timeoutSeconds: number }>;
+  seenOpts: Array<{ timeoutSeconds: number; deadlineMs: number }>;
   advance: (ms: number) => void;
   ncalls: () => number;
 }
@@ -48,7 +48,7 @@ function harness(root: string, replies: AgentReply[], budgetPatch?: Partial<Agen
   let now = 1_000_000;
   const logs: string[] = [];
   const seenFlags: Array<{ allowTools: boolean; allowFormat: boolean }> = [];
-  const seenOpts: Array<{ timeoutSeconds: number }> = [];
+  const seenOpts: Array<{ timeoutSeconds: number; deadlineMs: number }> = [];
   let i = 0;
   const budget: AgentBudget = { maxTurns: 5, maxSeconds: 120, timeoutSeconds: 60, ...(budgetPatch ?? {}) };
   const hooks: AgentHooks = {
@@ -138,14 +138,14 @@ describe("runAgent", () => {
   it("forced final on bytes budget stops executing tools", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "hello\n");
-    const h = harness(root, [okText("", [tc("1", "read_file", { path: "a.txt" })]), okText(FINDINGS)], {
+    const h = harness(root, [okText(FINDINGS)], {
       maxTotalBytes: 10,
     });
     const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
     expect(out.result).toEqual({ ok: true, findings: [] });
     expect(out.stop).toBe("budget");
-    expect(out.calls).toBe(1);
-    expect(h.seenFlags[1]).toEqual({ allowTools: false, allowFormat: true });
+    expect(out.calls).toBe(0);
+    expect(h.seenFlags[0]).toEqual({ allowTools: false, allowFormat: true });
     const notes = h.conv.turns!.filter((t) => t.role === "user");
     expect(notes).toEqual([{ role: "user", text: BUDGET_NOTE }]);
   });
@@ -167,7 +167,7 @@ describe("runAgent", () => {
     const out2 = await runAgent(h2.conv, h2.toolCtx, h2.budget, h2.hooks);
     expect(out2.result).toEqual({ ok: true, findings: [] });
     expect(out2.stop).toBe("budget");
-    expect(h2.seenOpts[0]).toEqual({ timeoutSeconds: 50 });
+    expect(h2.seenOpts[0]).toEqual({ timeoutSeconds: 50, deadlineMs: 1_060_000 });
   });
 
   it("repairs invalid final JSON once, then fails invalid-json", async () => {
@@ -264,24 +264,24 @@ describe("runAgent", () => {
     expect(h.ncalls()).toBe(1);
   });
 
-  it("truncates an over-cap multibyte tool result with no U+FFFD or lone surrogates", async () => {
-    const root = tempRoot();
-    writeFileSync(join(root, "emoji.txt"), "😀".repeat(50) + "\n");
-    const h = harness(root, [okText("", [tc("1", "read_file", { path: "emoji.txt" })]), okText(FINDINGS)], {
-      // Byte 96 of the read_file JSON is the first emoji (4-byte
-      // sequence), so a 102-byte cap cuts mid-sequence under a raw byte cut.
-      maxResultBytes: 102,
+  describe("capToolResult", () => {
+    const ENVELOPE = '{"error":"tool result exceeded the byte budget","truncated":true}';
+    it("passes small valid JSON through unchanged", () => {
+      expect(capToolResult('{"a":1}', 100)).toBe('{"a":1}');
     });
-    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
-    expect(out.result).toEqual({ ok: true, findings: [] });
-    expect(out.stop).toBe("final");
-    const toolTurn = h.conv.turns!.find((t) => t.role === "tool") as { output: string };
-    expect(toolTurn.output.endsWith("[truncated]")).toBe(true);
-    expect(toolTurn.output.endsWith("\n[truncated]")).toBe(true);
-    expect(toolTurn.output).not.toContain("�");
-    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(toolTurn.output)).toBe(false);
-    const prefix = toolTurn.output.slice(0, toolTurn.output.length - "\n[truncated]".length);
-    expect(Buffer.byteLength(prefix, "utf8")).toBeLessThanOrEqual(102);
+    it("replaces over-cap JSON with the exact 65-byte envelope", () => {
+      expect(Buffer.byteLength(ENVELOPE, "utf8")).toBe(65);
+      const big = JSON.stringify({ content: "x".repeat(200) });
+      expect(capToolResult(big, 50)).toBe(ENVELOPE);
+    });
+    it("replaces invalid JSON with the exact envelope", () => {
+      expect(capToolResult("not json", 1000)).toBe(ENVELOPE);
+    });
+    it("replaces over-cap multibyte output with the envelope and no U+FFFD", () => {
+      const out = capToolResult("😀".repeat(50), 10);
+      expect(out).toBe(ENVELOPE);
+      expect(out).not.toContain("�");
+    });
   });
 
   it("logs the exact turn and done lines", async () => {
@@ -297,5 +297,155 @@ describe("runAgent", () => {
       `agent turn 1: tools=[] results_bytes=0 ms=0`,
       `agent done: turns=2 calls=1 bytes=${b} stop=final elapsed=0s`,
     ]);
+  });
+
+  it("pre-expired deadlineMs stops before the first turn without calling", async () => {
+    const root = tempRoot();
+    const h = harness(root, [okText(FINDINGS)], { deadlineMs: 999_999 });
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: false, reason: "timeout", detail: "agent budget exhausted" });
+    expect(out.stop).toBe("budget");
+    expect(out.probeAdvance).toBe(false);
+    expect(h.ncalls()).toBe(0);
+  });
+
+  it("an already-passed deadline skips hooks.call instead of racing it", async () => {
+    const root = tempRoot();
+    const h = harness(root, [okText(FINDINGS)], { maxSeconds: 30, deadlineMs: 1_030_000 });
+    // start, loop-top check (30s remain, no timeout), remaining read (past
+    // the deadline), then sticks on the last value.
+    const scripted = [1_000_000, 1_000_000, 1_031_000];
+    h.hooks.clock = () => (scripted.length > 1 ? scripted.shift()! : scripted[0]!);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: false, reason: "timeout", detail: "agent budget exhausted" });
+    expect(out.stop).toBe("budget");
+    expect(out.probeAdvance).toBe(false);
+    expect(h.ncalls()).toBe(0);
+  });
+
+  it("a call in flight when the deadline passes loses the race with stop=budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = tempRoot();
+      const h = harness(root, [okText(FINDINGS)], { maxSeconds: 30 });
+      h.hooks.call = () => new Promise<AgentReply>(() => {});
+      const p = runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const out = await p;
+      expect(out.result).toEqual({ ok: false, reason: "timeout", detail: "agent budget exhausted" });
+      expect(out.stop).toBe("budget");
+      expect(out.probeAdvance).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a far-future deadline leaves normal handling untouched", async () => {
+    const root = tempRoot();
+    const h = harness(root, [okText(FINDINGS)], { maxSeconds: 3600 });
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: true, findings: [] });
+    expect(out.stop).toBe("final");
+    expect(h.seenOpts[0]).toEqual({ timeoutSeconds: 60, deadlineMs: 4_600_000 });
+  });
+
+  it("floors (not ceils) the per-call timeout with 10.5s remaining", async () => {
+    const root = tempRoot();
+    const h = harness(root, [okText(FINDINGS)], { maxSeconds: 60, timeoutSeconds: 120 });
+    // Start reads the base time; every later read sees 49.5s elapsed, so the
+    // call observes 10.5s remaining out of the 60s budget.
+    let reads = 0;
+    h.hooks.clock = () => (++reads <= 1 ? 1_000_000 : 1_049_500);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: true, findings: [] });
+    expect(out.stop).toBe("final");
+    expect(h.seenOpts[0]).toEqual({ timeoutSeconds: 10, deadlineMs: 1_060_000 });
+  });
+
+  it("a same-turn tool budget exhaustion records the exact error without incrementing calls", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(
+      root,
+      [
+        okText("", [tc("1", "read_file", { path: "a.txt" }), tc("2", "read_file", { path: "a.txt" })]),
+        okText(FINDINGS),
+      ],
+      { maxTotalBytes: 110 },
+    );
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.calls).toBe(1);
+    expect(out.bytes).toBe(99);
+    expect(out.stop).toBe("budget");
+    const toolTurns = h.conv.turns!.filter((t) => t.role === "tool");
+    expect(toolTurns).toHaveLength(2);
+    expect(Buffer.byteLength((toolTurns[0] as { output: string }).output, "utf8")).toBe(99);
+    expect(toolTurns[1]).toEqual({
+      role: "tool",
+      id: "2",
+      name: "read_file",
+      output: '{"error":"tool result budget exhausted (max 110 bytes)"}',
+      isError: true,
+    });
+    const notes = h.conv.turns!.filter((t) => t.role === "user");
+    expect(notes).toEqual([{ role: "user", text: BUDGET_NOTE }]);
+  });
+
+  it("an over-effective-cap tool result is replaced by the backstop envelope", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(root, [okText("", [tc("1", "read_file", { path: "a.txt" })]), okText(FINDINGS)], {
+      maxTotalBytes: 50,
+    });
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: true, findings: [] });
+    expect(out.stop).toBe("final");
+    expect(out.bytes).toBe(0);
+    expect(out.calls).toBe(1);
+    const toolTurns = h.conv.turns!.filter((t) => t.role === "tool");
+    expect(toolTurns).toEqual([
+      {
+        role: "tool",
+        id: "1",
+        name: "read_file",
+        output: '{"error":"tool result exceeded the byte budget","truncated":true}',
+        isError: true,
+      },
+    ]);
+  });
+
+  it("a sub-marker residue forces the next round instead of executing tools", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(root, [okText("", [tc("1", "read_file", { path: "a.txt" })]), okText(FINDINGS)], {
+      maxTotalBytes: 110,
+    });
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: true, findings: [] });
+    expect(out.stop).toBe("budget");
+    expect(out.bytes).toBe(99);
+    expect(out.calls).toBe(1);
+    expect(h.seenFlags[1]).toEqual({ allowTools: false, allowFormat: true });
+    const notes = h.conv.turns!.filter((t) => t.role === "user");
+    expect(notes).toEqual([{ role: "user", text: BUDGET_NOTE }]);
+  });
+
+  it("mid-conversation expiry stops the loop after the current turn", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(root, [okText("", [tc("1", "read_file", { path: "a.txt" })]), okText(FINDINGS)], {
+      maxSeconds: 30,
+    });
+    const inner = h.hooks.call;
+    let n = 0;
+    h.hooks.call = async (conv, flags, callOpts) => {
+      if (n++ === 0) h.advance(40_000);
+      return inner(conv, flags, callOpts);
+    };
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: false, reason: "timeout", detail: "agent budget exhausted" });
+    expect(out.stop).toBe("budget");
+    expect(out.probeAdvance).toBe(false);
+    expect(h.ncalls()).toBe(1);
   });
 });

@@ -27050,6 +27050,8 @@ var REPAIR_NOTE = "Your previous message was not valid JSON. Respond with ONLY t
 var TIMEOUT_DETAIL = "agent budget exhausted";
 var NO_TOOLS = { allowTools: false, allowFormat: true };
 var WITH_TOOLS = { allowTools: true, allowFormat: false };
+var MARKER_BYTES = 12;
+var OVER_BUDGET_ENVELOPE = '{"error":"tool result exceeded the byte budget","truncated":true}';
 function statusOf2(result) {
   return !result.ok && result.reason === "http-error" ? result.status : void 0;
 }
@@ -27066,30 +27068,20 @@ function tryParseFinal(text) {
   }
   return { ok: true, findings };
 }
-function capOutput(output, maxResultBytes) {
-  if (Buffer.byteLength(output, "utf8") <= maxResultBytes)
+function capToolResult(output, maxBytes) {
+  try {
+    JSON.parse(output);
+  } catch {
+    return OVER_BUDGET_ENVELOPE;
+  }
+  if (Buffer.byteLength(output, "utf8") <= maxBytes)
     return output;
-  let lo = 0;
-  let hi = output.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(output.slice(0, mid), "utf8") <= maxResultBytes)
-      lo = mid;
-    else
-      hi = mid - 1;
-  }
-  let cut = lo;
-  if (cut > 0 && cut < output.length) {
-    const code = output.charCodeAt(cut);
-    if (code >= 56320 && code <= 57343)
-      cut -= 1;
-  }
-  return output.slice(0, cut) + "\n[truncated]";
+  return OVER_BUDGET_ENVELOPE;
 }
 async function runAgent(conv, toolCtx, budget, hooks) {
   const clock = hooks.clock ?? Date.now;
   const start = clock();
-  const deadline = start + budget.maxSeconds * 1e3;
+  const deadline = budget.deadlineMs ?? start + budget.maxSeconds * 1e3;
   const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
   const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
   const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
@@ -27104,12 +27096,29 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1e3}s`);
     return { result, stop, probeAdvance, toolsUnsupported, turns, calls, bytes, elapsedMs: ms };
   };
-  const timeoutFor = (remaining) => Math.min(budget.timeoutSeconds, Math.ceil(remaining / 1e3));
+  const timeoutFor = (remaining) => Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1e3)));
   const timedOut = () => {
     if (deadline - clock() < 1e4) {
       return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
     }
     return null;
+  };
+  const timeoutLlmResult = () => ({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL });
+  const timeoutReply = () => ({ ok: false, result: timeoutLlmResult() });
+  const callWithDeadline = (flags, opts, nowMs) => {
+    const ms = deadline - nowMs;
+    if (ms <= 0)
+      return Promise.resolve({ reply: timeoutReply(), raced: true });
+    let timer;
+    const timeoutP = new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2({ reply: timeoutReply(), raced: true }), ms);
+    });
+    const inner = hooks.call(conv, flags, opts);
+    inner.then(void 0, () => {
+    });
+    return Promise.race([inner.then((reply) => ({ reply, raced: false })), timeoutP]).finally(() => {
+      clearTimeout(timer);
+    });
   };
   const appendAssistant = (reply) => {
     turnsArr.push({
@@ -27124,13 +27133,17 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     if (expired)
       return expired;
     const remaining = deadline - clock();
-    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes;
+    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
     const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
     if (forced)
       turnsArr.push({ role: "user", text: BUDGET_NOTE });
     const turnStart = clock();
     const turnIndex = turns;
-    const reply = await hooks.call(conv, flags, { timeoutSeconds: timeoutFor(remaining) });
+    const nowMs = deadline - remaining;
+    const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
+    if (first.raced)
+      return finish(timeoutLlmResult(), "budget", false);
+    const reply = first.reply;
     if (!reply.ok) {
       const status = statusOf2(reply.result);
       if (turns === 0 && !forced) {
@@ -27138,7 +27151,11 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           const retryExpired = timedOut();
           if (retryExpired)
             return retryExpired;
-          const retry = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+          const retryRemaining = deadline - clock();
+          const retried = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline }, deadline - retryRemaining);
+          if (retried.raced)
+            return finish(timeoutLlmResult(), "budget", false);
+          const retry = retried.reply;
           if (!retry.ok) {
             const s2 = statusOf2(retry.result);
             toolsUnsupported = true;
@@ -27155,7 +27172,11 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           const repairExpired = timedOut();
           if (repairExpired)
             return repairExpired;
-          const fixed = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+          const repairRemaining = deadline - clock();
+          const repaired = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline }, deadline - repairRemaining);
+          if (repaired.raced)
+            return finish(timeoutLlmResult(), "budget", false);
+          const fixed = repaired.reply;
           if (!fixed.ok) {
             toolsUnsupported = true;
             return finish(fixed.result, "error", false);
@@ -27197,7 +27218,11 @@ async function runAgent(conv, toolCtx, budget, hooks) {
       if (repairExpired)
         return repairExpired;
       const repairStart = clock();
-      const fixed = await hooks.call(conv, { ...NO_TOOLS }, { timeoutSeconds: timeoutFor(deadline - clock()) });
+      const repairRemaining = deadline - clock();
+      const repaired = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline }, deadline - repairRemaining);
+      if (repaired.raced)
+        return finish(timeoutLlmResult(), "budget", false);
+      const fixed = repaired.reply;
       if (!fixed.ok)
         return finish(fixed.result, "error", false);
       appendAssistant(fixed);
@@ -27213,21 +27238,41 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     let turnBytes = 0;
     for (let i = 0; i < reply.toolCalls.length; i++) {
       const call = reply.toolCalls[i];
-      let output;
-      let isError;
-      if (i < maxCalls) {
-        const res = await executeTool(call.name, call.args, toolCtx);
-        output = res.output;
-        isError = res.isError;
-        calls += 1;
-      } else {
-        output = `{"error":"too many tool calls in one turn (max ${maxCalls})"}`;
-        isError = true;
+      if (i >= maxCalls) {
+        turnsArr.push({
+          role: "tool",
+          id: call.id,
+          name: call.name,
+          output: `{"error":"too many tool calls in one turn (max ${maxCalls})"}`,
+          isError: true
+        });
+        continue;
       }
-      output = capOutput(output, maxResultBytes);
-      const n = Buffer.byteLength(output, "utf8");
-      bytes += n;
-      turnBytes += n;
+      const remainingBytes = maxTotalBytes - bytes;
+      if (remainingBytes < MARKER_BYTES) {
+        turnsArr.push({
+          role: "tool",
+          id: call.id,
+          name: call.name,
+          output: `{"error":"tool result budget exhausted (max ${maxTotalBytes} bytes)"}`,
+          isError: true
+        });
+        continue;
+      }
+      const effective = Math.min(maxResultBytes, remainingBytes);
+      const res = await executeTool(call.name, call.args, toolCtx, {
+        deadlineMs: Date.now() + Math.max(0, deadline - clock()),
+        maxResultBytes: Math.min(maxResultBytes, remainingBytes)
+      });
+      calls += 1;
+      const output = capToolResult(res.output, effective);
+      const replaced = output !== res.output;
+      const isError = res.isError || replaced;
+      if (!replaced) {
+        const n = Buffer.byteLength(output, "utf8");
+        bytes += n;
+        turnBytes += n;
+      }
       turnsArr.push(isError ? { role: "tool", id: call.id, name: call.name, output, isError: true } : { role: "tool", id: call.id, name: call.name, output });
     }
     hooks.log(`agent turn ${turnIndex}: tools=[${reply.toolCalls.map((t) => t.name).join(",")}] results_bytes=${turnBytes} ms=${clock() - turnStart}`);
@@ -27668,9 +27713,10 @@ async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolC
     maxTurns: o.maxTurns,
     maxSeconds: o.maxSeconds
   };
+  const deadlineMs = Date.now() + o.maxSeconds * 1e3;
   const runStyle = async (style) => {
     const ep = buildEndpointForStyle(provider, model, baseUrl2, key, style, o.prNumber ?? null, o.userBase ?? false);
-    const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds }, { call: agentCallFor(ep, agentOpts), log: info });
+    const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, deadlineMs }, { call: agentCallFor(ep, agentOpts), log: info });
     return { outcome, via: style };
   };
   if (explicitStyle !== void 0 && explicitStyle !== "auto") {
