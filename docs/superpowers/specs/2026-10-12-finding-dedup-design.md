@@ -42,21 +42,25 @@ aligned):
 ```ts
 // llm.ts, alongside LlmResult:
 interface DedupVerdicts { pairs: Array<[number, number]>; links: Array<[number, number]> }
-// links: [responsePosition, sentIndex] from per-finding duplicateOf pointers.
-// responsePosition is the 0-based index within the RESPONSE findings array;
-// the merge maps it to all[fast.length + responsePosition].
+// pairs: sent-list indices. links: ABSOLUTE all-list indices
+// [allIndex, sentIndex] — converted at the boundary (slowPath maps each
+// response-relative position r to fast.length + r), so the merge and Flow B
+// consume one index space with no fast count anywhere downstream.
 interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts; … }
 ```
 
 - New sibling parser `parseVerdicts(rawText: string): { verdicts: DedupVerdicts; malformed: number }`
   (`llm.ts`, exported, unit-tested): reads the SAME raw response text as
-  `toFindings` (never the sanitized findings — sanitizers rebuild from known
-  fields and would strip the evidence). Drops unknown indices, self-pairs,
-  dangling pointers, non-pairs, and wrong-length pairs HERE (each drop
-  increments `malformed`); null and absent verdict keys both mean "no
-  verdict" (schema-less providers and the Google no-schema fallback never
-  emit them — that is normal, not malformed). `toFindings`, `sanitizeFinding`,
-  `isFinding`, and the Finding contract are untouched.
+  `toFindings` and returns links response-relative (`[responsePosition,
+  sentIndex]`, 0-based within the response findings array). Drops unknown
+  indices, self-pairs, dangling pointers, non-pairs, and wrong-length pairs
+  HERE (each drop increments `malformed`); null and absent verdict keys both
+  mean "no verdict" (schema-less providers and the Google no-schema fallback
+  never emit them — that is normal, not malformed). `toFindings`,
+  `sanitizeFinding`, `isFinding`, and the Finding contract are untouched.
+  `slowPath` converts to absolute (`allIndex = fast.length +
+  responsePosition`) before returning or persisting — every consumer below
+  sees absolute indices only.
 - Every adapter attaches `verdicts: parseVerdicts(raw)` on the `LlmResult`
   it builds (absent only where there is no raw JSON text); the probe carries
   the WINNING style's result, verdicts included (a schema-caused 400 walks
@@ -96,6 +100,12 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
   have no sent ID to pair with).
 
 ### Deterministic merge (`mergeDuplicates(findings, verdicts)`, `review.ts`, exported)
+
+All indices absolute (pairs are sent indices; links were converted at the
+boundary — the merge performs no offset arithmetic). Shared text caps
+(`MSG_CAP`, `RULE_CAP`, `capText`, `TRUNC_MARK`) move to `fastpath.ts`
+(finding-contract home, no import cycles), with `main.ts` and `review.ts`
+importing them — behavior unchanged.
 
 Merge point: inside `publishReview`, AFTER gate inputs are fixed —
 `eventFor(fullSet)`, `summaryFor(fullSet)`, and the dry-run `high=` count
