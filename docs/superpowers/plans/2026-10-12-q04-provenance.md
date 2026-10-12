@@ -79,8 +79,8 @@ git commit -m "feat: finding source, confidence, and evidence contract"
 ### Task 70: Q04 — LLM structured confidence
 
 **Files:**
-- Modify: `src/prompt.ts` (nullable `confidence` schema + required + single-shot instruction), `src/llm.ts` (`toFindings` assigns `source: "llm"` + carries valid `confidence`, drops invalid field), `src/fastpath.ts` (`stripProvenance` helper), `src/adapters/google.ts` (converted expectation), `src/agent.ts` (strip at `:62-66`), `src/main.ts` (strip on slowPath agent branch)
-- Test: `tests/llm.test.ts` (`:361-370` + `:397`), `tests/probe-routing.test.ts` (`:71,118,154,194,226,324` + `:97-101`), `tests/prompt.test.ts` (`:148` + `:149-151`), `tests/adapters-google.test.ts` (`:550` + converted pins), `tests/adapters-routing.test.ts` (`:142,160,178,197`), `tests/fastpath.test.ts` (`stripProvenance` units)
+- Modify: `src/prompt.ts` (nullable `confidence` schema + required + single-shot instruction), `src/llm.ts` (`toFindings` assigns `source: "llm"` + carries valid `confidence`, drops invalid field; memo branch at `:855-857` strips findings, keeps `verdicts`), `src/fastpath.ts` (`stripProvenance` helper), `src/adapters/google.ts` (converted expectation), `src/agent.ts` (strip at `:62-66`)
+- Test: `tests/llm.test.ts` (`:361-370` + `:397`), `tests/probe-routing.test.ts` (`:71,118,154,194,226,324` + `:97-101`), `tests/prompt.test.ts` (`:148` + `:149-151`), `tests/adapters-google.test.ts` (`:550` + converted pins), `tests/adapters-routing.test.ts` (`:142,160,178,197`), `tests/fastpath.test.ts` (`stripProvenance` units), `tests/agent-probe.test.ts` (`:133-144` only — memo result keeps `verdicts`, findings stripped; all other pins untouched)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
@@ -90,12 +90,13 @@ git commit -m "feat: finding source, confidence, and evidence contract"
 **Exact behavior:**
 - Schema: per-item `confidence: {type: ["integer","null"]}` (NO `prefixItems` pattern — scalar, google-safe), added to item `required`; single-shot instruction names the field, appended at the single-shot invocations only (same gate as the dedup verdict instructions — never the shared `SYSTEM` const, so agent prompts stay byte-identical).
 - `toFindings`: assigns `source: "llm"`, carries safe-integer 0..100 `confidence`, drops invalid values (field only, finding kept).
-- `agent.ts`: shared `stripProvenance()` helper (fastpath.ts — deletes `source`/`confidence`/`evidence`, returns the finding) applied at BOTH agent exit points: after its `toFindings` call (`:62-66`) AND on slowPath's agent branch (covers the probe-memo path that bypasses `toFindings` entirely).
+- `agent.ts`: shared `stripProvenance()` helper (fastpath.ts — deletes `source`/`confidence`/`evidence`, returns the finding) applied at BOTH agent exit points: after its `toFindings` call (`:62-66`) AND on the `llm.ts:855-857` probe-memo branch (findings stripped there, `verdicts` KEPT as a genuine single-shot judgment). `slowPath` needs no strip code (both upstreams arrive clean, and its agent return already carries no verdicts key).
 - Converted-schema expectation gains the nullable confidence (google recursion + `nullable: true`).
 
 - [ ] **Step 1: Write the failing tests**
   - `okChat` extraction: present/absent/malformed (`150`, `"high"`, `3.5` → field dropped, finding kept).
-  - `stripProvenance` units (all-fields/no-fields/partial) + both call sites strip (agent `toFindings` path and slowPath memo path assert no provenance).
+  - `stripProvenance` units (all-fields/no-fields/partial) + both call sites strip (agent `toFindings` path and `llm.ts:857` memo path assert no provenance; memo keeps `verdicts`).
+  - `tests/agent-probe.test.ts:133-144` pin gains `verdicts` (memo result) with stripped findings; all other agent-probe pins untouched.
   - Update pins: llm `:361-370` + `:397` (callLlm gains confidence key), probe-routing ×6 + `:97-101`, prompt `:148` + `:149-151`, google `:550` + converted, adapters-routing `:142,160,178,197`. (`tests/evals/agent.test.ts:61-69` needs NO changes — agent strip keeps those exact pins passing, which proves absence.)
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -115,7 +116,7 @@ Expected: PASS all green (evals after build); build clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/prompt.ts src/llm.ts src/agent.ts src/fastpath.ts src/adapters/google.ts src/main.ts tests/llm.test.ts tests/probe-routing.test.ts tests/prompt.test.ts tests/adapters-google.test.ts tests/adapters-routing.test.ts tests/fastpath.test.ts dist/index.js
+git add src/prompt.ts src/llm.ts src/agent.ts src/fastpath.ts src/adapters/google.ts tests/llm.test.ts tests/probe-routing.test.ts tests/prompt.test.ts tests/adapters-google.test.ts tests/adapters-routing.test.ts tests/fastpath.test.ts tests/agent-probe.test.ts dist/index.js
 git commit -m "feat: LLM structured confidence with agent strip"
 ```
 
@@ -125,7 +126,7 @@ git commit -m "feat: LLM structured confidence with agent strip"
 
 **Files:**
 - Modify: `src/review.ts` (trailer, fallback rows, survivor rules), `src/main.ts` (toSarif properties), `README.md` (provenance section: default chain, conf-50-on-high policy note)
-- Test: `tests/review.test.ts` (trailer/survivor), `tests/main.test.ts` (SARIF/artifact), `tests/readme.test.ts` (section sentences), `tests/fixtures/evals/cases.ts` (`:96` + summary `:275-277` — verify; update iff the trailer renders there)
+- Test: `tests/review.test.ts` (trailer/survivor), `tests/main.test.ts` (SARIF/artifact), `tests/readme.test.ts` (section sentences), `tests/fixtures/evals/cases.ts` (summary `:275-277` gains the `- Source:` fallback row — certain, T69 already updated the `:96` finding literal)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
@@ -146,7 +147,7 @@ git commit -m "feat: LLM structured confidence with agent strip"
   - General-body item rendering with trailer.
   - F15 counts unchanged with provenance present + gate-equivalence (high+warning still gates identically).
   - No-LLM run (scanner provenance present, LLM fields absent) + agent run (absent everywhere).
-  - readme sentences + evals cases verify-or-update.
+  - readme sentences + evals cases summary Source-row update.
 
 - [ ] **Step 2: Run tests to verify they fail**
 

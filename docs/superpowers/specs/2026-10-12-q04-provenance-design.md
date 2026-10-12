@@ -83,11 +83,13 @@ stay stable and short):
   `required` lists, absent stays absent; invalid values drop the FIELD,
   never the finding). Agent-mode findings carry NO provenance via a shared
   `stripProvenance()` helper (fastpath.ts) applied at BOTH agent exit
-  points — after `agent.ts`'s `toFindings` call AND on slowPath's agent
-  branch (which covers the probe-memo path that bypasses `toFindings`
-  entirely). No separate agent schema: required keys constrain the
-  model's output and models emit them (dedup's required verdict keys set
-  this precedent without incident).
+  points — after `agent.ts`'s `toFindings` call AND on the `llm.ts:857`
+  probe-memo branch (which returns single-shot results bypassing `toFindings`
+  strip: findings stripped there, `verdicts` KEPT as a genuine single-shot
+  judgment). `slowPath`'s agent branch already returns findings-only with no
+  verdicts key (verified — no change needed there). No separate agent
+  schema: required keys constrain the model's output and models emit them
+  (dedup's required verdict keys set this precedent without incident).
   revisit with Q01 structured output (seam noted, not built; agent SYSTEM prompt/contract untouched — only the user message carries provenance, intended). Response
   schema, `prompt.test.ts` required pins, and the converted-schema
   expectation update are named per task.
