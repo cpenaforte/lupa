@@ -225,8 +225,12 @@ describe("TOOL_DEFS", () => {
   it("tool descriptions name the prune set", async () => {
     const glob = TOOL_DEFS.find((t) => t.name === "glob")!;
     const grep = TOOL_DEFS.find((t) => t.name === "grep")!;
-    expect(glob.description).toContain("node_modules");
-    expect(grep.description).toContain("node_modules");
+    expect(glob.description).toContain(
+      " Skips dependency directories (node_modules, vendor, target, .venv, venv, __pycache__) and .git.",
+    );
+    expect(grep.description).toContain(
+      " Skips dependency directories (node_modules, vendor, target, .venv, venv, __pycache__) and .git.",
+    );
   });
 });
 
