@@ -91,9 +91,9 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
   (full message + suggestion bodies — the model judges on substantive
   content, never bare IDs or locations). IDs render through
   `budgetPrompt(..., opts?: { withIds?: boolean })` (default off), which the
-  slow path passes as true so ID bytes move the cut point; the
-  agent-mode branch rebuilds its messages without IDs (fewer bytes than
-  measured — still within budget). Tail indices cut by the
+  slow path passes as `{ withIds: !i.llmAgent }` — single-shot measures WITH
+  ID bytes (cut point moves), agent measures exactly as base (no IDs, no
+  rebuild, byte-identical prompts). Tail indices cut by the
   budget are not sendable — verdicts referencing them are unknown by
   construction. Published output is unchanged when no verdicts return; the
   PROMPT gains IDs + verdict instructions ONLY in the single-shot call path
