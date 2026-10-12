@@ -88,14 +88,15 @@ export interface WalkSkipped {
 ### read_file line metadata
 
 `end_line` must describe only *fully visible* lines: after the byte-budget cut, back
-the cut up to the last `\n` (`idx = cut.lastIndexOf("\n"); visible = idx < 0 ? "" : cut.slice(0, idx)`)
+the cut up to the last `\n` (`idx = cut.lastIndexOf("\n"); complete = idx >= 0;
+visible = complete ? cut.slice(0, idx) : cut`)
 — a partial tail line still shows characters the metadata would disown, and paging
 from `end_line + 1` would drop them. No-newline case: when the cut contains no
-`\n` (a single line exceeds the whole budget), `visible` is empty and
-`end_line = start - 1` — no complete line is visible, so resuming at `start`
-re-reads (overlap) rather than skipping, matching the existing `actualEnd`
-convention (`start - 1` when nothing is selected).
-`visibleLines = visible === "" ? 0 : visible.split("\n").length` (the backed-up cut
+`\n` (a single line exceeds the whole budget), `visible` keeps the partial line (the
+agent sees content to act on, e.g. via grep) but `end_line = start - 1` — no complete
+line is visible, so resuming at `start` re-reads (overlap) rather than skipping,
+matching the existing `actualEnd` convention (`start - 1` when nothing is selected).
+`visibleLines = complete ? visible.split("\n").length : 0` (the backed-up cut
 never ends with `\n`, so no boundary over-count), counted over the backed-up portion
 only (excluding the appended `\n[truncated]` marker), and
 `end_line = visibleLines ? start + visibleLines - 1 : start - 1`.
