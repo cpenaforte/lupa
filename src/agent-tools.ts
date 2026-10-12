@@ -11,11 +11,12 @@ export interface ToolRoots {
 
 export interface ToolContext {
   roots: ToolRoots;
-  ensureLinked?: (alias: string) => Promise<{ dir: string; sha: string } | { error: string }>;
+  ensureLinked?: (alias: string, opts?: { deadlineMs?: number }) => Promise<{ dir: string; sha: string } | { error: string }>;
 }
 
 const DRIVE_LETTER = /^[a-zA-Z]:/;
-const TRUNCATION_MARKER = "\n[truncated]";
+export const TRUNCATION_MARKER = "\n[truncated]";
+export const ERROR_MESSAGE_CAP = 2000;
 /** read_file refuses files larger than this (mirrors the grep 1 MiB skip). */
 export const READ_MAX_BYTES = 1024 * 1024;
 
@@ -92,33 +93,45 @@ export function resolveWithinRoot(root: string, rel: string): string | null {
 }
 
 function errorResult(message: string): { output: string; isError: boolean } {
-  return { output: JSON.stringify({ error: message }), isError: true };
+  let msg = message;
+  if (Buffer.byteLength(msg, "utf8") > ERROR_MESSAGE_CAP) {
+    let lo = 0;
+    let hi = msg.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const candidate = codePointSafeCut(msg, mid) + TRUNCATION_MARKER;
+      if (Buffer.byteLength(candidate, "utf8") <= ERROR_MESSAGE_CAP) lo = mid;
+      else hi = mid - 1;
+    }
+    msg = codePointSafeCut(msg, lo) + TRUNCATION_MARKER;
+  }
+  return { output: JSON.stringify({ error: msg }), isError: true };
 }
 
 function okResult(payload: unknown): { output: string; isError: boolean } {
   return { output: JSON.stringify(payload), isError: false };
 }
 
-async function resolveRoot(repo: unknown, ctx: ToolContext): Promise<string | { error: string }> {
+async function resolveRoot(repo: unknown, ctx: ToolContext, deadlineMs?: number): Promise<string | { error: string }> {
   const alias = repo === undefined || repo === null || repo === "" ? "self" : String(repo);
   if (alias === "self") return ctx.roots.self;
   const linked = ctx.roots.linked?.get(alias);
   if (linked) return linked;
   if (ctx.ensureLinked) {
-    const res = await ctx.ensureLinked(alias);
+    const res = deadlineMs !== undefined ? await ctx.ensureLinked(alias, { deadlineMs }) : await ctx.ensureLinked(alias);
     if ("dir" in res) return res.dir;
   }
   return { error: `repository not accessible: ${alias}` };
 }
 
-async function rootFor(args: Record<string, unknown>, ctx: ToolContext): Promise<{ root: string } | { error: string }> {
-  const root = await resolveRoot(args.repo, ctx);
+async function rootFor(args: Record<string, unknown>, ctx: ToolContext, deadlineMs?: number): Promise<{ root: string } | { error: string }> {
+  const root = await resolveRoot(args.repo, ctx, deadlineMs);
   if (typeof root === "string") return { root };
   return { error: root.error };
 }
 
-async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
-  const resolvedRoot = await rootFor(args, ctx);
+async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: { maxBytes?: number }, endMs?: number): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx, endMs);
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" ? args.path : "";
@@ -160,6 +173,7 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promis
   const fullContent = selected.map((l, i) => `${start + i}: ${l}`).join("\n");
 
   const base = { path: rel, start_line: start, end_line: actualEnd, total_lines: total };
+  const cap = opts?.maxBytes ?? AGENT_LIMITS.resultBytes;
   const serialize = (content: string): string =>
     JSON.stringify({ ...base, truncated: false, content });
   const serializeTruncated = (cut: string): string => {
@@ -170,7 +184,7 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promis
     return JSON.stringify({ ...base, end_line: visibleEnd, truncated: true, content: visible + TRUNCATION_MARKER });
   };
 
-  if (Buffer.byteLength(serialize(fullContent), "utf8") <= AGENT_LIMITS.resultBytes) {
+  if (Buffer.byteLength(serialize(fullContent), "utf8") <= cap) {
     return okResult(JSON.parse(serialize(fullContent)));
   }
 
@@ -179,7 +193,7 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext): Promis
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
     const candidate = serializeTruncated(codePointSafeCut(fullContent, mid));
-    if (Buffer.byteLength(candidate, "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
+    if (Buffer.byteLength(candidate, "utf8") <= cap) lo = mid;
     else hi = mid - 1;
   }
   return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, lo))));
@@ -191,8 +205,8 @@ interface DirEntry {
   size?: number;
 }
 
-async function listDir(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
-  const resolvedRoot = await rootFor(args, ctx);
+async function listDir(args: Record<string, unknown>, ctx: ToolContext, endMs?: number, maxBytes?: number): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx, endMs);
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" && args.path !== "" ? args.path : ".";
@@ -227,8 +241,22 @@ async function listDir(args: Record<string, unknown>, ctx: ToolContext): Promise
   });
 
   const cap = 200;
-  const truncated = entries.length > cap;
-  return okResult({ path: rel, entries: entries.slice(0, cap), truncated });
+  const overCap = entries.length > cap;
+  const sliced = entries.slice(0, cap);
+  const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
+  const serializeList = (list: DirEntry[], truncated: boolean): string =>
+    JSON.stringify({ path: rel, entries: list, truncated });
+  if (Buffer.byteLength(serializeList(sliced, overCap), "utf8") <= byteCap) {
+    return okResult({ path: rel, entries: sliced, truncated: overCap });
+  }
+  let lo = 0;
+  let hi = sliced.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(serializeList(sliced.slice(0, mid), true), "utf8") <= byteCap) lo = mid;
+    else hi = mid - 1;
+  }
+  return okResult({ path: rel, entries: sliced.slice(0, lo), truncated: true });
 }
 
 export const GREP_TIMEOUT_MS = 5000;
@@ -588,6 +616,8 @@ export async function grepInRoot(
   args: { pattern: string; path?: string; glob?: string; max_results?: number },
   timeoutMs: number = GREP_TIMEOUT_MS,
   limits?: WalkLimits,
+  endMs?: number,
+  maxBytes?: number,
 ): Promise<{ output: string; isError: boolean }> {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
@@ -600,14 +630,33 @@ export async function grepInRoot(
   const startAbs = resolveWithinRoot(root, rel);
   if (!startAbs) return errorResult(`path not accessible: ${rel}`);
 
-  const walked = walkFiles(root, startAbs, limits);
+  if (endMs !== undefined && endMs - Date.now() <= 0) {
+    return errorResult("grep timed out");
+  }
+
+  const walkLimits: WalkLimits | undefined =
+    endMs === undefined
+      ? limits
+      : {
+          ...limits,
+          deadlineMs: Math.min(
+            limits?.deadlineMs ?? WALK_DEFAULT_DEADLINE_MS,
+            Math.max(0, endMs - Date.now()),
+          ),
+        };
+  const walked = walkFiles(root, startAbs, walkLimits);
   let files = walked.files;
   if (args.glob) files = files.filter((f) => matchGlob(f.rel, args.glob!));
+
+  if (endMs !== undefined && endMs - Date.now() <= 0) {
+    return errorResult("grep timed out");
+  }
 
   const requested = args.max_results === undefined ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
 
-  const outcome = await runGrepWorker(pattern, files, limit, timeoutMs);
+  const effectiveTimeout = endMs === undefined ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
+  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout);
   if (outcome.isError) return { output: outcome.output, isError: true };
 
   const { matches, filesScanned, hitLimit } = outcome;
@@ -616,6 +665,7 @@ export async function grepInRoot(
     line: m.line,
     text: codePointSafeCut(m.text, GREP_LINE_CHARS),
   }));
+  const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
   const serialize = (list: GrepMatch[], truncated: boolean): string =>
     JSON.stringify({ matches: list, truncated, files_scanned: filesScanned, skipped: walked.skipped });
 
@@ -623,34 +673,63 @@ export async function grepInRoot(
   let hi = capped.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes) lo = mid;
+    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= byteCap) lo = mid;
     else hi = mid - 1;
   }
   const truncated = hitLimit || walked.truncated || lo < capped.length;
   return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
 }
 
-async function grep(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
-  const resolvedRoot = await rootFor(args, ctx);
+async function grep(args: Record<string, unknown>, ctx: ToolContext, opts?: { timeoutMs?: number; endMs?: number; maxBytes?: number }): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
-  return grepInRoot(resolvedRoot.root, {
-    pattern: typeof args.pattern === "string" ? args.pattern : "",
-    path: typeof args.path === "string" ? args.path : undefined,
-    glob: typeof args.glob === "string" ? args.glob : undefined,
-    max_results: args.max_results === undefined ? undefined : Number(args.max_results),
-  });
+  return grepInRoot(
+    resolvedRoot.root,
+    {
+      pattern: typeof args.pattern === "string" ? args.pattern : "",
+      path: typeof args.path === "string" ? args.path : undefined,
+      glob: typeof args.glob === "string" ? args.glob : undefined,
+      max_results: args.max_results === undefined ? undefined : Number(args.max_results),
+    },
+    opts?.timeoutMs ?? GREP_TIMEOUT_MS,
+    undefined,
+    opts?.endMs,
+    opts?.maxBytes,
+  );
 }
 
-async function glob(args: Record<string, unknown>, ctx: ToolContext): Promise<{ output: string; isError: boolean }> {
-  const resolvedRoot = await rootFor(args, ctx);
+async function glob(args: Record<string, unknown>, ctx: ToolContext, endMs?: number, maxBytes?: number): Promise<{ output: string; isError: boolean }> {
+  const resolvedRoot = await rootFor(args, ctx, endMs);
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
+  if (endMs !== undefined && endMs - Date.now() <= 0) {
+    return errorResult("glob timed out");
+  }
+
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
-  const walked = walkPaths(resolvedRoot.root, resolvedRoot.root);
+  const walkLimits: WalkLimits | undefined =
+    endMs === undefined
+      ? undefined
+      : { deadlineMs: Math.min(WALK_DEFAULT_DEADLINE_MS, Math.max(0, endMs - Date.now())) };
+  const walked = walkPaths(resolvedRoot.root, resolvedRoot.root, walkLimits);
   const paths = walked.paths.filter((p) => matchGlob(p, pattern));
 
-  const truncated = paths.length > GLOB_MAX_PATHS || walked.truncated;
-  return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
+  const overCap = paths.length > GLOB_MAX_PATHS || walked.truncated;
+  const sliced = paths.slice(0, GLOB_MAX_PATHS);
+  const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
+  const serializeGlob = (list: string[], truncated: boolean): string =>
+    JSON.stringify({ paths: list, truncated });
+  if (Buffer.byteLength(serializeGlob(sliced, overCap), "utf8") <= byteCap) {
+    return okResult({ paths: sliced, truncated: overCap });
+  }
+  let lo = 0;
+  let hi = sliced.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(serializeGlob(sliced.slice(0, mid), true), "utf8") <= byteCap) lo = mid;
+    else hi = mid - 1;
+  }
+  return okResult({ paths: sliced.slice(0, lo), truncated: true });
 }
 
 export const TOOL_DEFS: readonly ToolDef[] = [
@@ -714,18 +793,19 @@ export async function executeTool(
   name: string,
   args: unknown,
   ctx: ToolContext,
+  limits?: { deadlineMs?: number; maxResultBytes?: number },
 ): Promise<{ output: string; isError: boolean }> {
   const a: Record<string, unknown> = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
   try {
     switch (name) {
       case "read_file":
-        return await readFile(a, ctx);
+        return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes }, limits?.deadlineMs);
       case "list_dir":
-        return await listDir(a, ctx);
+        return await listDir(a, ctx, limits?.deadlineMs, limits?.maxResultBytes);
       case "grep":
-        return await grep(a, ctx);
+        return await grep(a, ctx, { endMs: limits?.deadlineMs, maxBytes: limits?.maxResultBytes });
       case "glob":
-        return await glob(a, ctx);
+        return await glob(a, ctx, limits?.deadlineMs, limits?.maxResultBytes);
       default:
         return errorResult(`unknown tool: ${name}`);
     }

@@ -24884,6 +24884,7 @@ var AGENT_LIMITS = {
 // lib/src/agent-tools.js
 var DRIVE_LETTER = /^[a-zA-Z]:/;
 var TRUNCATION_MARKER = "\n[truncated]";
+var ERROR_MESSAGE_CAP = 2e3;
 var READ_MAX_BYTES = 1024 * 1024;
 function splitSegments(p) {
   return p.split(/[\\/]/);
@@ -24941,12 +24942,26 @@ function resolveWithinRoot(root, rel) {
   return resolved;
 }
 function errorResult(message) {
-  return { output: JSON.stringify({ error: message }), isError: true };
+  let msg = message;
+  if (Buffer.byteLength(msg, "utf8") > ERROR_MESSAGE_CAP) {
+    let lo = 0;
+    let hi = msg.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const candidate = codePointSafeCut(msg, mid) + TRUNCATION_MARKER;
+      if (Buffer.byteLength(candidate, "utf8") <= ERROR_MESSAGE_CAP)
+        lo = mid;
+      else
+        hi = mid - 1;
+    }
+    msg = codePointSafeCut(msg, lo) + TRUNCATION_MARKER;
+  }
+  return { output: JSON.stringify({ error: msg }), isError: true };
 }
 function okResult(payload) {
   return { output: JSON.stringify(payload), isError: false };
 }
-async function resolveRoot(repo, ctx) {
+async function resolveRoot(repo, ctx, deadlineMs) {
   const alias = repo === void 0 || repo === null || repo === "" ? "self" : String(repo);
   if (alias === "self")
     return ctx.roots.self;
@@ -24954,20 +24969,20 @@ async function resolveRoot(repo, ctx) {
   if (linked)
     return linked;
   if (ctx.ensureLinked) {
-    const res = await ctx.ensureLinked(alias);
+    const res = deadlineMs !== void 0 ? await ctx.ensureLinked(alias, { deadlineMs }) : await ctx.ensureLinked(alias);
     if ("dir" in res)
       return res.dir;
   }
   return { error: `repository not accessible: ${alias}` };
 }
-async function rootFor(args, ctx) {
-  const root = await resolveRoot(args.repo, ctx);
+async function rootFor(args, ctx, deadlineMs) {
+  const root = await resolveRoot(args.repo, ctx, deadlineMs);
   if (typeof root === "string")
     return { root };
   return { error: root.error };
 }
-async function readFile(args, ctx) {
-  const resolvedRoot = await rootFor(args, ctx);
+async function readFile(args, ctx, opts, endMs) {
+  const resolvedRoot = await rootFor(args, ctx, endMs);
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   const rel = typeof args.path === "string" ? args.path : "";
@@ -25003,6 +25018,7 @@ async function readFile(args, ctx) {
   const actualEnd = selected.length ? start + selected.length - 1 : start - 1;
   const fullContent = selected.map((l, i) => `${start + i}: ${l}`).join("\n");
   const base = { path: rel, start_line: start, end_line: actualEnd, total_lines: total };
+  const cap = opts?.maxBytes ?? AGENT_LIMITS.resultBytes;
   const serialize = (content) => JSON.stringify({ ...base, truncated: false, content });
   const serializeTruncated = (cut) => {
     const idx = cut.lastIndexOf("\n");
@@ -25011,7 +25027,7 @@ async function readFile(args, ctx) {
     const visibleEnd = complete ? start + visible.split("\n").length - 1 : start - 1;
     return JSON.stringify({ ...base, end_line: visibleEnd, truncated: true, content: visible + TRUNCATION_MARKER });
   };
-  if (Buffer.byteLength(serialize(fullContent), "utf8") <= AGENT_LIMITS.resultBytes) {
+  if (Buffer.byteLength(serialize(fullContent), "utf8") <= cap) {
     return okResult(JSON.parse(serialize(fullContent)));
   }
   let lo = 0;
@@ -25019,15 +25035,15 @@ async function readFile(args, ctx) {
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
     const candidate = serializeTruncated(codePointSafeCut(fullContent, mid));
-    if (Buffer.byteLength(candidate, "utf8") <= AGENT_LIMITS.resultBytes)
+    if (Buffer.byteLength(candidate, "utf8") <= cap)
       lo = mid;
     else
       hi = mid - 1;
   }
   return okResult(JSON.parse(serializeTruncated(codePointSafeCut(fullContent, lo))));
 }
-async function listDir(args, ctx) {
-  const resolvedRoot = await rootFor(args, ctx);
+async function listDir(args, ctx, endMs, maxBytes) {
+  const resolvedRoot = await rootFor(args, ctx, endMs);
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   const rel = typeof args.path === "string" && args.path !== "" ? args.path : ".";
@@ -25060,8 +25076,23 @@ async function listDir(args, ctx) {
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
   const cap = 200;
-  const truncated = entries.length > cap;
-  return okResult({ path: rel, entries: entries.slice(0, cap), truncated });
+  const overCap = entries.length > cap;
+  const sliced = entries.slice(0, cap);
+  const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
+  const serializeList = (list, truncated) => JSON.stringify({ path: rel, entries: list, truncated });
+  if (Buffer.byteLength(serializeList(sliced, overCap), "utf8") <= byteCap) {
+    return okResult({ path: rel, entries: sliced, truncated: overCap });
+  }
+  let lo = 0;
+  let hi = sliced.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(serializeList(sliced.slice(0, mid), true), "utf8") <= byteCap)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return okResult({ path: rel, entries: sliced.slice(0, lo), truncated: true });
 }
 var GREP_TIMEOUT_MS = 5e3;
 var GREP_MAX_MATCHES = 100;
@@ -25304,7 +25335,7 @@ function runGrepWorker(pattern, files, limit, timeoutMs) {
     });
   });
 }
-async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits) {
+async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs, maxBytes) {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
     new RegExp(pattern);
@@ -25315,13 +25346,24 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits) {
   const startAbs = resolveWithinRoot(root, rel);
   if (!startAbs)
     return errorResult(`path not accessible: ${rel}`);
-  const walked = walkFiles(root, startAbs, limits);
+  if (endMs !== void 0 && endMs - Date.now() <= 0) {
+    return errorResult("grep timed out");
+  }
+  const walkLimits = endMs === void 0 ? limits : {
+    ...limits,
+    deadlineMs: Math.min(limits?.deadlineMs ?? WALK_DEFAULT_DEADLINE_MS, Math.max(0, endMs - Date.now()))
+  };
+  const walked = walkFiles(root, startAbs, walkLimits);
   let files = walked.files;
   if (args.glob)
     files = files.filter((f) => matchGlob(f.rel, args.glob));
+  if (endMs !== void 0 && endMs - Date.now() <= 0) {
+    return errorResult("grep timed out");
+  }
   const requested = args.max_results === void 0 ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
-  const outcome = await runGrepWorker(pattern, files, limit, timeoutMs);
+  const effectiveTimeout = endMs === void 0 ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
+  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout);
   if (outcome.isError)
     return { output: outcome.output, isError: true };
   const { matches, filesScanned, hitLimit } = outcome;
@@ -25330,12 +25372,13 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits) {
     line: m.line,
     text: codePointSafeCut(m.text, GREP_LINE_CHARS)
   }));
+  const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
   const serialize = (list, truncated2) => JSON.stringify({ matches: list, truncated: truncated2, files_scanned: filesScanned, skipped: walked.skipped });
   let lo = 0;
   let hi = capped.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= AGENT_LIMITS.resultBytes)
+    if (Buffer.byteLength(serialize(capped.slice(0, mid), true), "utf8") <= byteCap)
       lo = mid;
     else
       hi = mid - 1;
@@ -25343,8 +25386,8 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits) {
   const truncated = hitLimit || walked.truncated || lo < capped.length;
   return okResult(JSON.parse(serialize(capped.slice(0, lo), truncated)));
 }
-async function grep(args, ctx) {
-  const resolvedRoot = await rootFor(args, ctx);
+async function grep(args, ctx, opts) {
+  const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   return grepInRoot(resolvedRoot.root, {
@@ -25352,17 +25395,36 @@ async function grep(args, ctx) {
     path: typeof args.path === "string" ? args.path : void 0,
     glob: typeof args.glob === "string" ? args.glob : void 0,
     max_results: args.max_results === void 0 ? void 0 : Number(args.max_results)
-  });
+  }, opts?.timeoutMs ?? GREP_TIMEOUT_MS, void 0, opts?.endMs, opts?.maxBytes);
 }
-async function glob(args, ctx) {
-  const resolvedRoot = await rootFor(args, ctx);
+async function glob(args, ctx, endMs, maxBytes) {
+  const resolvedRoot = await rootFor(args, ctx, endMs);
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
+  if (endMs !== void 0 && endMs - Date.now() <= 0) {
+    return errorResult("glob timed out");
+  }
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
-  const walked = walkPaths(resolvedRoot.root, resolvedRoot.root);
+  const walkLimits = endMs === void 0 ? void 0 : { deadlineMs: Math.min(WALK_DEFAULT_DEADLINE_MS, Math.max(0, endMs - Date.now())) };
+  const walked = walkPaths(resolvedRoot.root, resolvedRoot.root, walkLimits);
   const paths = walked.paths.filter((p) => matchGlob(p, pattern));
-  const truncated = paths.length > GLOB_MAX_PATHS || walked.truncated;
-  return okResult({ paths: paths.slice(0, GLOB_MAX_PATHS), truncated });
+  const overCap = paths.length > GLOB_MAX_PATHS || walked.truncated;
+  const sliced = paths.slice(0, GLOB_MAX_PATHS);
+  const byteCap = maxBytes ?? AGENT_LIMITS.resultBytes;
+  const serializeGlob = (list, truncated) => JSON.stringify({ paths: list, truncated });
+  if (Buffer.byteLength(serializeGlob(sliced, overCap), "utf8") <= byteCap) {
+    return okResult({ paths: sliced, truncated: overCap });
+  }
+  let lo = 0;
+  let hi = sliced.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(serializeGlob(sliced.slice(0, mid), true), "utf8") <= byteCap)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return okResult({ paths: sliced.slice(0, lo), truncated: true });
 }
 var TOOL_DEFS = [
   {
@@ -25419,18 +25481,18 @@ var TOOL_DEFS = [
     }
   }
 ];
-async function executeTool(name, args, ctx) {
+async function executeTool(name, args, ctx, limits) {
   const a = args && typeof args === "object" ? args : {};
   try {
     switch (name) {
       case "read_file":
-        return await readFile(a, ctx);
+        return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes }, limits?.deadlineMs);
       case "list_dir":
-        return await listDir(a, ctx);
+        return await listDir(a, ctx, limits?.deadlineMs, limits?.maxResultBytes);
       case "grep":
-        return await grep(a, ctx);
+        return await grep(a, ctx, { endMs: limits?.deadlineMs, maxBytes: limits?.maxResultBytes });
       case "glob":
-        return await glob(a, ctx);
+        return await glob(a, ctx, limits?.deadlineMs, limits?.maxResultBytes);
       default:
         return errorResult(`unknown tool: ${name}`);
     }

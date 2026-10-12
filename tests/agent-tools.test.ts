@@ -704,3 +704,65 @@ describe("grep skips and bounded walks", () => {
     expect(isBinaryFile("xx\0xx")).toBe(true);
   });
 });
+
+describe("F11 tool-layer deadlines and byte caps", () => {
+  it("expired deadlineMs fails fast without walking or spawning", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const ctx = ctxFor(root);
+    const g = await executeTool("grep", { pattern: "x" }, ctx, { deadlineMs: 1 });
+    expect(g.isError).toBe(true);
+    expect(JSON.parse(g.output)).toEqual({ error: "grep timed out" });
+    const gl = await executeTool("glob", { pattern: "**/*" }, ctx, { deadlineMs: 1 });
+    expect(gl.isError).toBe(true);
+    expect(JSON.parse(gl.output)).toEqual({ error: "glob timed out" });
+  });
+  it("huge deadlineMs behaves exactly as today", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "keep me\n");
+    const g = await executeTool("grep", { pattern: "keep" }, ctxFor(root), { deadlineMs: Date.now() + 3600000 });
+    expect(JSON.parse(g.output).matches.length).toBeGreaterThan(0);
+  });
+  it("generous endMs preserves today's worker timeout; expired endMs never spawns", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "keep me\n");
+    const ok = await grepInRoot(root, { pattern: "keep" }, 200, undefined, Date.now() + 3600000);
+    expect(JSON.parse(ok.output).matches.length).toBeGreaterThan(0);
+    const noSpawn = await grepInRoot(root, { pattern: "keep" }, 200, undefined, 1);
+    expect(noSpawn.isError).toBe(true);
+    expect(JSON.parse(noSpawn.output)).toEqual({ error: "grep timed out" });
+  });
+  it("per-tool maxResultBytes caps output with the marker inside", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "big.txt"), "x\n".repeat(5000));
+    const r = await executeTool("read_file", { path: "big.txt" }, ctxFor(root), { maxResultBytes: 500 });
+    const p = JSON.parse(r.output);
+    expect(Buffer.byteLength(r.output, "utf8")).toBeLessThanOrEqual(500);
+    expect(p.truncated).toBe(true);
+    expect(p.content).toContain("[truncated]");
+  });
+  it("errorResult messages are capped with the marker inside", async () => {
+    const root = tempRoot();
+    const r = await executeTool("read_file", { path: "a".repeat(5000) }, ctxFor(root));
+    expect(r.isError).toBe(true);
+    expect(Buffer.byteLength(r.output, "utf8")).toBeLessThanOrEqual(2000 + 100);
+    expect(r.output).toContain("[truncated]");
+  });
+  it("list_dir and glob drop tail entries under a small cap", async () => {
+    const root = tempRoot();
+    for (let i = 0; i < 10; i++) writeFileSync(join(root, `f${i}.txt`), "x\n");
+    const l = await executeTool("list_dir", { path: "." }, ctxFor(root), { maxResultBytes: 300 });
+    const lp = JSON.parse(l.output);
+    expect(lp.truncated).toBe(true);
+    expect(lp.entries.length).toBeLessThan(10);
+    expect(Buffer.byteLength(l.output, "utf8")).toBeLessThanOrEqual(300);
+  });
+  it("resolveRoot forwards the deadline to ensureLinked", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const seen: unknown[] = [];
+    const ctx = { roots: { self: root }, ensureLinked: async (alias: string, opts?: { deadlineMs?: number }) => { seen.push(opts?.deadlineMs); return { error: "nope" }; } };
+    await executeTool("read_file", { path: "a.txt", repo: "o/r" }, ctx, { deadlineMs: 123456789 });
+    expect(seen).toEqual([123456789]);
+  });
+});
