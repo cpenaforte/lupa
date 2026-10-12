@@ -32,13 +32,13 @@
 ### Task 69: Q04 — contract, producers, validation, sanitizers
 
 **Files:**
-- Modify: `src/fastpath.ts` (Finding fields + `sourceForLabel` + L0 values), `src/scanners.ts` (`warning(rule,message,source?)`, fromStdout wrap, runGitleaks label, SBOM label), `src/artifact-limits.ts` (`byteCheck` source), `src/l2.ts` (success 90 / failure tool-health, gofmt pins), `src/main.ts` (isFinding shapes, sanitize carry+caps, `L2_SKIPPED`), `src/review.ts` (redact evidence + fresh objects)
+- Modify: `src/fastpath.ts` (Finding fields + L0 values), `src/artifact-limits.ts` (`sourceForLabel` + `byteCheck` source), `src/scanners.ts` (`warning(rule,message,source?)`, fromStdout wrap, runGitleaks label, SBOM label), `src/l2.ts` (success 90 / failure tool-health, gofmt pins), `src/main.ts` (isFinding shapes, sanitize carry+caps, `L2_SKIPPED`), `src/review.ts` (redact evidence + fresh objects)
 - Test: `tests/fastpath.test.ts`, `tests/scanners.test.ts` (`:329,339,367,381,418,431,445,458,477,489,500,520,766` + `:582,704,709,716,736,746`), `tests/l2.test.ts` (`:150,161,173` + `:183-185,:193-195`), `tests/artifact-limits.test.ts` (`:90-96`), `tests/main.test.ts` (isFinding/sanitize units), `tests/review.test.ts` (redact incl. snippet secret + fresh-object aliasing), `tests/fixtures/evals/cases.ts` (`:96` forkL2Skipped → gains source, summary `:275-277` verified)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
-- Consumes: existing `warning()` call sites — the following pass explicit sources: fromStdout internals (own label), runGitleaks (`"gitleaks"`), SBOM branch (`"sbom"`), byteCheck callers (labels via `sourceForLabel`); all other 2-arg calls compile unchanged.
-- Produces: `Finding.source?: string`, `Finding.confidence?: number`, `Finding.evidence?: { snippet?: string; analyzer?: string }`; `sourceForLabel(label: string): string` (fastpath.ts; `label.split(" (")[0]`, identity without parens).
+- Consumes: existing `warning()` call sites — the following pass explicit sources: fromStdout internals (own label via `sourceForLabel`), runGitleaks (`"gitleaks"`), SBOM branch (`"sbom"`), byteCheck (maps internally); all other 2-arg calls compile unchanged. `tests/fixtures/evals/cases.ts` (`:96` forkL2Skipped gains source + summary `:275-277` gains the Source row — certain, not conditional).
+- Produces: `Finding.source?: string`, `Finding.confidence?: number`, `Finding.evidence?: { snippet?: string; analyzer?: string }`; `sourceForLabel(label: string): string` (artifact-limits.ts; `label.split(" (")[0]`, identity without parens).
 
 **Exact behavior:**
 - Contract: source non-empty with `.length ≤ 100` (UTF-16 units, NOT code points — validation is shape-only, capping is sanitize's job); confidence safe integer 0..100; evidence object with optional strings (else contract violation as today).
@@ -80,7 +80,7 @@ git commit -m "feat: finding source, confidence, and evidence contract"
 
 **Files:**
 - Modify: `src/prompt.ts` (nullable `confidence` schema + required + single-shot instruction), `src/llm.ts` (`toFindings` assigns `source: "llm"` + carries valid `confidence`, drops invalid field), `src/adapters/google.ts` (converted expectation), `src/agent.ts` (strip the three fields post-`toFindings`, `:62-66`)
-- Test: `tests/llm.test.ts` (`:361-370` + `:397`), `tests/probe-routing.test.ts` (`:71,118,154,194,226,324` + `:97-101`), `tests/prompt.test.ts` (`:148` + `:149-151`), `tests/adapters-google.test.ts` (`:550` + converted pins), `tests/adapters-routing.test.ts` (`:142,160,178,197`), `tests/evals/agent.test.ts` (`:61-69` UNCHANGED — assert no provenance on agent findings)
+- Test: `tests/llm.test.ts` (`:361-370` + `:397`), `tests/probe-routing.test.ts` (`:71,118,154,194,226,324` + `:97-101`), `tests/prompt.test.ts` (`:148` + `:149-151`), `tests/adapters-google.test.ts` (`:550` + converted pins), `tests/adapters-routing.test.ts` (`:142,160,178,197`)
 - Rebuild: `dist/index.js`
 
 **Interfaces:**
@@ -88,14 +88,14 @@ git commit -m "feat: finding source, confidence, and evidence contract"
 - Produces: LLM findings with `source: "llm"` + optional valid `confidence` (nothing downstream yet — Task 71 renders).
 
 **Exact behavior:**
-- Schema: per-item `confidence: {type: ["integer","null"]}` (NO `prefixItems` pattern — scalar, google-safe), added to item `required`; single-shot instruction names the field (same pattern as `duplicateOf`); agent prompts byte-identical.
+- Schema: per-item `confidence: {type: ["integer","null"]}` (NO `prefixItems` pattern — scalar, google-safe), added to item `required`; single-shot instruction names the field, appended at the single-shot invocations only (same gate as the dedup verdict instructions — never the shared `SYSTEM` const, so agent prompts stay byte-identical).
 - `toFindings`: assigns `source: "llm"`, carries safe-integer 0..100 `confidence`, drops invalid values (field only, finding kept).
 - `agent.ts`: deletes `source`/`confidence`/`evidence` after its `toFindings` call (explicit strip — shared parser cannot know its caller).
 - Converted-schema expectation gains the nullable confidence (google recursion + `nullable: true`).
 
 - [ ] **Step 1: Write the failing tests**
   - `okChat` extraction: present/absent/malformed (`150`, `"high"`, `3.5` → field dropped, finding kept).
-  - Update pins: llm `:361-370` + `:397` (callLlm gains `verdicts`-style confidence key), probe-routing ×6 + `:97-101`, prompt `:148` + `:149-151`, google `:550` + converted, adapters-routing `:142,160,178,197`, evals-agent `:61-69` assert ABSENT (no provenance).
+  - Update pins: llm `:361-370` + `:397` (callLlm gains confidence key), probe-routing ×6 + `:97-101`, prompt `:148` + `:149-151`, google `:550` + converted, adapters-routing `:142,160,178,197`. (`tests/evals/agent.test.ts:61-69` needs NO changes — agent strip keeps those exact pins passing, which proves absence.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -114,7 +114,7 @@ Expected: PASS all green (evals after build); build clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/prompt.ts src/llm.ts src/agent.ts src/adapters/google.ts tests/llm.test.ts tests/probe-routing.test.ts tests/prompt.test.ts tests/adapters-google.test.ts tests/adapters-routing.test.ts tests/evals/agent.test.ts dist/index.js
+git add src/prompt.ts src/llm.ts src/agent.ts src/adapters/google.ts tests/llm.test.ts tests/probe-routing.test.ts tests/prompt.test.ts tests/adapters-google.test.ts tests/adapters-routing.test.ts dist/index.js
 git commit -m "feat: LLM structured confidence with agent strip"
 ```
 

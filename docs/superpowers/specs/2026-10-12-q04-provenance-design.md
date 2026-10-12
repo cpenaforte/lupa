@@ -68,11 +68,13 @@ stay stable and short):
   `"sbom"`, `byteCheck` maps its label argument internally via
   `sourceForLabel()` (existing `byteCheck` tests with plain labels are
   unaffected — mapping is identity without parens).
-- `sourceForLabel(label: string): string` in `fastpath.ts` (finding home, no
-  cycles): `label.split(" (")[0]` — identity for paren-free labels,
-  `"osv-scanner (lock)"` → `"osv-scanner"`. Used at EVERY construction site
-  including `warning()` and `byteCheck`, so lockfile paths never reach the
-  contract.
+- `sourceForLabel(label: string): string` in `artifact-limits.ts`
+  (read-policy home alongside `oversizeMessage`/`byteCheck` — no cycles:
+  nothing it imports imports it): `label.split(" (")[0]` — identity for
+  paren-free labels, `"osv-scanner (lock)"` → `"osv-scanner"`. Used at EVERY
+  construction site taking a label (`fromStdout`, `runGitleaks`, SBOM
+  branch, `byteCheck` internally), so lockfile paths never reach the
+  contract. `fastpath.ts` needs no import (L0 uses the literal).
 - Tool-health warnings (`scanner-missing`/`scanner-failed`/`sbom-write`,
   `byteCheck`): `source` = the failing tool's label, confidence ABSENT (no
   evidentiary claim). Synthetic substitutes (`L2_SKIPPED`): `source: "l2"`,
@@ -102,6 +104,8 @@ provenance must never drop silently mid-pipeline)
   diverging from `capText`; validation is a shape check, capping is
   `sanitizeFinding`'s job); confidence: safe integer 0..100; evidence:
   object with optional strings; anything else → contract violation as today).
+  Accepted latent: a 60-astral-char source would survive sanitize and fail
+  Flow B reads — unreachable, all producer sources are fixed ASCII.
 - `sanitizeFinding` carries all three with caps (`source` capped like rule,
   `snippet` like message, `analyzer` capped like rule with control-strip);
   absent stays absent through sanitize, redact, merge, and funnel — no stage
