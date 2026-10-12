@@ -1548,8 +1548,10 @@ describe("prompt budget", () => {
   it("sanitizes evidence before the prompt", async () => {
     const r = await runWithMocks({ scan: [{ ...LLM_FINDING, message: "a\0b" }] });
     expect(r.prompts!.user).toContain('"message":"ab"'); // control strip is the discriminator (NUL never survives JSON.stringify)
-    // The prompt path strips its own sanitized copy: the fast-only findings.json
-    // write the slow-path seam observed still carries the raw control char.
+    // The early fast-only findings.json write predates the slow path and preserves raw
+    // evidence (pre-existing behavior, unchanged by the prompt-only copy): it pins that
+    // the prompt-sanitization path did not alter what artifacts persist. Non-mutation of
+    // `fast` itself holds by construction (`promptFast` copy) and was verified in review.
     expect(r.earlyFindingsRaw).toBeDefined();
     expect(r.earlyFindingsRaw!).toContain("a\\u0000b");
   });
