@@ -87,7 +87,7 @@ export async function listReviewThreads(
 // inside the real gateway, matching its existing convention; both fakes —
 // tests/main.test.ts gatewayFor AND the tests/evals/harness.ts gateway — updated)
 listReviewThreads(pr: number): Promise<ReviewThread[]>;
-getActor(): Promise<string | undefined>;
+getActor(pr: number): Promise<string | undefined>; // pr passed explicitly — publishReview owns a.pr on both flows; no context.issue dependency (undefined on workflow_run)
 // main.ts — publishReview computes the blocking set BEFORE all early returns
 // (dry-run, fork-readonly, stale-head) and returns it for the exits.
 // getActor + listReviewThreads are SHORT-CIRCUITED when every merged finding
@@ -218,8 +218,9 @@ async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }>;
   line of a touched file → COMMENT + exit 0 with the finding still INLINE
   (ctx hits display inline — no body item, no note); LEFT-only high → COMMENT
   + exit 0 with the finding in the body AND the header note; lineless
-  `sensitive-path` on a touched file (incl. binary/mode-only entries with no
-  hunks, and deleted files) → still REQUEST_CHANGES + exit 1; new in-diff high →
+  `sensitive-path` on a present touched file (binary/mode-only entries with no
+  hunks count) → still REQUEST_CHANGES + exit 1; lineless hits on deleted or
+  pure-removal files → COMMENT + exit 0 (nothing introduced); new in-diff high →
   REQUEST_CHANGES + exit 1 (unchanged); resolved-thread-persists (incl.
   joined-rule thread vs unmerged members, and ctx/LEFT-drifted lines →
   inline `**reopened**` marker) → re-blocks; resolved-thread-gone → stays
