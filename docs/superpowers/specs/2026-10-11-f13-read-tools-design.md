@@ -67,6 +67,8 @@ export interface WalkSkipped {
   // a limit fires only when an unexamined entry remains, and end of walk with a
   // non-empty stack also stops as truncated (a pushed-but-unlisted directory may hold
   // unseen files), so exact fit with an empty stack yields `truncated: false`.
+  // `overLimit` is exact for loop remainders and a conservative placeholder (one unit
+  // per unlisted directory) when check (b) fires — stated explicitly, not silently exact.
   overLimit: number;
 }
 ```
@@ -116,6 +118,9 @@ matching the existing `actualEnd` convention (`start - 1` when nothing is select
 never ends with `\n`, so no boundary over-count), counted over the backed-up portion
 only (excluding the appended `\n[truncated]` marker), and
 `end_line = visibleLines ? start + visibleLines - 1 : start - 1`.
+The emitted truncated content is `visible + TRUNCATION_MARKER`: the partial tail is
+dropped from the content itself, not just disclaimed by `end_line` (the probe still
+maximizes the raw cut, and backing up only shrinks it, so the byte fit holds).
 `start_line`, `total_lines`, and `truncated` are unchanged. A truncated response
 therefore never claims a line the agent cannot fully see; resuming at `end_line + 1`
 re-reads at worst (overlap), never skips.
