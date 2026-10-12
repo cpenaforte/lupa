@@ -39,14 +39,14 @@
 
 **Interfaces:**
 - Consumes: `readInt(name, fallback, min)` pattern (`src/inputs.ts:70`).
-- Produces: `ActionInputs.maxPromptChars: number`; `buildMessages(fast, promptText, issueBody, skipped, agent?, omitted?: number)`; exported `neutralise(text: string): string` + `LINKED_ISSUE_HEADER`, `LINKED_ISSUE_OPEN`, `LINKED_ISSUE_CLOSE`, `ISSUE_TRUNCATION_MARKER` constants (exact strings from current literals).
+- Produces: `ActionInputs.maxPromptChars: number`; `buildMessages(fast, promptText, issueBody, skipped, agent?, omitted?: number)`; exported `neutralise(text: string): string` + `LINKED_ISSUE_HEADER` (`"## Linked issue (context from the PR's closing reference)"`), `LINKED_ISSUE_OPEN` (`"<linked-issue>\n"`), `LINKED_ISSUE_CLOSE` (`"\n</linked-issue>"`), `ISSUE_TRUNCATION_MARKER` (`"…[issue context truncated to fit the prompt budget]"`, 53 bytes: U+2026 is 3 bytes + 50 ASCII) — exact strings moved verbatim from current literals (verify byte lengths with `Buffer.byteLength` when writing).
 
 **Exact behavior:**
 - `action.yml`: `max_prompt_chars` after `max_diff_chars`, `required: false`, `default: "120000"`, description per spec (both-paths wording, unit note).
 - `inputs.ts`: `maxPromptChars: readInt("max_prompt_chars", 120000, 1)` after the `maxDiffChars` line.
 - `buildMessages`: 6th param `omitted: number = 0`; when > 0 renders `\n\nOmitted <M> fast finding(s) to fit the prompt budget.` after the findings JSON; skipped-file list capped at 20 entries + `\n- …and <N> more omitted from this note` line. Existing 4-/5-arg behavior byte-identical.
-- README: input documented beside `max_diff_chars` with the bytes-vs-units note; Cost ceiling bullet names `max_prompt_chars` (120,000 bytes ≈ 30k input tokens, roughly $0.30–$0.60 at the same frontier rates; keep the pinned "about 3k input and 600 output tokens" sentence verbatim).
-- Tests: `INPUT_NAMES` + smoke list gain `max_prompt_chars`; default 120000; `0`/`-5`/`"lots"`/`"12.5"` rejected naming the input, `"1"` accepted; renderer tests (omitted line via 6th param; 20-cap line with 25 skipped); `tests/main.test.ts:173` + `tests/evals/harness.ts:32` gain `maxPromptChars: 60000` (any sane value — these fixtures never assert it); `MockOpts` gains `maxPromptChars?: number` and `inputsFor` uses `o.maxPromptChars ?? 120000` (the per-test override seam Task 58 needs).
+- README: input documented beside `max_diff_chars` with the bytes-vs-units note; Cost ceiling bullet names `max_prompt_chars` (120,000 bytes ≈ 30k input tokens, roughly $0.30–$0.60 at the same frontier rates; keep the pinned "about 3k input and 600 output tokens" sentence verbatim); add the non-ASCII rule plainly (diffs averaging over 2 bytes per UTF-16 unit skip at default config — CJK, Cyrillic, Greek, accented Latin).
+- Tests: `INPUT_NAMES` + smoke list gain `max_prompt_chars`; default 120000; `0`/`-5`/`"lots"`/`"12.5"` rejected naming the input, `"1"` accepted; renderer tests (omitted line via 6th param; 20-cap line with 25 skipped); `tests/main.test.ts:173` + `tests/evals/harness.ts:32` gain `maxPromptChars: 120000` (match the real default — no conflict); `MockOpts` gains `maxPromptChars?: number`, `issueBody?: string`, `maxDiffChars?: number`, and `inputsFor` uses `o.maxPromptChars ?? 120000` (the per-test override seam Task 58 needs); `gatewayFor.getIssueBody` returns `o.issueBody ?? "issue text"`; the `callWithProbe`/`callByStyle` mocks capture `rec.prompts = messages` (new `Rec` field `prompts?: { system: string; user: string }`, exposed on the return object).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -83,7 +83,7 @@ git commit -m "feat: max_prompt_chars input and budget-aware rendering (F10)"
 
 **Interfaces:**
 - Consumes: Task 57's `maxPromptChars`, 6-arg `buildMessages`, exported `neutralise`/constants.
-- Produces: `export function budgetPrompt(fast: Finding[], promptText: string, issueBody: string | undefined, skipped: string[], budget: number): { fast: Finding[]; promptText: string; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean }` — all returned strings already neutralised.
+- Produces: `export function budgetPrompt(fast: Finding[], promptText: string, issueBody: string | undefined, skipped: string[], budget: number): { fast: Finding[]; promptText: string; issueBody: string | undefined; skipped: string[]; findingsOmitted: number; issueDropped: boolean }` — returned `promptText`/`issueBody`/skipped-names already neutralised (findings objects pass through; only their serialized form is escaped at render). Whitespace-only `issueBody` is treated as absent (no block, no overhead — mirrors `buildMessages`' blank-issue rule).
 
 **Exact behavior:**
 - `promptFast = fast.map(sanitizeFinding)` computed in `slowPath` (after key/model/endpoint/ollama/model-check preconditions); `fast` never mutated.
@@ -96,15 +96,65 @@ git commit -m "feat: max_prompt_chars input and budget-aware rendering (F10)"
 `describe("prompt budget")`, driven through `runWithMocks` with `maxPromptChars` overrides via Task 57's `MockOpts.maxPromptChars` seam (`inputsFor` defaults it to 120000):
 
 ```ts
-it("truncates an oversized issue with a balanced marker", ...); // ~5 KB issue, small budget; tags balanced; rest intact
-it("drops the issue block when the allowance is negative", ...); // budget 3,200, diff ~2.7 KB, one finding, issue ~5 KB → issueDropped; review proceeds
-it("drops whole findings with an exact omitted count", ...); // many findings + small budget; JSON parses; prose line present
-it("never cuts the diff, skipping instead", ...); // maxed diff + maxPromptChars 1000 → skip warning with both sizes; llmCalled 0
-it("skips after cuts are exhausted", ...); // 5.2 KB-first patch + 25 tiny files, maxDiffChars 5500, maxPromptChars 6000; exact byte sums; llmCalled 0
-it("pins the multibyte floor", ...); // 8 × 7,450-unit CJK files; default-scale budget; skip, no LLM call
-it("sanitizes evidence before the prompt", ...); // control chars/over-long fields stripped in captured prompt
-it("still posts omitted findings", ...); // dropped finding appears in the posted review
-it("renders the omission line on the agent path", ...); // llmAgent fixture + small budget → user message contains the prose line
+it("truncates an oversized issue with a balanced marker", async () => {
+  const r = await runWithMocks({ maxPromptChars: 4000, issueBody: "x".repeat(5000), prBody: "Fixes #7" });
+  // ^ requires seams (Task 57 adds if missing): MockOpts.issueBody threading into getIssueBody
+  // (default "issue text"), MockOpts.prBody into the PR body for linkedIssueNumber (default "").
+  const user = r.prompts!.user;
+  expect(user).toContain("…[issue context truncated to fit the prompt budget]");
+  expect(countRealTags(user, "linked-issue")).toBe(2); // balanced (inline the prompt.test.ts regex or import the helper pattern)
+  expect(Buffer.byteLength(user, "utf8")).toBeLessThanOrEqual(4000);
+  expect(r.llmCalled).toBe(1);
+});
+it("drops the issue block when the allowance is negative", async () => {
+  const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2700, issueBody: "y".repeat(5000), llm: [LLM_FINDING] });
+  // ^ DIFF_2700: custom `diff` override (~2,700 B hunk, same format as DIFF); allowance < 0 → dropped.
+  expect(r.prompts!.user).not.toContain("## Linked issue");
+  expect(r.llmCalled).toBe(1);
+});
+it("drops whole findings with an exact omitted count", async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
+  const r = await runWithMocks({ maxPromptChars: 3000, llm: many });
+  // ^ `llm:` fixture findings flow through the mocked probe return (existing pattern — verify name).
+  const user = r.prompts!.user;
+  const m = user.match(/Omitted (\d+) fast finding\(s\) to fit the prompt budget\./);
+  expect(m).not.toBeNull();
+  const kept = JSON.parse(user.split("## Fast findings")[1].split("##")[0]) as unknown[];
+  expect(kept.length + Number(m![1])).toBe(many.length);
+  expect(Number(m![1])).toBeGreaterThan(0);
+});
+it("never cuts the diff, skipping instead", async () => {
+  const r = await runWithMocks({ maxPromptChars: 1000 });
+  expect(vi.mocked(core.warning).mock.calls.map(String).join("\n")).toMatch(/prompt \d+ exceeds max_prompt_chars 1000 after bounded cuts/);
+  expect(r.llmCalled).toBe(0);
+});
+it("skips after cuts are exhausted", async () => {
+  const r = await runWithMocks({ maxPromptChars: 6000, maxDiffChars: 5500, diff: BIG_FIRST_PATCH, issueBody: "z".repeat(3000), llm: [LLM_FINDING] });
+  // ^ BIG_FIRST_PATCH: 5.2 KB file first + 25 tiny files (~300 units each); test computes exact
+  // Buffer.byteLength sums to show diff ≈ 5.2 KB, note ≈ 700 B, total > 6,000 with diff alone < 6,000.
+  expect(r.llmCalled).toBe(0);
+});
+it("pins the multibyte floor", async () => {
+  const r = await runWithMocks({ diff: CJK_PATCH });
+  // ^ CJK_PATCH: 8 files × ~7,450 CJK units (each under PER_FILE_CAP 8000).
+  expect(r.llmCalled).toBe(0); // ~180 KB bytes > 120,000 default
+});
+it("sanitizes evidence before the prompt", async () => {
+  const r = await runWithMocks({ llm: [{ ...LLM_FINDING, message: "a\0b" }] });
+  expect(r.prompts!.user).toContain("ab");
+  expect(r.prompts!.user).not.toContain("\0");
+});
+it("still posts omitted findings", async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
+  const r = await runWithMocks({ maxPromptChars: 3000, llm: many });
+  expect(r.posted).toBe(true);
+  expect(r.reviews.at(-1)!.body).toContain("finding(s)");
+});
+it("renders the omission line on the agent path", async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...LLM_FINDING, rule: `r${i}` }));
+  const r = await runWithMocks({ maxPromptChars: 3000, llmAgent: true, llm: many });
+  expect(String(r.agentConv)).toContain("Omitted ");
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
