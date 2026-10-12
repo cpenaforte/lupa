@@ -174,6 +174,16 @@ describe("runL2 behavior", () => {
       { severity: "warning", file: "a.go", rule: "gofmt", message: "gofmt: a.go is not formatted (run gofmt -w a.go)" },
     ]);
   });
+  it("gofmt timeout with partial stdout still reports only the timeout warning", async () => {
+    const spawn = async (cmd: string) =>
+      cmd === "gofmt"
+        ? { failure: { code: null, signal: null, output: "", timedOut: true }, stdout: "a.go\n" }
+        : { failure: undefined, stdout: "" };
+    const findings = await runL2("tests/fixtures/go", spawn, 1000, new Set(["a.go"]));
+    expect(findings).toEqual([
+      { severity: "warning", file: "", rule: "gofmt", message: expect.stringContaining("timed out") },
+    ]);
+  });
   it("real execTool captures success stdout (shell stub, no Go toolchain)", async () => {
     const bin = makeTmp({ gofmt: "#!/bin/sh\nprintf 'a.go\\n'\n" });
     chmodSync(join(bin, "gofmt"), 0o755);

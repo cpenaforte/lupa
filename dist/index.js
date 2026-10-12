@@ -24831,6 +24831,9 @@ ${detail}` : ""}`
   ];
 }
 function interpretGofmt(name, failure, stdout, changed, timeoutMs = L2_TIMEOUT_MS) {
+  if (failure?.timedOut === true || failure?.signal != null) {
+    return interpretDefault(name, failure, stdout, changed, timeoutMs);
+  }
   const files = stdout.split("\n").filter((line) => line !== "").map((line) => line.startsWith("./") ? line.slice(2) : line).filter((file) => changed.has(file));
   if (files.length > 0) {
     return files.map((file) => ({

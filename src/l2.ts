@@ -182,8 +182,10 @@ function interpretDefault(
 
 /**
  * gofmt interpreter: `gofmt -l` lists unformatted files on stdout regardless of exit code,
- * so it is parsed on both paths and intersected with the PR's changed files. When no files
- * parse but a failure is present, it delegates to the default interpreter so a nonzero exit
+ * so it is parsed on both paths and intersected with the PR's changed files. A timeout or
+ * signal kill takes precedence over any partial file list and delegates to the default
+ * interpreter, preserving today's timeout/signal warnings. When no files parse but a
+ * failure is present, it delegates to the default interpreter so a nonzero exit
  * with an empty/unparseable file list still yields today's generic finding.
  */
 export function interpretGofmt(
@@ -193,6 +195,9 @@ export function interpretGofmt(
   changed: Set<string>,
   timeoutMs: number = L2_TIMEOUT_MS,
 ): Finding[] {
+  if (failure?.timedOut === true || failure?.signal != null) {
+    return interpretDefault(name, failure, stdout, changed, timeoutMs);
+  }
   const files = stdout
     .split("\n")
     .filter((line) => line !== "")
@@ -232,8 +237,11 @@ async function runOne(
 }
 
 /**
- * Run every detected L2 tool in `dir`, sequentially. Clean or missing binary → no finding;
- * non-zero exit, signal kill, or other errno → one warning finding per tool.
+ * Run every detected L2 tool in `dir`, sequentially. Clean or missing binary → no finding.
+ * Per-tool interpreters: gofmt reports one warning per changed unformatted file (parsed
+ * from `gofmt -l` output, including exit-0 success); every other tool yields today's generic
+ * warning on failure. ENOENT (missing binary) stays silent; timeout and signal-kill
+ * semantics are unchanged (one warning finding per tool).
  * `spawn` is injectable for tests; defaults to the real `execTool`.
  * `changedFiles` scopes file-list output (gofmt) to the PR; omitted means an empty set
  * (silence, never a whole-repo dump).
