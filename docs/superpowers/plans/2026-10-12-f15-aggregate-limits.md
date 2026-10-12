@@ -43,7 +43,8 @@
 **Exact behavior:**
 - `action.yml` (descriptions exact): `max_findings` default 200 ("Total findings published (inline + body)"), `max_inline_comments` default 30 ("Inline comments posted per review"), `max_review_body_chars` default 60000 ("Maximum review body size in Unicode code points"), `max_artifact_bytes` default 8388608 ("Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts").
 - `getInputs`: `maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1)`, `maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1)`, `maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1000)`, `maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1)`.
-- `tests/main.test.ts` `inputsFor` gains `maxFindings: o.maxFindings ?? 200` (same pattern for all four) + matching `MockOpts` optional fields (pattern follows `maxPromptChars`); `PrivOpts` gains `maxArtifactBytes?: number; maxFindings?: number` with `runPrivileged` forwarding into its `inputsFor` call (Flow B tests in Tasks 63–64 use these).
+- `tests/main.test.ts` `inputsFor` gains `maxFindings: o.maxFindings ?? DEFAULT_MAX_FINDINGS` (same pattern for all four, importing the constants — values single-sourced, not repeated literals) + matching `MockOpts` optional fields (pattern follows `maxPromptChars`); `PrivOpts` gains all four optional fields (`maxArtifactBytes`, `maxFindings`, `maxInlineComments`, `maxReviewBodyChars`) with `runPrivileged` forwarding each into its `inputsFor` call (Flow B tests in Tasks 63–64 drive every cap through these).
+- `tests/evals/harness.ts` `defaultInputs` gains the four fields via the `DEFAULT_*` constants (typing stays whole; values single-sourced).
 
 - [ ] **Step 1: Write the failing tests**
   - `tests/inputs.test.ts`: extend the input-name list with the four snake_case names; defaults test (`maxFindings` 200, `maxInlineComments` 30, `maxReviewBodyChars` 60000, `maxArtifactBytes` 8388608); rejections (`max_findings: "0"`, `max_review_body_chars: "5"` and `"999"` reject, `"1000"` accepts, `"12.5"`, `"lots"` → throw naming the input).
@@ -76,7 +77,7 @@ git commit -m "feat: aggregate-limit inputs for F15 bounds"
 
 **Files:**
 - Create: `src/artifact-limits.ts` (capped read + oversize policy)
-- Modify: `src/scanners.ts` (`runScanners`/`fromStdout`/`runGitleaks`/SBOM branch), `src/main.ts` (`readFindings` + `runScanners` call site), `src/diff.ts` (`readPrMeta` only)
+- Modify: `src/scanners.ts` (`runScanners`/`fromStdout`/`runGitleaks`/SBOM branch), `src/main.ts` (`readFindings` + the three read call sites `:877`/`:937`/`:976`), `src/diff.ts` (`readPrMeta` only)
 - Test: `tests/artifact-limits.test.ts` (new), `tests/scanners.test.ts`, `tests/main.test.ts` (readFindings), `tests/diff.test.ts` (readPrMeta)
 - Rebuild: `dist/index.js`
 
@@ -85,11 +86,11 @@ git commit -m "feat: aggregate-limit inputs for F15 bounds"
 - Produces: `readCappedFileSync(path, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES): { ok: true; text: string } | { ok: false; oversize: true }` (synchronous `openSync`/`readSync` of at most `max+1` bytes — readers and their tests stay synchronous); `oversizeMessage(source: string, max: number): string` (exact spec text; scanners wrap it in their local `warning("scanner-failed", …)`); `byteCheck(text: string, max: number, source: string): Finding[] | undefined` (`[warning]` when oversize, `undefined` when it fits — Finding objects built literally, no import of scanners' private `warning()`); `fromStdout` gains trailing `maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES` (check order inside: missing → timedOut → byteCheck → parse); `runScanners` options gain `maxArtifactBytes?: number`; `runGitleaks(dir, timeoutMs, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES)`; `readFindings(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES)`; `readPrMeta(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES)` (all optional-with-default: every existing caller and sync test compiles unchanged).
 
 **Exact behavior:**
-- `readCappedFileSync`: oversize (bytesRead > max) returns `{ ok: false, oversize: true }` without ever holding the file; read errors propagate to the caller's existing handling (NOT conflated with oversize).
+- `readCappedFileSync(path, maxBytes)`: `fd = openSync(path)`; `n = Math.min(maxBytes, fstatSync(fd).size) + 1` (allocation bounded by the FILE, never by a bare `max+1` — an absurd input value cannot exhaust memory); loop `readSync` until `n` bytes or EOF (short reads accumulate); `closeSync` in `finally`. Oversize (bytesRead > max) returns `{ ok: false, oversize: true }` without ever holding the file; read errors propagate to the caller's existing handling (NOT conflated with oversize).
 - `fromStdout`: byteCheck FIRST after missing/timedOut (label = the existing `label` arg); oversize → warning, no parse attempted. SBOM branch: same check before `isCycloneDx`, source `"sbom"`.
 - `runGitleaks`: capped file read; oversize → warning on a DISTINCT branch before the exit-code check (an exit-0 oversize reads as degraded, never `[]`).
 - `readFindings`: oversize → throw `lupa: findings.json exceeds the artifact read limit (${max} bytes)` (exact). `readPrMeta`: oversize → throw in the existing `Invalid pr-meta.json …` shape.
-- `runScanners` threads `o.maxArtifactBytes` into every `fromStdout` call, `runGitleaks`, and the SBOM check; `main.ts:877` passes `env.inputs.maxArtifactBytes`. `diff.patch` reads and `sarif.json` writing explicitly untouched.
+- `runScanners` threads `o.maxArtifactBytes` into every `fromStdout` call, `runGitleaks`, and the SBOM check; `main.ts` passes `env.inputs.maxArtifactBytes` at all three read call sites — the `runScanners` call (`:877`), `readPrMeta` (`:937`), and `readFindings` (`:976`) — so an owner-set value governs every surface (no silent default fallback). `diff.patch` reads and `sarif.json` writing explicitly untouched.
 
 - [ ] **Step 1: Write the failing tests**
   - `tests/artifact-limits.test.ts`: `readCappedFileSync` exact-max passes / max+1 oversize / missing file throws (sync — `expect(() => …).toThrow()`); `oversizeMessage` exact text; `byteCheck` fits→undefined / oversize→single warning.
@@ -122,7 +123,7 @@ git commit -m "fix: bounded artifact ingestion with fail-loud oversize (F15)"
 ### Task 64: F15 — publication funnel
 
 **Files:**
-- Modify: `src/review.ts` (`prioritizeFindings`, `capBody`), `src/main.ts` (`publishReview` funnel, dry-run log, summary write, issue-fallback site, `Gateway.createReview` opts + call site), `src/github.ts` (`PostReviewOptions.maxBodyChars` required + fold re-cap)
+- Modify: `src/review.ts` (`prioritizeFindings`, `capBody`), `src/main.ts` (`publishReview` funnel, dry-run log, summary write, issue-fallback site, `Gateway.createReview` opts + call site), `src/github.ts` (`PostReviewOptions.maxBodyChars` optional-with-default + fold re-cap)
 - Test: `tests/review.test.ts`, `tests/main.test.ts`, `tests/github.test.ts` (fakes gain `maxBodyChars`; existing no-opts `postReview` calls compile unchanged)
 - Rebuild: `dist/index.js`
 
@@ -132,14 +133,14 @@ git commit -m "fix: bounded artifact ingestion with fail-loud oversize (F15)"
 
 **Exact behavior:**
 - `publishReview`: `ordered = prioritizeFindings(findings)` → `retained`/`omitted`; `mapToComments(retained, hunks)` → inline sliced to `maxInlineComments`, excess appended to general; `body = buildBody(general, summaryFor(fullSet))` (summary head shows the FULL count); `capBody(body, maxReviewBodyChars, omitted>0 ? [omissionMarker] : [])` — markers always appended in argument order even when the content fits; `RangeError` iff markers alone exceed the cap; dry-run log gains posted (post-cap) counts + `omitted=`; `eventFor`/`exitFor` call sites unchanged (full pre-cap set); summary write via `buildFallbackReport(findings, { maxBytes: 1048576 − existing − 1 })` (`existing` via `statSync`, missing → 0), too-small → `core.warning` + skip; `sarif.json` writer explicitly untouched.
-- `postReview`: fold path extracts `> Omitted:` lines from the body (removed, never duplicated), passes them as `capBody` markers, strips stale trunc-notes (template regex), re-caps with `opts?.maxBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS`, fresh trunc-note last.
+- `postReview`: fold path implements the spec's exact re-cap algorithm (strip stale notes remembering `strippedAny`, extract `> Omitted:` lines as markers, cut to `max − markers − noteLen`, append markers, fresh note IFF `strippedAny` or cut dropped content) with `opts?.maxBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS`. No test-fake updates needed (fewer params still compile; existing `{canWrite}` calls unaffected).
 - `Gateway.createReview` opts gain optional `maxBodyChars?: number`; `realGateway` forwards it; `main.ts:774` passes `env.inputs.maxReviewBodyChars`. No test-fake updates needed (fewer params still compile; existing `{canWrite}` calls unaffected).
-- Issue-fallback site: `buildFallbackReport(retained, { maxBytes: maxReviewBodyChars − markerBytes − 2 })` with the publication omission marker prepended when `omitted > 0`.
+- Issue-fallback site: `buildFallbackReport(retained, { maxBytes: budget })` with `budget = omitted>0 ? maxReviewBodyChars − byteLength(omissionMarker) − 2 : maxReviewBodyChars`, publication omission marker prepended when `omitted > 0`.
 
 - [ ] **Step 1: Write the failing tests**
   - `tests/review.test.ts`: `prioritizeFindings` order (highs, stable ties) + `capBody` units (whole-line, over-long mid-line cut, emoji-safe, fence backup, stale-note strip + omission extraction without duplication, marker-appended-when-fits, marker-inside guarantee, marker-too-big `RangeError`).
-  - `tests/main.test.ts`: 500-finding funnel (retained 200, inline 30, folded general order, exact `> Omitted: 300` marker, gates see 500, artifact keeps 500, summary head shows 500); fixture findings reference files/lines present in a small inline `ParsedHunk` fixture so 30+ map inline. Body truncation (note inside cap); summary cap + skip-warning; dry-run `omitted=`; issue-fallback retained-set body.
-  - `tests/github.test.ts`: off-diff fold re-cap (single trunc-note last, omission count preserved, under cap).
+  - `tests/main.test.ts`: 500-finding funnel (retained 200, inline 30, folded general order, exact `> Omitted: 300` marker, gates see 500, artifact keeps 500, summary head shows 500); fixture findings reference files/lines present in a small unified-diff string passed via `runWithMocks({ diff })` (publishReview parses hunks internally — `ParsedHunk` cannot be injected). Body truncation (note inside cap); summary cap + skip-warning; dry-run `omitted=`; issue-fallback retained-set body (heading shows retained count).
+  - `tests/github.test.ts`: off-diff fold re-cap (single trunc-note last, omission count preserved, under cap; fits-after-strip case re-emits the note).
   - Flow B bounds: end-to-end through the shared paths (capped `readFindings` + capped `publishReview`, `PrivOpts` passthrough from Task 62); oversized Flow B artifact → loud throw with nothing posted.
 
 - [ ] **Step 2: Run tests to verify they fail**

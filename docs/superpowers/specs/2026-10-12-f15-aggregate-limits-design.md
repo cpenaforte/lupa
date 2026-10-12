@@ -180,12 +180,15 @@ absent, so the re-cap always runs — production passes it explicitly from
 behavior on small fixtures. `Gateway.createReview`'s opts gain the optional
 key (interface at `src/main.ts:81`, call site `:774` passes
 `env.inputs.maxReviewBodyChars`, `realGateway` forwards it at `:1030-1031`).
-fold path re-runs the shared `capBody` after folding: strip lines matching
-the trunc-note template (`^> Note: review body truncated to the \d+-character
-limit\.$` — stale notes from the pre-fold cap), extract the `> Omitted:`
-count lines and pass them as `capBody` markers (they survive inside the cap —
-a folded-then-recapped body never loses its omission count), cut fence-aware,
-append a fresh trunc-note last. Without this, ~30
+fold path re-runs the shared `capBody` after folding with this exact algorithm
+(deterministic — no `fits?` probe that could disagree with the cap):
+strip lines matching the trunc-note template (remember `strippedAny`);
+extract the `> Omitted:` count lines from the body (removed, never duplicated)
+and pass them as `capBody` markers; cut content fence-aware to
+`max − markers − noteLen` (note budget always reserved on the fold path);
+append markers, then the fresh trunc-note IFF (`strippedAny` || the cut
+dropped content). A stripped note is therefore always re-emitted; a clean
+fold (nothing dropped anywhere) posts no spurious note. Without this, ~30
 folded comments (~6 KB each at full field caps) could post a ~180 KB body and
 a retry-exhausted 422 would rethrow with no issue fallback. The `main.ts`
 `createReview` closure forwards the input.
@@ -210,9 +213,13 @@ silently — stated residual.
   65535 ceiling): published from the RETAINED set (priority-ordered,
   publication-capped — the same findings the review shows), with the
   publication `> Omitted:` marker prepended when `omitted > 0`:
-  `buildFallbackReport(retained, { maxBytes: maxReviewBodyChars − markerBytes
-  − 2 })`, marker first, then the report (its native marker covers any further
-  byte overflow). Same set, same marker vocabulary as the review
+  `buildFallbackReport(retained, { maxBytes: budget })` where `budget =
+  omitted > 0 ? maxReviewBodyChars − byteLength(omissionMarker) − 2 (the
+  blank-line separator) : maxReviewBodyChars`, marker first, then the report
+  (its native marker covers any further byte overflow). Its heading shows the retained count (`lupa: 200
+  finding(s).` for 200 retained of 500) — headings differ by construction; the
+  prepended omission marker makes the full total derivable. Same set, same
+  marker vocabulary as the review
   (conservative units: the code-point value as a byte cap is stricter for
   multibyte text, never looser). Wired at the F07 call site in `main.ts`.
 - Flow B gets every bound automatically (same `readFindings`, same
