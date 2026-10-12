@@ -86,8 +86,9 @@ The template:
   'github-token'`, parsed fail-closed at env construction (unset or unknown →
   `'github-token'`, mirroring today's `=== 'app'` fail-closed posture — a
   missing type must never post on a fork). Named updates: `main.test.ts`
-  fakes, `tests/evals/types.ts` (`Pick`), `tests/evals/harness.ts`
-  (`defaultInputs`), `tests/fixtures/evals/cases.ts` read-only fork case.
+  fakes, `tests/evals/types.ts` (`Pick`), `tests/evals/harness.ts` (RunEnv
+  literal `:208`, not `defaultInputs` — tokenType is RunEnv, not inputs),
+  `tests/fixtures/evals/cases.ts` read-only fork case.
   `README.md:163-168` (forks read-only / App-token text) is rewritten to the
   new chain (required content: the workflow-run token is the default posting
   credential on fork PRs; App token via `PR_REVIEWER_APP_ID` /
