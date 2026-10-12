@@ -49,7 +49,8 @@ export interface WalkLimits {
   deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked at the
   // top of each directory iteration including the first (a non-positive deadline
   // fires immediately — test-seam use; an unvisited start directory counts as one
-  // queued unit); known granularity: one synchronous directory
+  // queued unit); the comparison is `elapsed >= deadlineMs` so `deadlineMs: 0`
+  // fires deterministically. Known granularity: one synchronous directory
   // read plus its entry loop cannot be preempted, so the walk can overshoot the bound
   // by one directory's processing time
 }
@@ -66,7 +67,8 @@ export interface WalkSkipped {
 ```
 
 - `walkPaths(root, startAbs, limits?)`: names only — no `stat` size checks, no
-  binary scan. Skips `.git` segments, symlinks, and the prune set. Returns
+  binary scan (same `maxFiles`/`deadlineMs` semantics as `walkFiles`, so `glob`
+  inherits the 10 s default bound too). Skips `.git` segments, symlinks, and the prune set. Returns
   `{ paths: string[] (rel, sorted), truncated: boolean, skipped: WalkSkipped }`
   with `oversized`/`binary` always 0 (no eligibility stage) and `overLimit`
   counting unexamined entries on limit hit. `glob` filters by pattern, caps at
@@ -74,9 +76,10 @@ export interface WalkSkipped {
   pattern matches exceed the cap OR the walk hit a limit.
 - `walkFiles(root, startAbs, limits?)`: as today (size + binary eligibility) plus
   prune set, `maxFiles`, and `deadlineMs`. `statSync`- and `readdirSync`-failure skips
-  count in no bucket. A file start path goes through eligibility and records its
-  exclusion reason (`skipped.oversized`/`binary`) instead of returning all-zero
-  silence. Returns
+  count in no bucket. A file start path counts as one examined unit, goes through
+  eligibility, and records its exclusion reason (`skipped.oversized`/`binary`)
+  instead of returning all-zero silence. `isBinaryFile` is exported for tests;
+  unreadable files fold into `binary` (open failure reads as binary). Returns
   `{ files: WalkFile[], truncated: boolean, skipped: WalkSkipped }` with real
   counts. `grepInRoot(root, args, timeoutMs?, limits?)` threads the optional limits
   to its walk, ORs walk truncation into its `truncated` flag and adds the
