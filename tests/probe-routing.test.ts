@@ -77,16 +77,32 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
     expect(urls()).toEqual([`${ZEN}/chat/completions`, `${ZEN}/responses`]);
   });
 
-  it("probe surfaces the WINNING style's verdicts (the 400 loser has no parsed body to leak)", async () => {
-    stubProbe(1, RESPONSES_OK_V);
+  it("probe surfaces ONLY the winning style's verdicts (400 loser leaks nothing)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        if (u.endsWith("/chat/completions")) {
+          // Loser: HTTP 400 with a verdicts-shaped body that must never be
+          // parsed (a 400 never reaches parseContent — no verdicts can attach).
+          return new Response(
+            JSON.stringify({ findings: [], duplicates: [[7, 8]], error: { message: "bad request" } }),
+            { status: 400 },
+          );
+        }
+        return new Response(JSON.stringify(RESPONSES_OK_V), { status: 200 });
+      }),
+    );
     const r = await callWithProbe("opencode-zen", "alpha-verdicts", ZEN, "k", msgs, o);
-    // toFindings ignores the new keys, so findings stay exactly [FINDING].
+    // toFindings ignores the new keys, so findings stay exactly [FINDING];
+    // verdicts equal ONLY the winner's — the loser's [[7, 8]] is absent.
     expect(r.result).toEqual({
       ok: true,
       findings: [FINDING],
       verdicts: { pairs: [[0, 1]], links: [[0, 0]], malformed: 0 },
     });
     expect(r.via).toBe("openai-responses");
+    expect(urls()).toEqual([`${ZEN}/chat/completions`, `${ZEN}/responses`]);
   });
 
   // Spec §9.5 test list: 404→success sequence for every winning style.
