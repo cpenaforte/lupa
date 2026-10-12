@@ -73,8 +73,10 @@ The template:
   notice names the downgrade). Exact text: `::notice::lupa: posting fork
   review with the workflow-run token (App token unavailable). For App-token
   posting set PR_REVIEWER_APP_ID / PR_REVIEWER_APP_KEY — see README (fork
-  reviews)`. Downgrade visible, never silent. The guard text and placement
-  are pinned in `templates.test.ts`.
+  reviews)`. The `::notice::` prefix applies to the annotation only; the
+  step-summary line is the same sentence without it (a literal prefix would
+  render in the markdown). Downgrade visible, never silent. The guard text
+  and placement are pinned in `templates.test.ts`.
 - Pins explicit `fail_level: warning` in the Post step's `with:` block
   (today it inherits the action default silently).
 
@@ -141,7 +143,9 @@ test-lupa's privileged template at the F14 commit SHA (committed `dist/`
 included). Then: a fork PR against test-lupa with a warning-severity finding
 and NO App configured — expect a posted review with event COMMENT under the
 workflow-run token plus the downgrade line in the post run's
-summary/annotations; then with App configured — expect the notice gone.
+summary/annotations; then with App configured — expect the notice gone;
+then with an INVALID App key — expect a posted COMMENT review plus the
+downgrade notice (resilient fallback, not a red job with no review).
 Record verdicts in the implementation report. The whole-plan release re-pins
 both templates to the release tag (with the `templates.test.ts` v0.5.0
 literal) — not this stage. (Pre-existing residual,

@@ -22,7 +22,7 @@
 ## Review Focus
 
 - **An unset token type on a fork never posts.** Test in Task 66's step style (fail-closed matrix row).
-- **An App-creation failure still posts via the workflow-run token with the downgrade notice.** Pinned by Task 65's template text/placement test; behavior proved by the owner canary.
+- **An App-creation failure still posts via the workflow-run token with the downgrade notice.** Pinned by Task 65's template text/placement test (ordering + App-slice); runtime behavior proved by owner canary step 4.
 - **Divergent fail_level values fail the suite.** Test in Task 65's step style (parity extraction).
 - **An artifact carrying a fail_level-shaped field changes nothing.** Test in Task 66's step style (Flow B fixture with planted field, event from inputs).
 - **`github-token` on a fork still skips with the loud warning (producer behavior unchanged).** Test in Task 66's step style (canWrite matrix).
@@ -33,7 +33,7 @@
 
 **Files:**
 - Modify: `docs/workflow-template-privileged.yml` (App continue-on-error, guard step, token-type arm, fail_level), `README.md` (fork section per spec), `tests/templates.test.ts` (pins + parity), `tests/readme.test.ts` (fork-chain sentences)
-- Rebuild: `dist/index.js` (no src changes — rebuild still runs as a hygiene gate; commit only if changed)
+- Rebuild: `dist/index.js` (no src changes in this task — the rebuild still runs as a hygiene gate and the commit includes it per Global Constraints; expect an empty diff)
 
 **Interfaces:**
 - Consumes: spec §2 exact strings (notice text, `fail_level: warning`, token-type values).
@@ -47,13 +47,13 @@
 - `templates.test.ts`: guard step present (name + `always()` + outcome check + both notice emissions with the exact downgrade sentence); App step has `continue-on-error: true`; fallback arm contains `'workflow-run'`; parity case — extract `fail_level: (\w+)` from the `with:` block following the `uses: cpenaforte/lupa@` line in EACH template, `expect(privileged).toBe(producer)`.
 - README fork section rewritten to the spec's required content (workflow-run default credential; App via `PR_REVIEWER_APP_ID`/`PR_REVIEWER_APP_KEY` recommended; github-token/unset skip loudly).
 
-- [ ] **Step 1: Write the failing tests in `tests/templates.test.ts`**
+- [ ] **Step 1: Write the failing tests in `tests/templates.test.ts` + `tests/readme.test.ts`**
 
-Guard/name/`always()`/both emissions/exact sentence; App `continue-on-error`; `'workflow-run'` arm; parity extraction equality. README assertions (workflow-run default, App vars, loud skip) go in `tests/readme.test.ts` as a new fork-chain case. `tests/readme.test.ts` joins the Step 5 commit.
+Guard step present with exact name; `if:` contains `always()` and the outcome check; BOTH emissions with the exact downgrade sentence (annotation WITH the `::notice::` prefix, summary line WITHOUT it); ordering — guard index after the `Create GitHub App token` step and before `Download` (index comparison on step names); the App step's own block (text between its `name:` line and the next `- name:`) contains `continue-on-error: true` (a file-wide search would also match the Post step); fallback arm contains `'workflow-run'`; parity extraction equality (`fail_level: (\w+)` from the `with:` block after each `uses: cpenaforte/lupa@` line, privileged equals producer). `tests/readme.test.ts` fork-chain case: workflow-run default credential, App vars, downgrade notice, loud skip — all four sentences. `tests/readme.test.ts` joins the Step 5 commit.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `npx vitest run tests/templates.test.ts`
+Run: `npx vitest run tests/templates.test.ts tests/readme.test.ts`
 Expected: FAIL (no guard, no arm, no parity).
 
 - [ ] **Step 3: Implement in `docs/workflow-template-privileged.yml` + `README.md`**
@@ -77,7 +77,7 @@ git commit -m "feat: fork posting via workflow-run token with visible downgrade 
 ### Task 66: F14 — fail-closed token type in action code
 
 **Files:**
-- Modify: `src/main.ts` (`RunEnv.tokenType`, parse, `canWrite`, L2 check, `:774` unchanged shape), `tests/main.test.ts` (6 fakes + MockOpts), `tests/evals/types.ts` (`Pick`), `tests/evals/harness.ts` (`defaultInputs`), `tests/fixtures/evals/cases.ts` (read-only fork case)
+- Modify: `src/main.ts` (`RunEnv.tokenType`, parse, `canWrite`, L2 skip, `:774` unchanged shape; `main.ts:58` doc comment for the replaced field), `tests/main.test.ts` (6 fakes + MockOpts), `tests/evals/types.ts` (`Pick`), `tests/evals/harness.ts` (RunEnv literal `:208`, NOT `defaultInputs` — tokenType is RunEnv, not inputs), `tests/fixtures/evals/cases.ts` (read-only fork case), `README.md:27` if it names the token field
 - Test: `tests/main.test.ts` (matrix), Flow B artifact-field test
 - Rebuild: `dist/index.js`
 
@@ -86,14 +86,14 @@ git commit -m "feat: fork posting via workflow-run token with visible downgrade 
 - Produces: `RunEnv.tokenType: 'app' | 'workflow-run' | 'github-token'` (replaces `tokenIsApp`; no other consumer).
 
 **Exact behavior:**
-- Parse at env construction: `PR_REVIEWER_TOKEN_TYPE === 'app' ? 'app' : value === 'workflow-run' ? 'workflow-run' : 'github-token'` (unset/unknown → `'github-token'`, fail-closed).
-- `canWrite = !isFork || tokenType === 'app' || tokenType === 'workflow-run'` (exact). L2 scrub uses `tokenType === 'app'` (semantics preserved).
-- Fakes: `MockOpts.tokenType?: 'app' | 'workflow-run' | 'github-token'`; env builders use `o.tokenType ?? 'github-token'`; evals `Pick` + `defaultInputs` (`'github-token'`); read-only fork case keeps skip+warn with no post.
+- Parse at env construction, pinned as `const value = process.env.PR_REVIEWER_TOKEN_TYPE; tokenType = value === 'app' ? 'app' : value === 'workflow-run' ? 'workflow-run' : 'github-token'` (unset/unknown → `'github-token'`, fail-closed).
+- `canWrite = !isFork || tokenType === 'app' || tokenType === 'workflow-run'` (exact). L2 skip (`forkWithSecrets`) uses `tokenType === 'app'` (semantics preserved).
+- Fakes: `MockOpts.tokenType?: 'app' | 'workflow-run' | 'github-token'`; env builders use `o.tokenType ?? 'github-token'`; evals `Pick` + RunEnv literal (`'github-token'`); read-only fork case keeps skip+warn with no post.
 - `eventFor`/`exitFor` call sites unchanged; no artifact field is consulted.
 
 - [ ] **Step 1: Write the failing tests in `tests/main.test.ts`**
 
-canWrite matrix on forks (app→posts, workflow-run→posts, github-token→skip+loud, UNSET→skip+loud — construct env without the var); producer github-token fork skip preserved; Flow B fixture with a planted `fail_level`-shaped field in pr-meta → event still from inputs.
+canWrite matrix — fork rows (app→posts, workflow-run→posts, github-token→skip+loud) plus non-fork rows (all three types post); UNSET and unknown-value rows driven through `readRunEnv` (exported) with the save/assign/restore pattern (`delete process.env.PR_REVIEWER_TOKEN_TYPE` for UNSET — the existing helper only assigns, so write the delete explicitly); producer github-token fork skip preserved; Flow B fixtures with planted `fail_level`-shaped fields in BOTH pr-meta.json and findings.json where the input `fail_level` DIFFERS from the planted value → event still from inputs.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -122,7 +122,8 @@ git commit -m "fix: fail-closed fork token type with workflow-run posting (F14)"
 
 Not implementer work (needs a live fork + App toggle); the implementer records it as pending in the Task 66 report.
 
-1. Point test-lupa's privileged template at the F14 commit SHA (NOT `658ab55`, which predates the feature).
+1. Point test-lupa's privileged template at the Task 66 commit SHA (NOT `658ab55`, which predates the feature — the Task 65 commit alone lacks the in-action gate).
 2. Fork PR with a warning-severity finding, NO App configured → expect posted COMMENT review + downgrade line in the post run's summary/annotations.
 3. Same with App configured → expect the notice gone, review posted.
-4. Record verdicts (links) in the task report thread or PR comments.
+4. Same with an INVALID App key → expect a posted COMMENT review plus the downgrade notice (resilient fallback, not a red job with no review).
+5. Record verdicts (links) in the task report thread or PR comments.
