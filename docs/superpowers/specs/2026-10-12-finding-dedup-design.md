@@ -41,7 +41,11 @@ aligned):
 
 ```ts
 // llm.ts, alongside LlmResult:
-interface DedupVerdicts { pairs: Array<[number, number]>; links: Array<[number, number]> }
+interface DedupVerdicts {
+  pairs: Array<[number, number]>;
+  links: Array<[number, number]>;
+  malformed: number; // shape-bad entries dropped at parse + out-of-sent-range verdicts dropped at send
+}
 // pairs: sent-list indices. links: ABSOLUTE all-list indices
 // [allIndex, sentIndex] — converted at the boundary (slowPath maps each
 // response-relative position r to fast.length + r), so the merge and Flow B
@@ -49,29 +53,31 @@ interface DedupVerdicts { pairs: Array<[number, number]>; links: Array<[number, 
 interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts; … }
 ```
 
-- New sibling parser `parseVerdicts(rawText: string): { verdicts: DedupVerdicts; malformed: number }`
-  (`llm.ts`, exported, unit-tested): reads the SAME raw response text as
-  `toFindings` and returns links response-relative (`[responsePosition,
-  sentIndex]`, 0-based within the response findings array). Drops unknown
-  indices, self-pairs, dangling pointers, non-pairs, and wrong-length pairs
-  HERE (each drop increments `malformed`); null and absent verdict keys both
-  mean "no verdict" (schema-less providers and the Google no-schema fallback
-  never emit them — that is normal, not malformed). `toFindings`,
-  `sanitizeFinding`, `isFinding`, and the Finding contract are untouched.
-  `slowPath` converts to absolute (`allIndex = fast.length +
-  responsePosition`) before returning or persisting — every consumer below
-  sees absolute indices only.
-- Every adapter attaches `verdicts: parseVerdicts(raw)` on the `LlmResult`
-  it builds (absent only where there is no raw JSON text); the probe carries
-  the WINNING style's result, verdicts included (a schema-caused 400 walks
-  the other styles first — pinned behavior, unchanged).
-- `slowPath` returns `{ findings, verdicts } | undefined`
-  (`Promise<{ findings: Finding[]; verdicts: DedupVerdicts } | undefined>`);
-  the agent-mode return carries `verdicts` absent (no contract there — agent
-  runs never merge, and log nothing about it, by design); every slow-path
-  skip returns `undefined` as today.
-- `PublishArgs` gains `verdicts?: DedupVerdicts`; `publishReview` returns
-  `Promise<{ merged: Finding[] }>` (callers may ignore it).
+- New sibling parser `parseVerdicts(parsed: unknown): DedupVerdicts`
+  (`llm.ts`, exported, unit-tested): takes the ALREADY-PARSED response
+  object (adapters parse once via `parseContent` — fence handling inherited,
+  no double parse). Drops unknown indices, self-pairs, dangling pointers,
+  non-pairs, and wrong-length pairs (each drop increments `malformed`); null
+  and absent verdict keys both mean "no verdict" (schema-less providers and
+  the Google no-schema fallback never emit them — that is normal, not
+  malformed). `toFindings`, `sanitizeFinding`, `isFinding`, and the Finding
+  contract are untouched.
+- Every adapter attaches the whole `parseVerdicts(parsed)` object on the
+  `LlmResult` it builds (absent only where there is no parsed JSON body);
+  the probe carries the WINNING style's result, verdicts included (a
+  schema-caused 400 walks the other styles first — pinned behavior, unchanged;
+  a losing style's verdicts never leak).
+- `slowPath` returns `{ findings, verdicts? } | undefined`
+  (`Promise<{ findings: Finding[]; verdicts?: DedupVerdicts } | undefined>`);
+  on success it converts links to absolute (`allIndex = fast.length + r`),
+  drops verdicts with sent index ≥ `b.fast.length` (cut tail — unseen by
+  construction) counting them into `malformed`, and warns
+  `lupa: ignored <n> malformed dedup verdict(s)` (exact shape) iff
+  `malformed > 0`. The agent-mode return carries `verdicts` absent (no
+  contract there — agent runs never merge, and log nothing about it, by
+  design); every slow-path skip returns `undefined` as today.
+- `PublishArgs` gains `verdicts?: DedupVerdicts` (no return-type change —
+  `publishReview` stays `void`).
 
 ### Prompt contract and schema
 
@@ -79,7 +85,11 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
   IDs are indices into exactly what the model sees, rendered as an `"id"`
   field on each finding object with ALL other fields complete and untruncated
   (full message + suggestion bodies — the model judges on substantive
-  content, never bare IDs or locations). Tail indices cut by the
+  content, never bare IDs or locations). IDs render through
+  `budgetPrompt(..., opts?: { withIds?: boolean })` (default off), which the
+  slow path passes as true so ID bytes move the cut point; the
+  agent-mode branch rebuilds its messages without IDs (fewer bytes than
+  measured — still within budget). Tail indices cut by the
   budget are not sendable — verdicts referencing them are unknown by
   construction. Published output is unchanged when no verdicts return; the
   PROMPT gains IDs + verdict instructions ONLY in the single-shot call path
@@ -100,29 +110,35 @@ interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts
   in-adapter retry without schema, whose keyless reply parses as
   no-verdicts). Model
   findings use `duplicateOf` to restate sent findings (response findings
-  have no sent ID to pair with).
+  have no sent ID to pair with). The verdict instructions (`DEDUP_INSTRUCTIONS`,
+  appended to the single-shot system text only) name the `duplicates` /
+  `duplicateOf` fields, 0-based indices into the sent list, and pair arrays —
+  the full shape for schema-less providers that never see the JSON schema.
 
 ### Deterministic merge (`mergeDuplicates(findings, verdicts)`, `review.ts`, exported)
 
 All indices absolute (pairs are sent indices; links were converted at the
-boundary — the merge performs no offset arithmetic). Shared text caps
-(`MSG_CAP`, `RULE_CAP`, `capText`, `TRUNC_MARK`) move to `fastpath.ts`
+boundary — the merge performs no offset arithmetic). Called in exactly two
+places with identical (pre-merge, verdicts) inputs — `publishReview` for the
+funnel and `runFlowA` for the `sarif.json` line (same pure function, same
+result; never on already-merged output). Shared text caps (`MSG_CAP`,
+`RULE_CAP`, `capText`, `TRUNC_MARK`) move to `fastpath.ts`
 (finding-contract home, no import cycles), with `main.ts` and `review.ts`
 importing them — behavior unchanged.
 
 Merge point: inside `publishReview`, AFTER gate inputs are fixed —
 `eventFor(fullSet)`, `summaryFor(fullSet)`, and the dry-run `high=` count
 keep the full pre-merge set (already order-free calls — no reordering
-needed); `mapToComments`/`buildBody` take the merged set. `publishReview`
-returns the merged set for the `sarif.json` line (no second merge anywhere
-— re-merging shifted positions would be unsound). `exitFor` sites outside
-(Flow A/B) are untouched. Gate outcomes are provably identical on either
-set, so the F15 "full set" tests stay green unchanged.
+needed); `mapToComments`/`buildBody` take the merged set. `exitFor` sites
+outside (Flow A/B) are untouched. Gate outcomes are provably identical on
+either set, so the F15 "full set" tests stay green unchanged.
 
 1. Verdict groups union by transitive closure over member positions
-   (pairs of sent indices; links of response positions to sent indices).
-   Group member order is position order (sent indices, then response
-   positions) — every ordered rule below follows it.
+   (absolute indices throughout). Group member order is position order —
+   every ordered rule below follows it. `mergeDuplicates` returns
+   `{ merged, dropped }`; `publishReview` logs
+   `lupa: ignored <n> unmergeable dedup verdict(s)` (exact shape) iff
+   `dropped > 0`.
 2. Same-location precondition: members must share `file`, and lines must be
    both-undefined or equal — else the pair/link is ignored with a warning
    (a wrong model pair must never swallow an unrelated location).
@@ -144,15 +160,21 @@ set, so the F15 "full set" tests stay green unchanged.
 
 ### Verdict persistence across flows
 
-- Flow A: the artifact writes the pre-merge set AND `verdicts.json`
-  (`{pairs, links}`, validated arrays of int-pairs). Flow A always writes
-  `verdicts.json`, even `{pairs: [], links: []}` when there is no LLM —
-  a missing file is never a normal state.
-- Flow B: reads `verdicts.json` best-effort under the F15 artifact read cap
-  (oversize/unparseable → warning + no merge) and range-checks every index
-  against `findings.length` (out-of-range = malformed, dropped with the
-  count); then merges in the same `publishReview` point. Fork-PR comments
-  dedup identically.
+### Verdict persistence across flows (inside pr-meta.json — no template change)
+
+The artifact upload list is explicit and template changes are out of scope,
+so verdicts ride the already-uploaded `pr-meta.json`: `PrMeta` gains
+`verdicts?: DedupVerdicts` (`readPrMeta` ignores other unknown keys as
+today; the verdicts shape is validated like the rest).
+
+- Flow A: `pr-meta.json` is (re)written with verdicts after the slow path
+  (always written, even `{pairs: [], links: [], malformed: 0}` when there is
+  no LLM — a missing verdicts key means "no judge ran").
+- Flow B: reads verdicts from `pr-meta.json` best-effort under the F15
+  artifact read cap (oversize/unparseable → warning + no merge) and
+  range-checks every index against `findings.length` (out-of-range =
+  malformed, dropped with the count); then merges in the same
+  `publishReview` point. Fork-PR comments dedup identically.
 
 ### Failure behavior
 
