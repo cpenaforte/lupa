@@ -32,62 +32,113 @@ static key separates "same finding" from "two findings on one line".
 
 ## 2. Design
 
-### Prompt contract
+### Verdict transport (out-of-band, order-preserving)
 
-The review prompt's scanner/fastpath findings list gains stable numeric IDs
-(index in the sent array — deterministic across runs). The response schema
-gains one optional section:
-
-```ts
-duplicates?: Array<[number, number]>  // pairs of finding IDs, same evidence
-```
-
-Response findings (the model's own) carry no sent-list ID, so a model
-finding that restates a scanner finding cannot appear in a pair. For that
-direction the schema allows a per-finding pointer instead:
+Sanitizers rebuild findings from known fields, so verdicts never ride on
+finding objects. The parse layer extracts them separately, keyed by
+position (every pipeline stage below is order-preserving, so positions stay
+aligned):
 
 ```ts
-// on a response finding:
-duplicateOf?: number  // sent-list index this finding restates
+// llm.ts, alongside LlmResult:
+interface DedupVerdicts { pairs: Array<[number, number]>; links: Array<[number, number]> }
+// links: [responsePosition, sentIndex] from per-finding duplicateOf pointers
+interface LlmResult { ok: boolean; findings: Finding[]; verdicts?: DedupVerdicts; … }
 ```
 
-Both mechanisms feed the same merge (§2): pair groups and `duplicateOf`
-links union together. No `duplicates` section AND no `duplicateOf` pointers
-= "no duplicates" verdict (normal, not an error).
-Pairs/pointers reference sent-list indices only.
+- `toFindings` (or a sibling parser — named per task) returns
+  `{ findings, verdicts }`; unknown indices, self-pairs, dangling pointers,
+  and non-pair entries are dropped from `verdicts` HERE (counted for the
+  malformed warning below), so downstream only sees valid verdicts.
+- Every adapter passes `verdicts` through on its `LlmResult` (absent = no
+  verdicts; agent-mode and non-JSON paths leave it absent — the agent prompt
+  carries no dedup contract, so agent runs never merge).
+- `sanitizeFinding`, `isFinding`, and the Finding contract are untouched.
 
-### Deterministic merge (code)
+### Prompt contract and schema
 
-1. Pairs AND `duplicateOf` pointers union into groups by transitive closure
-   (A=B, B=C → one group; a response finding pointing at a sent finding
-   joins that finding's group).
-2. Unknown indices, self-pairs, dangling pointers, and non-pair entries are
-   ignored with a warning; every finding stays unless merged through a valid
-   pair or pointer.
-3. Per group: severity takes max (`high` > `warning` > `info`); evidence =
-   concatenated member messages each tagged with its source rule (no text
-   rewritten); renders as ONE inline comment / one body item citing all
-   member rules.
-4. F15 top-N/marker accounting runs AFTER merging — the merged set is what
-   is published, counted, and gated. The full pre-merge set stays in the
-   `findings.json` artifact unchanged.
+- The sent array is the POST-CUT fast list (`b.fast` after F10 budget cuts):
+  IDs are indices into exactly what the model sees. Tail indices cut by the
+  budget are not sendable — verdicts referencing them are unknown by
+  construction. Published output is unchanged when no verdicts return; the
+  PROMPT gains IDs + verdict instructions (ID bytes count against the F10
+  budget like any prompt bytes — the cut point moves).
+- Strict-provider schema (nullable-required, replacing the impossible
+  "optional" shape):
+  ```json
+  "duplicates": { "type": ["array", "null"],
+    "items": { "type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "minItems": 2, "maxItems": 2 } },
+  "duplicateOf": { "type": ["integer", "null"] }
+  ```
+  Both keys join the item/top-level `required` lists they belong to (the
+  `prompt.test.ts` required-list pins update — named per task). A 400 from
+  a strict provider falls back through the existing probe path. Model
+  findings use `duplicateOf` to restate sent findings (response findings
+  have no sent ID to pair with).
+
+### Deterministic merge (`mergeDuplicates`, `review.ts`, exported)
+
+Merge point: inside `publishReview`, AFTER gate inputs are fixed —
+`eventFor`/`exitFor` keep receiving the FULL pre-merge set (F15 tests
+unchanged), and gate outcomes are provably identical on the merged set
+(severity-max preserves `some high` and `some non-info`; verified case by
+case — the merged set only changes counts, never the predicates).
+
+1. Verdict groups union by transitive closure over member positions
+   (pairs of sent indices; links of response positions to sent indices).
+2. Same-location precondition: members must share `file`, and lines must be
+   both-undefined or equal — else the pair/link is ignored with a warning
+   (a wrong model pair must never swallow an unrelated location).
+3. Partially-valid pairs are dropped whole (the valid member stays alone —
+   never merge on partial evidence).
+4. Survivor per group, in first-member-position order (stable, deterministic):
+   `file`/`line` = the defined member's (precondition makes them coherent);
+   `rule` = distinct member rules joined with `"+"` in group order
+   (identical rules collapse: `[github-pat, github-pat]` → `"github-pat"`);
+   `severity` = max; `message` = members in group order as
+   `` `[${rule}] ${message}` `` joined with `"\n\n"` (no text rewritten),
+   then re-capped with the existing message cap + marker (bounded output
+   beats completeness); `suggestion` = first defined suggestion in group
+   order.
+5. F15 funnel (top-N → inline → body) runs on the merged set; marker counts
+   reflect post-merge totals. `sarif.json` is built from the merged set
+   (publication surface); `findings.json` keeps the pre-merge set (F15
+   artifact contract intact).
+
+### Verdict persistence across flows
+
+- Flow A: the artifact writes the pre-merge set AND `verdicts.json`
+  (`{pairs, links}`, validated arrays of int-pairs).
+- Flow B: reads `verdicts.json` best-effort (missing/malformed → warning +
+  no merge — fail-soft, same family as the verdict rules) and merges in the
+  same `publishReview` point. Fork-PR comments dedup identically.
 
 ### Failure behavior
 
-- Slow path skipped (no key): no judge exists → duplicates stay; documented
-  in the no-LLM note. No other behavior changes.
-- Malformed `duplicates` (unknown IDs, self-pairs, non-arrays, wrong shapes):
-  ignore the bad entries with a warning, keep all findings.
+- Slow path skipped (no key): no judge exists → duplicates stay.
+  `core.info("lupa: dedup skipped (slow path unavailable); scanner findings published unmerged")` (exact) + README dedup section documents it.
+- Malformed `duplicates` section / unknown indices / dangling pointers:
+  counted at parse, one warning, entries dropped, all findings kept.
 
 ## 3. Tests
 
-Mocked-LLM, deterministic (no live provider): canary-exact pair (gitleaks +
-semgrep `github-pat` on one file:line → one comment, `high`, both rules
-cited, secret still redacted); model-finding `duplicateOf` a scanner finding
-→ one comment citing both; transitive triple → one; unknown-ID and
-malformed-section cases keep every finding with a warning; no-section
-response is byte-identical to today; no-LLM run unchanged; F15 marker counts
-asserted on the merged set (omitted count reflects post-merge totals).
+Mocked-LLM, deterministic (no live provider), verdicts expressed through the
+`okChat`-style mocked reply content (`llm.test.ts` + adapter tests) and the
+merge function directly (`review.test.ts`):
+- Canary-exact pair (gitleaks + semgrep `github-pat` on one file:line → one
+  comment, `high`, rule `"github-pat"`, secret still redacted) + Flow B twin
+  (same verdicts via `verdicts.json` fixture).
+- Model-finding `duplicateOf` a scanner finding → one comment citing both.
+- Transitive triple → one; cross-file pair ignored with warning (locations
+  preserved); partially-valid pair dropped whole; unknown-ID and
+  malformed-section cases keep every finding with a warning.
+- No-section response: published output byte-identical (prompt bytes differ
+  by the IDs — stated, not tested as identical).
+- No-LLM run unchanged + exact skip note asserted in logs.
+- Agent-mode run: no verdicts, no merge (assert passthrough).
+- F15 marker counts on the merged set; SARIF alert count equals merged count.
+- Gate-equivalence: paired high+warning fixture gates REQUEST_CHANGES/1
+  identically pre/post merge (documents the predicate proof).
 
 ## 4. Verification and release
 
