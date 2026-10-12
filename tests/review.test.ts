@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, buildFallbackReport, eventFor, exitFor, mapToComments, redactFindings } from "../src/review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, isTruncNoteLine, mapToComments, omissionMarkerFor, prioritizeFindings, redactFindings, truncNoteFor } from "../src/review.js";
 import { parseHunks } from "../src/diff.js";
 import type { Finding } from "../src/fastpath.js";
 
@@ -317,5 +317,120 @@ describe("exitFor", () => {
     expect(exitFor("high", [{ severity: "info", file: "a", rule: "r", message: "m" }])).toBe(0);
     expect(exitFor("high", highFinding())).toBe(1);
     expect(exitFor("high", [])).toBe(0);
+  });
+});
+
+describe("prioritizeFindings", () => {
+  it("orders high before warning before info and keeps ties stable", () => {
+    const findings: Finding[] = [
+      { severity: "info", file: "a", rule: "r", message: "i1" },
+      { severity: "high", file: "b", rule: "r", message: "h1" },
+      { severity: "warning", file: "c", rule: "r", message: "w1" },
+      { severity: "high", file: "d", rule: "r", message: "h2" },
+      { severity: "info", file: "e", rule: "r", message: "i2" },
+      { severity: "warning", file: "f", rule: "r", message: "w2" },
+    ];
+    const ordered = prioritizeFindings(findings);
+    expect(ordered.map((f) => f.message)).toEqual(["h1", "h2", "w1", "w2", "i1", "i2"]);
+    // Input order is untouched (a new array is returned).
+    expect(findings.map((f) => f.message)).toEqual(["i1", "h1", "w1", "h2", "i2", "w2"]);
+  });
+});
+
+describe("publication markers", () => {
+  it("pins the exact omission and truncation strings", () => {
+    expect(omissionMarkerFor(300, 200)).toBe(
+      "> Omitted: 300 finding(s) omitted to fit the 200-finding publication limit.",
+    );
+    expect(truncNoteFor(60000)).toBe("> Note: review body truncated to the 60000-character limit.");
+    expect(isTruncNoteLine("> Note: review body truncated to the 60000-character limit.")).toBe(true);
+    expect(isTruncNoteLine("> Note: review body truncated to the abc-character limit.")).toBe(false);
+    expect(isTruncNoteLine("  > Note: review body truncated to the 60000-character limit.")).toBe(false);
+  });
+});
+
+describe("capBody", () => {
+  const cps = (s: string): number => Array.from(s).length;
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it("appends markers in argument order even when the content fits", () => {
+    expect(capBody("short", 60000, ["M1", "M2"])).toBe("short\nM1\nM2");
+  });
+
+  it("returns the body unchanged when it fits with no markers", () => {
+    expect(capBody("lupa: no findings.", 60000, [])).toBe("lupa: no findings.");
+  });
+
+  it("cuts whole lines and keeps markers plus a trailing note inside the cap", () => {
+    const body = ["lupa: 3 finding(s).", "", "line-aaaaaaaaaaaaaaaa", "line-bbbbbbbbbbbbbbbb", "line-cccccccccccccccc", "line-dddddddddddddddd"].join("\n");
+    const marker = omissionMarkerFor(5, 200);
+    const out = capBody(body, 160, [marker]);
+    expect(cps(out)).toBeLessThanOrEqual(160);
+    expect(out).toContain(marker);
+    expect(out.endsWith(truncNoteFor(160))).toBe(true);
+    // Whole-line cut: no partial line survives before the marker block.
+    const content = out.slice(0, out.indexOf(marker));
+    for (const line of content.split("\n").filter((l) => l !== "")) {
+      expect(body.split("\n")).toContain(line);
+    }
+  });
+
+  it("cuts a single over-long line mid-line, code-point-safe", () => {
+    const note = truncNoteFor(120);
+    const out = capBody("x".repeat(200), 120, []);
+    expect(cps(out)).toBe(120);
+    // The note is a line of its own: the separator newline is part of the cap.
+    expect(out).toBe(`${"x".repeat(120 - cps(note) - 1)}\n${note}`);
+  });
+
+  it("never splits a surrogate pair on a mid-line emoji cut", () => {
+    const note = truncNoteFor(120);
+    const out = capBody("😀".repeat(200), 120, []);
+    expect(cps(out)).toBe(120);
+    expect(out).toBe(`${"😀".repeat(120 - cps(note) - 1)}\n${note}`);
+    expect(loneSurrogate.test(out)).toBe(false);
+  });
+
+  it("backs up before the opening fence line when the cut lands inside a fence block", () => {
+    const body = `lupa: 1 finding(s).\n\n\`\`\`suggestion\n${"code-line\n".repeat(30)}\`\`\`\ntail\n`;
+    const out = capBody(body, 120, []);
+    expect(cps(out)).toBeLessThanOrEqual(120);
+    expect(out).toContain("lupa: 1 finding(s).");
+    expect(out).not.toContain("```suggestion");
+    expect(out.endsWith(truncNoteFor(120))).toBe(true);
+    const fences = out.split("\n").filter((l) => l.trimStart().startsWith("```")).length;
+    expect(fences % 2).toBe(0);
+  });
+
+  it("strips stale trunc-notes without emitting a fresh one when nothing is cut", () => {
+    const stale = "content line\n> Note: review body truncated to the 99999-character limit.";
+    expect(capBody(stale, 60000, [])).toBe("content line");
+  });
+
+  it("emits exactly one fresh note when a stale-noted body is cut again", () => {
+    const body = `${"y".repeat(200)}\n> Note: review body truncated to the 99999-character limit.`;
+    const out = capBody(body, 120, []);
+    expect(out.match(/^> Note: review body truncated to the \d+-character limit\.$/gm)).toHaveLength(1);
+    expect(out.endsWith(truncNoteFor(120))).toBe(true);
+    expect(cps(out)).toBeLessThanOrEqual(120);
+  });
+
+  it("extracts body omission lines as markers without duplicating a passed marker", () => {
+    const marker = omissionMarkerFor(5, 200);
+    const out = capBody(`content\n${marker}`, 60000, [marker]);
+    expect(out).toBe(`content\n${marker}`);
+  });
+
+  it("guarantees markers inside the cap on a long body", () => {
+    const marker = omissionMarkerFor(300, 200);
+    const out = capBody(`${"line\n".repeat(500)}`, 1000, [marker]);
+    expect(cps(out)).toBeLessThanOrEqual(1000);
+    expect(out).toContain(marker);
+    expect(out.endsWith(truncNoteFor(1000))).toBe(true);
+  });
+
+  it("throws RangeError when the markers alone exceed the cap", () => {
+    const big = `> Omitted: ${"9".repeat(50)} finding(s) omitted to fit the 200-finding publication limit.`;
+    expect(() => capBody("body", 10, [big])).toThrow(RangeError);
   });
 });

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import * as core from "@actions/core";
@@ -102,6 +102,8 @@ interface Rec {
   toolError?: boolean;
   /** findings.json payload observed by the slow-path seam: the early (fast-only) write, before the merged overwrite. */
   earlyFindingsRaw?: string;
+  /** Options observed by the createReview fake (F15 asserts maxBodyChars forwarding). */
+  reviewOpts?: { canWrite: boolean; maxBodyChars?: number };
   repoSizeCalls: Array<[string, string]>;
   /** Prompt messages observed by the slow-path seam (Task 58 asserts on these). */
   prompts?: { system: string; user: string };
@@ -153,7 +155,8 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
       rec.repoSizeCalls.push([owner, repo]);
       return o.repoSizeKb ?? 1024;
     },
-    createReview: async (_pr, payload) => {
+    createReview: async (_pr, payload, opts) => {
+      rec.reviewOpts = { canWrite: opts.canWrite, ...(opts.maxBodyChars !== undefined ? { maxBodyChars: opts.maxBodyChars } : {}) };
       rec.reviewAttempts += 1;
       if (o.write403) {
         throw new ReadonlyTokenError("review post refused", 403, "Resource not accessible by integration");
@@ -240,6 +243,8 @@ interface MockOpts {
   comment?: boolean;
   /** Files created under the work dir (real on-disk sizes for L0's large-file rule). */
   workFiles?: Record<string, number>;
+  /** Pre-existing summary bytes written before the run (F15 summary-budget tests). */
+  summaryPrefill?: string;
   /** Findings returned by the runScanners fake (default []). */
   scan?: Finding[];
   tokenIsApp?: boolean;
@@ -260,6 +265,7 @@ async function runWithMocks(o: MockOpts = {}) {
   for (const [name, size] of Object.entries(o.workFiles ?? {})) writeFileSync(join(root, name), Buffer.alloc(size));
   const summaryPath = join(root, "summary.md");
   writeFileSync(summaryPath, "");
+  if (o.summaryPrefill !== undefined) appendFileSync(summaryPath, o.summaryPrefill, "utf8");
   const rec = newRec();
   const sbomDir = join(root, "sbom-x");
   if (o.sbomMissing) mkdirSync(sbomDir);
@@ -394,6 +400,7 @@ async function runWithMocks(o: MockOpts = {}) {
     l2Env: rec.l2Env,
     l2Changed: rec.l2Changed,
     earlyFindingsRaw: rec.earlyFindingsRaw,
+    reviewOpts: rec.reviewOpts,
     artifactDir,
     summaryPath,
     sbomDir,
@@ -539,7 +546,7 @@ describe("run() orchestration", () => {
     const dry = lines.find((l) => l.includes("dry-run, nothing posted"));
     // Fixture: one warning finding on src/a.ts:2, which is an added line in DIFF, so it maps inline.
     expect(dry).toBe(
-      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=1, general=0, high=0)",
+      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=1, general=0, high=0, omitted=0)",
     );
   });
 
@@ -551,7 +558,7 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(false);
     const dry = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
     expect(dry).toBe(
-      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1)",
+      "post_comment is false: dry-run, nothing posted (would post event=REQUEST_CHANGES, inline=1, general=0, high=1, omitted=0)",
     );
   });
 
@@ -1614,5 +1621,147 @@ describe("prompt budget", () => {
     const dir = scratch();
     writeFileSync(join(dir, "findings.json"), JSON.stringify([{ ...LLM_FINDING, message: "x".repeat(100) }]), "utf8");
     expect(() => readFindings(dir, 10)).toThrow("lupa: findings.json exceeds the artifact read limit (10 bytes)");
+  });
+});
+
+describe("F15 publication funnel", () => {
+  const cps = (s: string): number => Array.from(s).length;
+  // src/a.ts with RIGHT lines 2..41 as additions (40 inline-eligible lines).
+  const FUNNEL_DIFF_LINES = Array.from({ length: 40 }, (_, i) => `+const a${String(i + 2).padStart(2, "0")} = ${i + 2};`);
+  const FUNNEL_DIFF = `diff --git a/src/a.ts b/src/a.ts
+index 111..222 100644
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,1 +1,41 @@
+ const x = 1;
+${FUNNEL_DIFF_LINES.join("\n")}
+`;
+  // 500 findings: 100 high (40 on-diff, 60 repo-level), 200 warning, 200 info.
+  function funnelFindings(): Finding[] {
+    const out: Finding[] = [];
+    for (let i = 0; i < 40; i++) out.push({ severity: "high", file: "src/a.ts", line: i + 2, rule: `h-on-${i}`, message: `on-diff high ${i}` });
+    for (let i = 0; i < 60; i++) out.push({ severity: "high", file: "", rule: `h-off-${i}`, message: `repo high ${i}` });
+    for (let i = 0; i < 200; i++) out.push({ severity: "warning", file: "", rule: `w-${i}`, message: `repo warning ${i}` });
+    for (let i = 0; i < 200; i++) out.push({ severity: "info", file: "", rule: `n-${i}`, message: `repo info ${i}` });
+    return out;
+  }
+  const OMISSION_300 = "> Omitted: 300 finding(s) omitted to fit the 200-finding publication limit.";
+
+  it("publishes the top 200 with inline cap 30, exact omission marker, and full-set gates", async () => {
+    const r = await runWithMocks({ diff: FUNNEL_DIFF, scan: funnelFindings(), llm: [] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews).toHaveLength(1);
+    const payload = r.reviews[0]!;
+    // Inline cap: the 40 on-diff highs post 30 inline (lines 2..31); lines 32..41 fold to the body.
+    expect(payload.comments).toHaveLength(30);
+    expect(payload.comments.map((c) => c.line)).toEqual(Array.from({ length: 30 }, (_, i) => i + 2));
+    // Summary head shows the FULL count; the exact omission marker is present; no trunc-note on a fitting body.
+    expect(payload.body).toContain("lupa: 500 finding(s).");
+    expect(payload.body).toContain(OMISSION_300);
+    expect(payload.body).not.toContain("> Note: review body truncated");
+    // Folded excess keeps mapping order after the general section.
+    expect(payload.body).toContain("- src/a.ts:32");
+    expect(payload.body).toContain("- src/a.ts:41");
+    expect(payload.body.indexOf("- src/a.ts:32")).toBeLessThan(payload.body.indexOf("- src/a.ts:41"));
+    expect(payload.event).toBe("COMMENT");
+    // Artifact keeps all 500; the summary head shows 500; gates saw the full set (warning level + highs => exit 2).
+    expect(JSON.parse(readFileSync(join(r.artifactDir, "findings.json"), "utf8"))).toHaveLength(500);
+    expect(readFileSync(r.summaryPath, "utf8")).toContain("lupa: 500 finding(s).");
+    expect(r.exitCode).toBe(2);
+  });
+
+  it("truncates an over-long review body inside the char cap with the note last", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      severity: "warning" as const,
+      file: "",
+      rule: `r${i}`,
+      message: `evidence-${i}-` + "m".repeat(200),
+    }));
+    const r = await runWithMocks({ scan: many, llm: [], maxReviewBodyChars: 1000 });
+    const body = r.reviews.at(-1)!.body;
+    expect(cps(body)).toBeLessThanOrEqual(1000);
+    expect(body.endsWith("> Note: review body truncated to the 1000-character limit.")).toBe(true);
+    expect(body).toContain("lupa: 60 finding(s).");
+  });
+
+  it("dry-run logs posted counts plus omitted", async () => {
+    const info = vi.mocked(core.info);
+    info.mockClear();
+    const many = Array.from({ length: 250 }, (_, i) => ({
+      severity: "warning" as const,
+      file: "",
+      rule: `r${i}`,
+      message: `m${i}`,
+    }));
+    const r = await runWithMocks({ postComment: false, scan: many, llm: [] });
+    expect(r.posted).toBe(false);
+    const dry = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("dry-run, nothing posted"));
+    expect(dry).toBe(
+      "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=0, general=200, high=0, omitted=50)",
+    );
+  });
+
+  it("caps the summary report at the remaining step-summary budget", async () => {
+    const scan: Finding[] = [
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "r1", message: "first" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "r2", message: "second" },
+      { severity: "warning", file: "src/a.ts", line: 2, rule: "r3", message: "third" },
+    ];
+    const r = await runWithMocks({ summaryPrefill: "P".repeat(1048000), scan, llm: [] });
+    const text = readFileSync(r.summaryPath, "utf8");
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(1048576);
+    expect(text).toContain("omitted because the report output limit was reached");
+    expect(r.summaryWritten).toBe(true);
+    expect(r.posted).toBe(true);
+  });
+
+  it("skips the summary write with a warning when nothing fits, and still posts", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({ summaryPrefill: "Q".repeat(1048570), llm: [] });
+    expect(r.summaryWritten).toBe(false);
+    expect(r.posted).toBe(true);
+    const warnings = vi.mocked(core.warning).mock.calls.map((c) => String(c[0]));
+    expect(warnings.some((l) => /summary.*skip/i.test(l))).toBe(true);
+  });
+
+  it("issue fallback publishes the retained set with the publication omission marker", async () => {
+    const many = Array.from({ length: 250 }, (_, i) => ({
+      severity: "warning" as const,
+      file: "",
+      rule: `r${i}`,
+      message: `m${i}`,
+    }));
+    const r = await runWithMocks({ write403: true, issueFallback: true, scan: many, llm: [] });
+    expect(r.posted).toBe(true);
+    expect(r.issueComments).toHaveLength(1);
+    const fallback = r.issueComments[0]!;
+    expect(
+      fallback.startsWith("> Omitted: 50 finding(s) omitted to fit the 200-finding publication limit.\n\nlupa: 200 finding(s)."),
+    ).toBe(true);
+  });
+
+  it("forwards maxReviewBodyChars to the review gateway", async () => {
+    const r = await runWithMocks({ maxReviewBodyChars: 12345, llm: [] });
+    expect(r.reviewOpts?.maxBodyChars).toBe(12345);
+    expect(r.reviewOpts?.canWrite).toBe(true);
+  });
+
+  it("Flow B applies the same publication funnel", async () => {
+    const r = await runPrivileged({ findings: funnelFindings(), diff: FUNNEL_DIFF, maxFindings: 200 });
+    expect(r.posted).toBe(true);
+    const body = r.payloads.at(-1)!.body;
+    expect(body).toContain("lupa: 500 finding(s).");
+    expect(body).toContain(OMISSION_300);
+    expect(r.payloads.at(-1)!.comments).toHaveLength(30);
+    expect(r.exitCode).toBe(2);
+  });
+
+  it("Flow B rejects an oversized findings artifact loudly and posts nothing", async () => {
+    // pr-meta.json (~167 B) passes the 300-byte cap; findings.json (~446 B) does not.
+    // readFindings runs before publishReview, so the throw below precedes any post.
+    const five = Array.from({ length: 5 }, () => ({ ...LLM_FINDING }));
+    await expect(runPrivileged({ findings: five, maxArtifactBytes: 300 })).rejects.toThrow(
+      "lupa: findings.json exceeds the artifact read limit (300 bytes)",
+    );
   });
 });

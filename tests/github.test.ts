@@ -419,3 +419,81 @@ describe("postIssueFallback", () => {
     expect(f.createComment).not.toHaveBeenCalled();
   });
 });
+
+describe("postReview fold re-cap", () => {
+  const cps = (s: string): number => Array.from(s).length;
+  const offDiff = () => httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS);
+  const noteCount = (s: string): number =>
+    s.match(/^> Note: review body truncated to the \d+-character limit\.$/gm)?.length ?? 0;
+
+  it("re-caps a folded body: omission preserved, single trunc-note last, under cap", async () => {
+    const omission = "> Omitted: 300 finding(s) omitted to fit the 200-finding publication limit.";
+    const body = `${"H".repeat(300)}\n\n${omission}`;
+    const testPayload: ReviewPayload = {
+      commit_id: "sha-old",
+      body,
+      event: "COMMENT",
+      comments: [
+        { path: "a.ts", line: 4, side: "RIGHT", body: `**high** [r] ${"m".repeat(100)}` },
+        { path: "b.ts", line: 9, side: "RIGHT", body: `**warning** [r] ${"n".repeat(100)}` },
+      ],
+    };
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, testPayload, { maxBodyChars: 500 });
+    const retry = String(f.reviewArgs[1].body);
+    expect(cps(retry)).toBeLessThanOrEqual(500);
+    expect(retry.split("\n").filter((l) => l === omission)).toHaveLength(1);
+    expect(noteCount(retry)).toBe(1);
+    expect(retry.endsWith("> Note: review body truncated to the 500-character limit.")).toBe(true);
+  });
+
+  it("re-emits a stripped note even when the folded body fits afterwards", async () => {
+    const stale = "> Note: review body truncated to the 99999-character limit.";
+    const testPayload: ReviewPayload = {
+      commit_id: "sha-old",
+      body: `short summary\n${stale}`,
+      event: "COMMENT",
+      comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "tiny" }],
+    };
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, testPayload, { maxBodyChars: 500 });
+    const retry = String(f.reviewArgs[1].body);
+    expect(cps(retry)).toBeLessThanOrEqual(500);
+    expect(retry).not.toContain("99999");
+    expect(noteCount(retry)).toBe(1);
+    expect(retry.endsWith("> Note: review body truncated to the 500-character limit.")).toBe(true);
+    expect(retry).toContain("- a.ts:4");
+  });
+
+  it("backs up before an indented folded fence when the cut lands inside it", async () => {
+    const fenced = `**warning** [r] msg\n\n\`\`\`suggestion\n${"x".repeat(400)}\n\`\`\``;
+    const testPayload: ReviewPayload = {
+      commit_id: "sha-old",
+      body: "summary",
+      event: "COMMENT",
+      comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: fenced }],
+    };
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, testPayload, { maxBodyChars: 300 });
+    const retry = String(f.reviewArgs[1].body);
+    expect(cps(retry)).toBeLessThanOrEqual(300);
+    const fences = retry.split("\n").filter((l) => l.trimStart().startsWith("```")).length;
+    expect(fences % 2).toBe(0);
+    expect(retry).not.toContain("```suggestion");
+    expect(retry.endsWith("> Note: review body truncated to the 300-character limit.")).toBe(true);
+  });
+
+  it("posts a clean fold with no spurious note when everything fits", async () => {
+    const testPayload: ReviewPayload = {
+      commit_id: "sha-old",
+      body: "summary",
+      event: "COMMENT",
+      comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "tiny" }],
+    };
+    const f = fakeOctokit([offDiff(), "ok"]);
+    await postReview(f.octokit, 1, testPayload, { maxBodyChars: 60000 });
+    const retry = String(f.reviewArgs[1].body);
+    expect(noteCount(retry)).toBe(0);
+    expect(retry).toContain("- a.ts:4");
+  });
+});

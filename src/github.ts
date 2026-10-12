@@ -1,5 +1,7 @@
 import { context, getOctokit } from "@actions/github";
 import type { InlineComment, ReviewPayload } from "./review.js";
+import { capBody, isTruncNoteLine, truncNoteFor } from "./review.js";
+import { DEFAULT_MAX_REVIEW_BODY_CHARS } from "./inputs.js";
 
 export type Octokit = ReturnType<typeof getOctokit>;
 
@@ -43,6 +45,13 @@ export interface PostReviewOptions {
    * ReadonlyTokenError before any POST is attempted.
    */
   canWrite?: boolean;
+  /**
+   * Review-body ceiling in Unicode code points for the off-diff fold re-cap.
+   * Defaults to DEFAULT_MAX_REVIEW_BODY_CHARS (the max_review_body_chars input
+   * default), so the re-cap always runs and existing no-opts callers keep
+   * identical behavior on small bodies.
+   */
+  maxBodyChars?: number;
 }
 
 const OFF_DIFF = /could not be resolved|part of the diff|line.*(diff|resolve)/i;
@@ -129,11 +138,52 @@ function foldComments(body: string, comments: InlineComment[]): string {
 }
 
 /**
+ * Fold re-cap: the folded body must stay under the same char ceiling as the
+ * publication cap. Exact algorithm: strip lines matching the trunc-note
+ * template (remembering `strippedAny`); extract the `> Omitted:` count lines
+ * from the body (removed, never duplicated) and pass them as capBody markers;
+ * cut content fence-aware to `max − markers − note` (the note budget is always
+ * reserved on the fold path, riding as a trailing marker); append markers,
+ * then the fresh trunc-note IFF (`strippedAny` or the cut dropped content). A
+ * stripped note is therefore always re-emitted; a clean fold (nothing dropped
+ * anywhere) posts no spurious note.
+ */
+function recapFoldedBody(folded: string, maxChars: number): string {
+  const note = truncNoteFor(maxChars);
+  let strippedAny = false;
+  const markers: string[] = [];
+  const contentLines: string[] = [];
+  for (const line of folded.split(/\r?\n/)) {
+    if (isTruncNoteLine(line)) {
+      strippedAny = true;
+      continue;
+    }
+    if (line.startsWith("> Omitted:")) {
+      if (!markers.includes(line)) markers.push(line);
+      continue;
+    }
+    contentLines.push(line);
+  }
+  const content = contentLines.join("\n");
+  const tailed = [...markers, note];
+  const withNote = capBody(content, maxChars, tailed);
+  if (strippedAny) return withNote;
+  // The reserved cut is authoritative: keep its note only when it provably
+  // dropped content, else fall back to the unreserved cap (which adds no note
+  // when nothing is cut).
+  const uncut = content === "" ? tailed.join("\n") : `${content}\n${tailed.join("\n")}`;
+  if (withNote !== uncut) return withNote;
+  return capBody(content, maxChars, markers);
+}
+
+/**
  * Posts one consolidated review to `pulls/{pr}/reviews`.
  * - `canWrite: false` (caller-computed): throws ReadonlyTokenError before any POST.
  * - 422 stale commit_id: throws StaleHeadError with the analyzed and live SHAs; the caller
  *   skips the review for the stale head (never relabels or retries the POST).
- * - 422 line off-diff: inline comments are folded into the body and the POST is retried once.
+ * - 422 line off-diff: inline comments are folded into the body, the folded body is
+ *   re-capped to `maxBodyChars` (omission counts preserved, exactly one trunc-note, last),
+ *   and the POST is retried once.
  *   At most two POSTs in total (the initial attempt, then the off-diff retry).
  * - 403 (read-only token): throws ReadonlyTokenError with status and the API message.
  * - Any other failure throws a sanitized Error; the upstream message is never copied,
@@ -191,7 +241,10 @@ export async function postReview(
         throw new StaleHeadError(commitId, head);
       }
       if (!degraded && comments.length > 0 && OFF_DIFF.test(detail)) {
-        body = foldComments(body, comments);
+        body = recapFoldedBody(
+          foldComments(body, comments),
+          opts?.maxBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS,
+        );
         comments = [];
         degraded = true;
         continue;
