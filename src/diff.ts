@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { readCappedFileSync } from "./artifact-limits.js";
+import { DEFAULT_MAX_ARTIFACT_BYTES } from "./inputs.js";
 
 export interface FileDiff {
   file: string;
@@ -184,12 +186,14 @@ export function writePrMeta(m: PrMeta, dir: string): void {
 }
 
 /** Returns undefined when no pr-meta file exists; throws when it is malformed. */
-export function readPrMeta(dir: string): PrMeta | undefined {
+export function readPrMeta(dir: string, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): PrMeta | undefined {
   const path = join(dir, PR_META_FILE);
   if (!existsSync(path)) return undefined;
+  const capped = readCappedFileSync(path, maxBytes);
+  if (!capped.ok) throw new Error(`Invalid ${PR_META_FILE} in ${dir}: exceeds the artifact read limit (${maxBytes} bytes)`);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(capped.text);
   } catch {
     throw new Error(`Invalid ${PR_META_FILE} in ${dir}: malformed JSON`);
   }

@@ -9,7 +9,7 @@ vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
   return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
-import { budgetPrompt, cleanEnvForExec, main, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { budgetPrompt, cleanEnvForExec, main, readFindings, run, sanitizeFinding, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { ActionInputs, LlmApiStyle, LlmProvider } from "../src/inputs.js";
@@ -1609,5 +1609,10 @@ describe("prompt budget", () => {
     const r = await runWithMocks({ maxPromptChars: 3200, diff: DIFF_2900, issueBody: "y".repeat(5000), prBody: "Fixes #7", scan: [SCAN_FINDING] });
     expect(vi.mocked(core.info).mock.calls.map(String).join("\n")).toContain("linked issue context dropped to fit the 3200-byte prompt budget");
     expect(r.llmCalled).toBe(1);
+  });
+  it("oversized findings.json throws the exact artifact-limit error", () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "findings.json"), JSON.stringify([{ ...LLM_FINDING, message: "x".repeat(100) }]), "utf8");
+    expect(() => readFindings(dir, 10)).toThrow("lupa: findings.json exceeds the artifact read limit (10 bytes)");
   });
 });

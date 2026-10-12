@@ -678,3 +678,103 @@ describe("failed scanner invocations (F08)", () => {
     expect(findings.some((f) => f.rule === "scanner-failed")).toBe(false);
   });
 });
+
+describe("artifact byte caps (F15)", () => {
+  function sarifFinding(): string {
+    return JSON.stringify({
+      runs: [
+        {
+          results: [
+            {
+              ruleId: "R1",
+              level: "error",
+              message: { text: "bad" },
+              locations: [
+                { physicalLocation: { artifactLocation: { uri: "a.ts" }, region: { startLine: 1 } } },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("missing still reports scanner-missing even with a tiny cap", () => {
+    const f = fromStdout("semgrep", "semgrep", { missing: true, code: null, stdout: "", timedOut: false }, TOOL_TIMEOUT_MS, 1);
+    expect(f).toEqual([{ severity: "warning", file: "", rule: "scanner-missing", message: "semgrep unavailable: semgrep not found" }]);
+  });
+
+  it("timedOut still reports the timeout even with a tiny cap", () => {
+    const f = fromStdout("semgrep", "semgrep", { missing: false, code: null, stdout: "", timedOut: true }, 300, 1);
+    expect(f).toEqual([{ severity: "warning", file: "", rule: "scanner-failed", message: "semgrep timed out after 0.3s" }]);
+  });
+
+  it("oversize semgrep stdout warns with the label and never parses", () => {
+    const stdout = sarifFinding();
+    const max = Buffer.byteLength(stdout, "utf8") - 1;
+    const f = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout, timedOut: false }, TOOL_TIMEOUT_MS, max);
+    expect(f).toEqual([
+      { severity: "warning", file: "", rule: "scanner-failed", message: `semgrep output exceeds the artifact read limit (${max} bytes); results dropped` },
+    ]);
+  });
+
+  it("oversize osv stdout keeps the lockfile label", () => {
+    const stdout = sarifFinding();
+    const max = Buffer.byteLength(stdout, "utf8") - 1;
+    const f = fromStdout("docker", "osv-scanner (package-lock.json)", { missing: false, code: 1, stdout, timedOut: false }, TOOL_TIMEOUT_MS, max);
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: "warning", rule: "scanner-failed" });
+    expect(f[0].message).toBe(
+      `osv-scanner (package-lock.json) output exceeds the artifact read limit (${max} bytes); results dropped`,
+    );
+  });
+
+  it("stdout under the cap still parses", () => {
+    const stdout = sarifFinding();
+    const max = Buffer.byteLength(stdout, "utf8");
+    const f = fromStdout("semgrep", "semgrep", { missing: false, code: 1, stdout, timedOut: false }, TOOL_TIMEOUT_MS, max);
+    expect(f).toEqual([{ severity: "high", file: "a.ts", line: 1, rule: "R1", message: "bad" }]);
+  });
+
+  it("gitleaks oversize report holding valid SARIF with findings + exit 0 warns with zero findings", async () => {
+    const savedPath = process.env.PATH;
+    const tmp = mkdtempSync(join(tmpdir(), "scan-cap-"));
+    try {
+      process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
+      process.env.SCAN_LOG = join(tmp, "calls.log");
+      const { findings } = await runScanners({ dir: tmp, baselineSha: "abc", maxArtifactBytes: 20 });
+      expect(findings).toEqual([
+        { severity: "warning", file: "", rule: "scanner-failed", message: "gitleaks output exceeds the artifact read limit (20 bytes); results dropped" },
+      ]);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      delete process.env.SCAN_LOG;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("SBOM-branch oversize warns and yields no sbomPath", async () => {
+    const savedPath = process.env.PATH;
+    const tmp = mkdtempSync(join(tmpdir(), "scan-cap-"));
+    try {
+      process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
+      process.env.SCAN_LOG = join(tmp, "calls.log");
+      process.env.NO_REPORT = "1"; // keep gitleaks quiet so only the SBOM warning remains
+      const r = await runScanners({ dir: tmp, baselineSha: "abc", sbom: true, outDir: tmp, maxArtifactBytes: 10 });
+      expect(r.sbomPath).toBeUndefined();
+      expect(r.findings).toContainEqual({
+        severity: "warning",
+        file: "",
+        rule: "scanner-failed",
+        message: "sbom output exceeds the artifact read limit (10 bytes); results dropped",
+      });
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      delete process.env.SCAN_LOG;
+      delete process.env.NO_REPORT;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

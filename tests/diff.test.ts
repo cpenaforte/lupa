@@ -125,4 +125,21 @@ describe("diff", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("readPrMeta throws Invalid pr-meta.json on oversize", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prmeta-"));
+    try {
+      const m: PrMeta = {
+        pr_number: 42,
+        head_sha: "a".repeat(40),
+        base_sha: "b".repeat(40),
+        head_repo_full_name: "org/repo",
+        is_fork: false,
+      };
+      writeFileSync(join(dir, "pr-meta.json"), JSON.stringify(m), "utf8");
+      expect(() => readPrMeta(dir, 10)).toThrow(/Invalid pr-meta\.json/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

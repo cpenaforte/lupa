@@ -1,9 +1,11 @@
 import os from "node:os";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import type { Finding } from "./fastpath.js";
 import type { PrMeta } from "./diff.js";
+import { byteCheck, oversizeMessage, readCappedFileSync } from "./artifact-limits.js";
+import { DEFAULT_MAX_ARTIFACT_BYTES } from "./inputs.js";
 
 // ---- pins ----------------------------------------------------------------
 
@@ -278,9 +280,11 @@ function findingsExitCodes(label: string): number[] {
  * warning, never substituted. Explicit invocation success wins over a contradictory
  * exit code; code 0 with no invocation info stays quiet.
  */
-export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: number = TOOL_TIMEOUT_MS): Finding[] {
+export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Finding[] {
   if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`)];
   if (r.timedOut) return [warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`)];
+  const over = byteCheck(r.stdout, maxBytes, label);
+  if (over !== undefined) return over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : undefined;
   if (!parsed) {
     return [warning("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`)];
@@ -326,6 +330,7 @@ export interface ScannerResult {
  * `outDir` (parent for the SBOM's mkdtemp dir; defaults to `os.tmpdir()`),
  * `timeoutMs` (per-tool wall-clock budget; defaults to `TOOL_TIMEOUT_MS`, threaded to every
  * tool invocation and to its timeout message).
+ * `maxArtifactBytes` (read cap for scanner artifacts; defaults to `DEFAULT_MAX_ARTIFACT_BYTES`).
  * Lifecycle: `sbomPath` is returned for upload; the caller (Task 12) owns the file and its
  * temp dir. runScanners does NOT delete the SBOM.
  * Semgrep runs the PyPI binary; trivy/osv/gitleaks run from digest-pinned docker images.
@@ -339,27 +344,29 @@ export async function runScanners(o: {
   lockfiles?: string[];
   outDir?: string;
   timeoutMs?: number;
+  maxArtifactBytes?: number;
 }): Promise<ScannerResult> {
   const findings: Finding[] = [];
   const jobs = o.jobs ?? resolveJobs();
   const dir = resolvePath(o.dir);
   const timeoutMs = o.timeoutMs ?? TOOL_TIMEOUT_MS;
+  const maxArtifactBytes = o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
 
   // semgrep (binary, not docker)
   const sg = semgrepArgv({ baselineSha: o.baselineSha, jobs, hasToken: !!o.hasSemgrepToken });
-  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs));
+  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs, maxArtifactBytes));
 
   // trivy (docker image pinned by digest)
   const tv = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv(".")), dir, undefined, timeoutMs);
-  findings.push(...fromStdout("docker", "trivy", tv, timeoutMs));
+  findings.push(...fromStdout("docker", "trivy", tv, timeoutMs, maxArtifactBytes));
 
   // gitleaks (docker image pinned by digest; SARIF goes to a report file in a temp dir)
-  findings.push(...(await runGitleaks(dir, timeoutMs)));
+  findings.push(...(await runGitleaks(dir, timeoutMs, maxArtifactBytes)));
 
   // osv-scanner (docker image pinned by digest), one run per lockfile
   for (const lock of o.lockfiles ?? []) {
     const osv = await runExec("docker", dockerArgs(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock)), dir, undefined, timeoutMs);
-    findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs));
+    findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs, maxArtifactBytes));
   }
 
   // SBOM (trivy fs --format cyclonedx). Written under a unique mkdtemp dir inside outDir.
@@ -368,21 +375,26 @@ export async function runScanners(o: {
     const sb = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv(".")), dir, undefined, timeoutMs);
     if (sb.missing) {
       findings.push(warning("scanner-missing", "sbom unavailable: docker not found"));
-    } else if (!isCycloneDx(sb.stdout)) {
-      // The exit code is not decisive: a valid CycloneDX document is accepted even on non-zero
-      // exit (scanners exit non-zero when they report findings), matching the SARIF rule.
-      findings.push(warning("scanner-failed", `sbom exited ${sb.code ?? "abnormally"} without a CycloneDX document`));
     } else {
-      let sbomDir: string | undefined;
-      try {
-        sbomDir = await mkdtemp(join(o.outDir ?? os.tmpdir(), "sbom-"));
-        const out = join(sbomDir, "sbom.cdx.json");
-        await writeFile(out, sb.stdout, "utf8");
-        sbomPath = out;
-      } catch (e) {
-        // A failed write must not leave a half-created dir behind: remove it best-effort.
-        if (sbomDir) await rm(sbomDir, { recursive: true, force: true }).catch(() => undefined);
-        findings.push(warning("sbom-write", `could not write SBOM: ${(e as Error).message}`));
+      const over = byteCheck(sb.stdout, maxArtifactBytes, "sbom");
+      if (over !== undefined) {
+        findings.push(...over);
+      } else if (!isCycloneDx(sb.stdout)) {
+        // The exit code is not decisive: a valid CycloneDX document is accepted even on non-zero
+        // exit (scanners exit non-zero when they report findings), matching the SARIF rule.
+        findings.push(warning("scanner-failed", `sbom exited ${sb.code ?? "abnormally"} without a CycloneDX document`));
+      } else {
+        let sbomDir: string | undefined;
+        try {
+          sbomDir = await mkdtemp(join(o.outDir ?? os.tmpdir(), "sbom-"));
+          const out = join(sbomDir, "sbom.cdx.json");
+          await writeFile(out, sb.stdout, "utf8");
+          sbomPath = out;
+        } catch (e) {
+          // A failed write must not leave a half-created dir behind: remove it best-effort.
+          if (sbomDir) await rm(sbomDir, { recursive: true, force: true }).catch(() => undefined);
+          findings.push(warning("sbom-write", `could not write SBOM: ${(e as Error).message}`));
+        }
       }
     }
   }
@@ -406,7 +418,7 @@ function isCycloneDx(text: string): boolean {
  * when clean and may not create the report; exit 0 with no report is therefore clean.
  * A temp-dir failure is a `scanner-failed` warning, never a throw.
  */
-async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS): Promise<Finding[]> {
+async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Promise<Finding[]> {
   let reportDir: string;
   try {
     reportDir = await mkdtemp(join(os.tmpdir(), "gitleaks-"));
@@ -428,7 +440,11 @@ async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS): Pr
     if (gl.timedOut) return [warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`)];
     let text: string | undefined;
     try {
-      text = await readFile(hostReport, "utf8");
+      const capped = readCappedFileSync(hostReport, maxBytes);
+      if (!capped.ok) {
+        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes))];
+      }
+      text = capped.text;
     } catch {
       text = undefined;
     }

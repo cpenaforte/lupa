@@ -28,7 +28,7 @@ import {
   shouldTrigger,
   StaleHeadError,
 } from "./github.js";
-import { getInputs, type ActionInputs } from "./inputs.js";
+import { getInputs, DEFAULT_MAX_ARTIFACT_BYTES, type ActionInputs } from "./inputs.js";
 import { ensureLinkedRepo, parseLinkedRepos } from "./linked-repos.js";
 import {
   callByStyle,
@@ -42,6 +42,7 @@ import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise }
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
 import { buildBody, buildFallbackReport, eventFor, exitFor, mapToComments, redactFindings, type ReviewPayload } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
+import { readCappedFileSync } from "./artifact-limits.js";
 
 /** Everything the run needs from the environment. Built by readRunEnv() in production. */
 export interface RunEnv {
@@ -345,12 +346,14 @@ function isFinding(v: unknown): v is Finding {
   );
 }
 
-function readFindings(dir: string): Finding[] {
+export function readFindings(dir: string, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Finding[] {
   const path = join(dir, "findings.json");
   if (!existsSync(path)) throw new Error(`lupa: findings.json not found in ${dir}`);
+  const capped = readCappedFileSync(path, maxBytes);
+  if (!capped.ok) throw new Error(`lupa: findings.json exceeds the artifact read limit (${maxBytes} bytes)`);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(capped.text);
   } catch {
     throw new Error("lupa: findings.json is malformed JSON");
   }
@@ -881,6 +884,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
       sbom: true,
       lockfiles,
       outDir: env.artifactDir,
+      maxArtifactBytes: env.inputs.maxArtifactBytes,
     });
     if (forkWithSecrets) {
       core.warning("fork PR with secrets in scope: L2 native toolchains skipped");
@@ -934,7 +938,7 @@ async function runFlowA(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
 async function runFlowB(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   out.slowPathSkipped = true;
   // Sanitizing pass for the privileged flow (Flow A sanitizes in runFlowA; publishReview does not sanitize).
-  const meta = readPrMeta(env.artifactDir);
+  const meta = readPrMeta(env.artifactDir, env.inputs.maxArtifactBytes);
   if (meta === undefined) {
     throw new Error(
       `lupa: pr-meta.json not found in ${env.artifactDir}; refusing to post without the PR run's artifact`,
@@ -973,7 +977,7 @@ async function runFlowB(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   if (live.headRef !== runBranch) {
     throw new Error("lupa: PR head branch does not match workflow_run.head_branch; refusing to post");
   }
-  const findings = readFindings(env.artifactDir).map(sanitizeFinding);
+  const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
   await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha });
   if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, findings);

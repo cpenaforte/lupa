@@ -24497,14 +24497,160 @@ function getOctokit(token, options, ...additionalPlugins) {
 }
 
 // lib/src/main.js
-import { appendFileSync as appendFileSync2, copyFileSync, existsSync as existsSync5, readFileSync as readFileSync6, rmSync as rmSync2, statSync as statSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { appendFileSync as appendFileSync2, copyFileSync, existsSync as existsSync5, readFileSync as readFileSync5, rmSync as rmSync2, statSync as statSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename as basename3, dirname as dirname2, join as join6 } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // lib/src/diff.js
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { existsSync as existsSync3, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+
+// lib/src/artifact-limits.js
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+
+// lib/src/inputs.js
+var LLM_PROVIDERS = [
+  "openai",
+  "anthropic",
+  "google",
+  "groq",
+  "mistral",
+  "openrouter",
+  "ollama",
+  "opencode-zen",
+  "opencode-go",
+  "custom"
+];
+var LLM_API_STYLES = [
+  "auto",
+  "openai-chat",
+  "openai-responses",
+  "anthropic-messages",
+  "google-models",
+  "custom-path"
+];
+var DEFAULT_MAX_FINDINGS = 200;
+var DEFAULT_MAX_INLINE_COMMENTS = 30;
+var DEFAULT_MAX_REVIEW_BODY_CHARS = 6e4;
+var DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
+function parseFailLevel(v) {
+  if (v === "none" || v === "warning" || v === "high")
+    return v;
+  throw new Error(`Invalid fail_level "${v}": expected none, warning, or high`);
+}
+function readString(name, fallback = "") {
+  const v = getInput(name);
+  return v === "" ? fallback : v;
+}
+function parseIntValue(name, raw, min) {
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min) {
+    throw new Error(`Invalid ${name} "${raw}": expected an integer >= ${min} (safe integer)`);
+  }
+  return n;
+}
+function readInt(name, fallback, min) {
+  const raw = readString(name);
+  if (raw === "")
+    return fallback;
+  return parseIntValue(name, raw, min);
+}
+function readOptionalDecimal(name) {
+  const raw = readString(name);
+  if (raw === "")
+    return void 0;
+  const n = Number(raw);
+  if (!/^-?\d+(\.\d+)?$/.test(raw) || !Number.isFinite(n)) {
+    throw new Error(`Invalid ${name} "${raw}": expected a finite decimal number (e.g. 0.7)`);
+  }
+  return n;
+}
+function readBool(name, fallback) {
+  const raw = readString(name);
+  if (raw === "")
+    return fallback;
+  if (raw === "true")
+    return true;
+  if (raw === "false")
+    return false;
+  throw new Error(`Invalid ${name} "${raw}": expected true or false`);
+}
+function readEnum(name, allowed, fallback) {
+  const raw = readString(name);
+  if (raw === "")
+    return fallback;
+  if (allowed.includes(raw))
+    return raw;
+  throw new Error(`Invalid ${name} "${raw}": expected one of ${allowed.join(", ")}`);
+}
+function getInputs() {
+  const llmTemperature = readOptionalDecimal("llm_temperature");
+  const llmTopP = readOptionalDecimal("llm_top_p");
+  const prNumber = readOptionalInt("pr_number", 1);
+  return {
+    githubToken: readString("github_token"),
+    llmProvider: readEnum("llm_provider", LLM_PROVIDERS, "openai"),
+    llmBaseUrl: readString("llm_base_url"),
+    llmApiStyle: readEnum("llm_api_style", LLM_API_STYLES, "auto"),
+    llmPath: readString("llm_path"),
+    llmModel: readString("llm_model"),
+    llmApiKey: readString("llm_api_key"),
+    ...llmTemperature !== void 0 ? { llmTemperature } : {},
+    ...llmTopP !== void 0 ? { llmTopP } : {},
+    llmMaxTokens: readInt("llm_max_tokens", 2e3, 1),
+    failLevel: parseFailLevel(readString("fail_level", "warning")),
+    maxDiffChars: readInt("max_diff_chars", 6e4, 1),
+    maxPromptChars: readInt("max_prompt_chars", 12e4, 1),
+    maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
+    maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1),
+    maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1e3),
+    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1),
+    postComment: readBool("post_comment", true),
+    timeoutSeconds: readInt("timeout_seconds", 90, 1),
+    prNumber,
+    llmAgent: readBool("llm_agent", false),
+    llmAgentMaxTurns: readInt("llm_agent_max_turns", 10, 1),
+    llmAgentMaxSeconds: readInt("llm_agent_max_seconds", 180, 1)
+  };
+}
+function readOptionalInt(name, min) {
+  const raw = readString(name);
+  if (raw === "")
+    return null;
+  return parseIntValue(name, raw, min);
+}
+
+// lib/src/artifact-limits.js
+function readCappedFileSync(path, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
+  const fd = openSync(path, "r");
+  try {
+    const n = Math.min(maxBytes, fstatSync(fd).size) + 1;
+    const buf = Buffer.alloc(n);
+    let bytesRead = 0;
+    while (bytesRead < n) {
+      const r = readSync(fd, buf, bytesRead, n - bytesRead, null);
+      if (r === 0)
+        break;
+      bytesRead += r;
+    }
+    if (bytesRead > maxBytes)
+      return { ok: false, oversize: true };
+    return { ok: true, text: buf.subarray(0, bytesRead).toString("utf8") };
+  } finally {
+    closeSync(fd);
+  }
+}
+function oversizeMessage(source, max) {
+  return `${source} output exceeds the artifact read limit (${max} bytes); results dropped`;
+}
+function byteCheck(text, max, source) {
+  if (Buffer.byteLength(text, "utf8") <= max)
+    return void 0;
+  return [{ severity: "warning", file: "", rule: "scanner-failed", message: oversizeMessage(source, max) }];
+}
+
+// lib/src/diff.js
 var HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 function parseHunks(files) {
   const out = [];
@@ -24601,13 +24747,16 @@ var PR_META_FILE = "pr-meta.json";
 function writePrMeta(m, dir) {
   writeFileSync(join(dir, PR_META_FILE), JSON.stringify(m, null, 2) + "\n", "utf8");
 }
-function readPrMeta(dir) {
+function readPrMeta(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   const path = join(dir, PR_META_FILE);
   if (!existsSync3(path))
     return void 0;
+  const capped = readCappedFileSync(path, maxBytes);
+  if (!capped.ok)
+    throw new Error(`Invalid ${PR_META_FILE} in ${dir}: exceeds the artifact read limit (${maxBytes} bytes)`);
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync2(path, "utf8"));
+    parsed = JSON.parse(capped.text);
   } catch {
     throw new Error(`Invalid ${PR_META_FILE} in ${dir}: malformed JSON`);
   }
@@ -24722,7 +24871,7 @@ function todoMarkers(hunks) {
 
 // lib/src/l2.js
 import { execFile } from "node:child_process";
-import { readdirSync, readFileSync as readFileSync3, statSync } from "node:fs";
+import { readdirSync, readFileSync as readFileSync2, statSync } from "node:fs";
 import { join as join2 } from "node:path";
 var L2_TIMEOUT_MS = 6e5;
 var MAX_BUFFER = 16 * 1024 * 1024;
@@ -24743,7 +24892,7 @@ function listFiles(dir) {
 }
 function pyprojectHasRuff(dir) {
   try {
-    return /^\s*\[tool\.ruff(\.[^\]]*)?\]/m.test(readFileSync3(join2(dir, "pyproject.toml"), "utf8"));
+    return /^\s*\[tool\.ruff(\.[^\]]*)?\]/m.test(readFileSync2(join2(dir, "pyproject.toml"), "utf8"));
   } catch {
     return false;
   }
@@ -24867,7 +25016,7 @@ async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFi
 }
 
 // lib/src/agent-tools.js
-import { closeSync, openSync, readFileSync as readFileSync4, readSync, readdirSync as readdirSync2, realpathSync, statSync as statSync2 } from "node:fs";
+import { closeSync as closeSync2, openSync as openSync2, readFileSync as readFileSync3, readSync as readSync2, readdirSync as readdirSync2, realpathSync, statSync as statSync2 } from "node:fs";
 import { dirname, isAbsolute, join as join3, relative, resolve, sep as sep2 } from "node:path";
 import { Worker } from "node:worker_threads";
 
@@ -25003,7 +25152,7 @@ async function readFile(args, ctx, opts) {
   }
   let raw;
   try {
-    raw = readFileSync4(target, "utf8");
+    raw = readFileSync3(target, "utf8");
   } catch {
     return errorResult(`cannot read file: ${rel}`);
   }
@@ -25135,9 +25284,9 @@ function matchGlob(path, glob2) {
 function isBinaryFile(p) {
   let fd;
   try {
-    fd = openSync(p, "r");
+    fd = openSync2(p, "r");
     const buf = Buffer.allocUnsafe(GREP_NUL_SCAN_BYTES);
-    const n = readSync(fd, buf, 0, GREP_NUL_SCAN_BYTES, 0);
+    const n = readSync2(fd, buf, 0, GREP_NUL_SCAN_BYTES, 0);
     for (let i = 0; i < n; i++)
       if (buf[i] === 0)
         return true;
@@ -25147,7 +25296,7 @@ function isBinaryFile(p) {
   } finally {
     if (fd !== void 0) {
       try {
-        closeSync(fd);
+        closeSync2(fd);
       } catch {
       }
     }
@@ -25647,121 +25796,9 @@ function shouldTrigger(event, payload) {
   }
 }
 
-// lib/src/inputs.js
-var LLM_PROVIDERS = [
-  "openai",
-  "anthropic",
-  "google",
-  "groq",
-  "mistral",
-  "openrouter",
-  "ollama",
-  "opencode-zen",
-  "opencode-go",
-  "custom"
-];
-var LLM_API_STYLES = [
-  "auto",
-  "openai-chat",
-  "openai-responses",
-  "anthropic-messages",
-  "google-models",
-  "custom-path"
-];
-var DEFAULT_MAX_FINDINGS = 200;
-var DEFAULT_MAX_INLINE_COMMENTS = 30;
-var DEFAULT_MAX_REVIEW_BODY_CHARS = 6e4;
-var DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
-function parseFailLevel(v) {
-  if (v === "none" || v === "warning" || v === "high")
-    return v;
-  throw new Error(`Invalid fail_level "${v}": expected none, warning, or high`);
-}
-function readString(name, fallback = "") {
-  const v = getInput(name);
-  return v === "" ? fallback : v;
-}
-function parseIntValue(name, raw, min) {
-  const n = Number(raw);
-  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min) {
-    throw new Error(`Invalid ${name} "${raw}": expected an integer >= ${min} (safe integer)`);
-  }
-  return n;
-}
-function readInt(name, fallback, min) {
-  const raw = readString(name);
-  if (raw === "")
-    return fallback;
-  return parseIntValue(name, raw, min);
-}
-function readOptionalDecimal(name) {
-  const raw = readString(name);
-  if (raw === "")
-    return void 0;
-  const n = Number(raw);
-  if (!/^-?\d+(\.\d+)?$/.test(raw) || !Number.isFinite(n)) {
-    throw new Error(`Invalid ${name} "${raw}": expected a finite decimal number (e.g. 0.7)`);
-  }
-  return n;
-}
-function readBool(name, fallback) {
-  const raw = readString(name);
-  if (raw === "")
-    return fallback;
-  if (raw === "true")
-    return true;
-  if (raw === "false")
-    return false;
-  throw new Error(`Invalid ${name} "${raw}": expected true or false`);
-}
-function readEnum(name, allowed, fallback) {
-  const raw = readString(name);
-  if (raw === "")
-    return fallback;
-  if (allowed.includes(raw))
-    return raw;
-  throw new Error(`Invalid ${name} "${raw}": expected one of ${allowed.join(", ")}`);
-}
-function getInputs() {
-  const llmTemperature = readOptionalDecimal("llm_temperature");
-  const llmTopP = readOptionalDecimal("llm_top_p");
-  const prNumber = readOptionalInt("pr_number", 1);
-  return {
-    githubToken: readString("github_token"),
-    llmProvider: readEnum("llm_provider", LLM_PROVIDERS, "openai"),
-    llmBaseUrl: readString("llm_base_url"),
-    llmApiStyle: readEnum("llm_api_style", LLM_API_STYLES, "auto"),
-    llmPath: readString("llm_path"),
-    llmModel: readString("llm_model"),
-    llmApiKey: readString("llm_api_key"),
-    ...llmTemperature !== void 0 ? { llmTemperature } : {},
-    ...llmTopP !== void 0 ? { llmTopP } : {},
-    llmMaxTokens: readInt("llm_max_tokens", 2e3, 1),
-    failLevel: parseFailLevel(readString("fail_level", "warning")),
-    maxDiffChars: readInt("max_diff_chars", 6e4, 1),
-    maxPromptChars: readInt("max_prompt_chars", 12e4, 1),
-    maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
-    maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1),
-    maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1e3),
-    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1),
-    postComment: readBool("post_comment", true),
-    timeoutSeconds: readInt("timeout_seconds", 90, 1),
-    prNumber,
-    llmAgent: readBool("llm_agent", false),
-    llmAgentMaxTurns: readInt("llm_agent_max_turns", 10, 1),
-    llmAgentMaxSeconds: readInt("llm_agent_max_seconds", 180, 1)
-  };
-}
-function readOptionalInt(name, min) {
-  const raw = readString(name);
-  if (raw === "")
-    return null;
-  return parseIntValue(name, raw, min);
-}
-
 // lib/src/linked-repos.js
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync4, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 var CLONE_TIMEOUT_MS = 6e4;
 function effectiveTimeout(configuredMs, endMs, nowMs = Date.now()) {
@@ -25958,7 +25995,7 @@ function writeMarker(dir, marker) {
 function readMarker(dir) {
   let raw;
   try {
-    raw = readFileSync5(join4(dir, MARKER_NAME), "utf8");
+    raw = readFileSync4(join4(dir, MARKER_NAME), "utf8");
   } catch {
     return null;
   }
@@ -28068,7 +28105,7 @@ ${items.join("\n")}`;
 // lib/src/scanners.js
 import os5 from "node:os";
 import { execFile as execFile3 } from "node:child_process";
-import { mkdtemp, readFile as readFile2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join5, resolve as resolvePath } from "node:path";
 var TRIVY_IMAGE = "ghcr.io/aquasecurity/trivy:0.75.0";
 var TRIVY_DIGEST = "sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa";
@@ -28227,11 +28264,14 @@ function findingsExitCodes(label) {
     return [1];
   return [];
 }
-function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS) {
+function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   if (r.missing)
     return [warning2("scanner-missing", `${label} unavailable: ${tool} not found`)];
   if (r.timedOut)
     return [warning2("scanner-failed", `${label} timed out after ${timeoutMs / 1e3}s`)];
+  const over = byteCheck(r.stdout, maxBytes, label);
+  if (over !== void 0)
+    return over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : void 0;
   if (!parsed) {
     return [warning2("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`)];
@@ -28258,33 +28298,39 @@ async function runScanners(o) {
   const jobs = o.jobs ?? resolveJobs();
   const dir = resolvePath(o.dir);
   const timeoutMs = o.timeoutMs ?? TOOL_TIMEOUT_MS;
+  const maxArtifactBytes = o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
   const sg = semgrepArgv({ baselineSha: o.baselineSha, jobs, hasToken: !!o.hasSemgrepToken });
-  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs));
+  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs, maxArtifactBytes));
   const tv = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv(".")), dir, void 0, timeoutMs);
-  findings.push(...fromStdout("docker", "trivy", tv, timeoutMs));
-  findings.push(...await runGitleaks(dir, timeoutMs));
+  findings.push(...fromStdout("docker", "trivy", tv, timeoutMs, maxArtifactBytes));
+  findings.push(...await runGitleaks(dir, timeoutMs, maxArtifactBytes));
   for (const lock of o.lockfiles ?? []) {
     const osv = await runExec("docker", dockerArgs(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock)), dir, void 0, timeoutMs);
-    findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs));
+    findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs, maxArtifactBytes));
   }
   let sbomPath;
   if (o.sbom) {
     const sb = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv(".")), dir, void 0, timeoutMs);
     if (sb.missing) {
       findings.push(warning2("scanner-missing", "sbom unavailable: docker not found"));
-    } else if (!isCycloneDx(sb.stdout)) {
-      findings.push(warning2("scanner-failed", `sbom exited ${sb.code ?? "abnormally"} without a CycloneDX document`));
     } else {
-      let sbomDir;
-      try {
-        sbomDir = await mkdtemp(join5(o.outDir ?? os5.tmpdir(), "sbom-"));
-        const out = join5(sbomDir, "sbom.cdx.json");
-        await writeFile2(out, sb.stdout, "utf8");
-        sbomPath = out;
-      } catch (e) {
-        if (sbomDir)
-          await rm2(sbomDir, { recursive: true, force: true }).catch(() => void 0);
-        findings.push(warning2("sbom-write", `could not write SBOM: ${e.message}`));
+      const over = byteCheck(sb.stdout, maxArtifactBytes, "sbom");
+      if (over !== void 0) {
+        findings.push(...over);
+      } else if (!isCycloneDx(sb.stdout)) {
+        findings.push(warning2("scanner-failed", `sbom exited ${sb.code ?? "abnormally"} without a CycloneDX document`));
+      } else {
+        let sbomDir;
+        try {
+          sbomDir = await mkdtemp(join5(o.outDir ?? os5.tmpdir(), "sbom-"));
+          const out = join5(sbomDir, "sbom.cdx.json");
+          await writeFile2(out, sb.stdout, "utf8");
+          sbomPath = out;
+        } catch (e) {
+          if (sbomDir)
+            await rm2(sbomDir, { recursive: true, force: true }).catch(() => void 0);
+          findings.push(warning2("sbom-write", `could not write SBOM: ${e.message}`));
+        }
       }
     }
   }
@@ -28298,7 +28344,7 @@ function isCycloneDx(text) {
     return false;
   }
 }
-async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS) {
+async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   let reportDir;
   try {
     reportDir = await mkdtemp(join5(os5.tmpdir(), "gitleaks-"));
@@ -28316,7 +28362,11 @@ async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS) {
       return [warning2("scanner-failed", `gitleaks timed out after ${timeoutMs / 1e3}s`)];
     let text;
     try {
-      text = await readFile2(hostReport, "utf8");
+      const capped = readCappedFileSync(hostReport, maxBytes);
+      if (!capped.ok) {
+        return [warning2("scanner-failed", oversizeMessage("gitleaks", maxBytes))];
+      }
+      text = capped.text;
     } catch {
       text = void 0;
     }
@@ -28417,7 +28467,7 @@ function readDiff(dir) {
   const path = join6(dir, "diff.patch");
   if (!existsSync5(path))
     throw new Error(`lupa: diff.patch not found in ${dir}`);
-  return readFileSync6(path, "utf8");
+  return readFileSync5(path, "utf8");
 }
 function sizeOf(workDir, file) {
   if (workDir === void 0)
@@ -28496,13 +28546,16 @@ function isFinding(v) {
   const f = v;
   return typeof f.severity === "string" && SEVERITIES2.has(f.severity) && typeof f.file === "string" && typeof f.rule === "string" && typeof f.message === "string" && (f.line === void 0 || typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1) && (f.suggestion === void 0 || typeof f.suggestion === "string");
 }
-function readFindings(dir) {
+function readFindings(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   const path = join6(dir, "findings.json");
   if (!existsSync5(path))
     throw new Error(`lupa: findings.json not found in ${dir}`);
+  const capped = readCappedFileSync(path, maxBytes);
+  if (!capped.ok)
+    throw new Error(`lupa: findings.json exceeds the artifact read limit (${maxBytes} bytes)`);
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync6(path, "utf8"));
+    parsed = JSON.parse(capped.text);
   } catch {
     throw new Error("lupa: findings.json is malformed JSON");
   }
@@ -28867,7 +28920,8 @@ async function runFlowA(env, deps, out) {
       hasSemgrepToken: false,
       sbom: true,
       lockfiles,
-      outDir: env.artifactDir
+      outDir: env.artifactDir,
+      maxArtifactBytes: env.inputs.maxArtifactBytes
     });
     if (forkWithSecrets) {
       warning("fork PR with secrets in scope: L2 native toolchains skipped");
@@ -28911,7 +28965,7 @@ async function runFlowA(env, deps, out) {
 }
 async function runFlowB(env, deps, out) {
   out.slowPathSkipped = true;
-  const meta = readPrMeta(env.artifactDir);
+  const meta = readPrMeta(env.artifactDir, env.inputs.maxArtifactBytes);
   if (meta === void 0) {
     throw new Error(`lupa: pr-meta.json not found in ${env.artifactDir}; refusing to post without the PR run's artifact`);
   }
@@ -28943,7 +28997,7 @@ async function runFlowB(env, deps, out) {
   if (live.headRef !== runBranch) {
     throw new Error("lupa: PR head branch does not match workflow_run.head_branch; refusing to post");
   }
-  const findings = readFindings(env.artifactDir).map(sanitizeFinding);
+  const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
   const hunks = parseDiffFiles(readDiff(env.artifactDir));
   await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha });
   if (!out.staleSkipped)
@@ -29026,7 +29080,7 @@ function realAnalysis() {
 }
 function readRunEnv() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync6(eventPath, "utf8")) : {};
+  const payload = eventPath !== void 0 && eventPath !== "" ? JSON.parse(readFileSync5(eventPath, "utf8")) : {};
   const inputs = getInputs();
   return {
     eventName: process.env.GITHUB_EVENT_NAME ?? "",
@@ -29057,6 +29111,7 @@ export {
   budgetPrompt,
   cleanEnvForExec,
   main,
+  readFindings,
   readRunEnv,
   run,
   sanitizeFinding,
