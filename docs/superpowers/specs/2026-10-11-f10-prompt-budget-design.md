@@ -1,7 +1,7 @@
 # Sub-project F10: complete inference-prompt budget — design
 
 Date: 2026-10-12
-Status: design approved (2026-10-12); review rounds 1-8 applied, round 9 pending
+Status: design approved (2026-10-12); review rounds 1-9 applied, round 10 pending
 Source: Codex audit `PROJECT_FINDINGS.md` (F10), local HEAD `885adea`
 Goal: bound the variable user-message portion of the single-shot inference request — fast findings, linked-issue
 context, and diff together — with sanitized evidence, separate allowances, and
@@ -115,7 +115,7 @@ Omitted <M> fast finding(s) to fit the prompt budget.
 
 Cut order, each leaving its explicit record:
 
-1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + issueOverhead)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count — step 1 sizes with `omitted = 0`, step 2 re-computes with the running count) and `issueOverhead` is the whole fixed cost of carrying any issue text (`## Linked issue…` header + `\n\n` separators + `<linked-issue>` tags + marker, all as exact `Buffer.byteLength` values computed in code, ≈145 bytes total — nothing estimated, nothing double-counted). `budgetPrompt` neutralises every region FIRST — issue text, diff text, and the findings-JSON `<`→`\\u003c` escaping, identical to `buildMessages` (`prompt.ts:50,59,62`) — which requires exporting `neutralise` plus the issue header/tags/marker as constants from `src/prompt.ts` (listed as plan change sites; neutralise is idempotent so `buildMessages` re-rendering is a no-op). Every measurement and cut operates on the neutralised regions; the returned regions are already neutralised. If the full block fits, it is kept uncut (no marker). Otherwise truncate to the allowance with the marker (balanced tags); when the allowance is negative, drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling). No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget.
+1. **Linked-issue context**: allowance = `budget − (diffSection + findingsJSON + framing + issueOverhead)`, all in bytes on the assembled regions, where `framing` is everything else in the user message (section headers except the `## Linked issue` header, skipped-files note, JSON brackets/commas, plus the omission line at its current count — step 1 sizes with `omitted = 0`, step 2 re-computes with the running count) and `issueOverhead` is the whole fixed cost of carrying any issue text (`## Linked issue…` header + `\n\n` separators + `<linked-issue>` tags + marker, all as exact `Buffer.byteLength` values computed in code, ≈145 bytes total — nothing estimated, nothing double-counted). `budgetPrompt` neutralises every region FIRST — issue text, diff text, and the findings-JSON `<`→`\\u003c` escaping (applied to the serialized JSON exactly as `buildMessages` does at `prompt.ts:50`; `fast` itself stays structured — the escape lives on the measured/rendered string, not in the objects), identical to `buildMessages` (`prompt.ts:50,59,62`) — which requires exporting `neutralise` plus the issue header/tags/marker as constants from `src/prompt.ts` (listed as plan change sites; neutralise is idempotent so `buildMessages` re-rendering is a no-op). Every measurement and cut operates on the neutralised regions; the returned `issueBody`/`promptText` strings are already neutralised (`fast` objects pass through — only their serialized form is escaped, at render). If the full block fits, it is kept uncut (no marker). Otherwise truncate to the allowance with the marker (balanced tags); when the allowance is negative, drop the block entirely (`issueBody: undefined`, `issueDropped: true` — the correct degradation, identical to a PR with no linked issue). The cut is byte-exact, then backed off over a trailing partial UTF-8 sequence (ASCII splits, including `&lt;`-style entities, decode cleanly and need no handling). No closed-form constant is needed beyond these definitions: the loop re-renders via `buildMessages` and re-measures after every cut, so the omission count is always current and the total never exceeds the budget.
 2. **Fast findings**: drop whole findings from the tail until in budget, counting
    them in `findingsOmitted`. Never mid-finding truncation — the JSON stays
    parseable. Order is positional (pipeline order: deterministic L0/scanner evidence
@@ -147,15 +147,17 @@ automatically.
 
 ### Sanitize-before-prompt
 
-The `fast` array is mapped through the existing `sanitizeFinding` once at Flow A
-construction (`src/main.ts:803`: `const fast = [...l0, ...scan.findings, ...l2].map(sanitizeFinding)`).
-Prompt and both artifact writes (`:805` early, `:822` merged — re-sanitizing is
-idempotent) then share identical pre-sanitized evidence. The deterministic eval
-fixtures carry clean synthetic data (no control characters, short fields, safe
-paths), which `sanitizeFinding` passes through unchanged — the eval suite staying
-green proves the identity on fixtures (required verification). Early-artifact note: `:805` changes from `redact(raw)` to `redact(sanitize(raw))` — a secret straddling the 2,000-code-point `MSG_CAP` now persists partially there, exactly the straddle exposure `:822` already had (stated, not hidden). `redactFindings`
-ordering (F02) is untouched, and the prompt path stays unredacted (pre-existing;
-stated explicitly, out of scope).
+The prompt uses a sanitized projection, `promptFast = fast.map(sanitizeFinding)`, passed
+to `budgetPrompt`/`buildMessages` in place of `fast`. The `fast` array itself is never
+mutated: both artifact writes (`:805` early, `:822` merged) are byte-identical to today,
+so there is no new straddle exposure anywhere and no eval-fixture churn by construction
+(no identity proof required). Rationale (reversing the earlier in-place design): sanitizing
+in place would change `:805` from `redact(raw)` (full secret masked before any cap) to
+`redact(sanitize(raw))` (a secret straddling the 2,000-code-point `MSG_CAP` persists
+partially) — a new exposure in a file that was previously fully masked. The prompt copy
+keeps inference sanitized (F10's requirement) while artifacts stay exactly as audited.
+`redactFindings` ordering (F02) is untouched, and the prompt path stays unredacted
+(pre-existing; stated explicitly, out of scope).
 
 ## 3. Tests
 
@@ -165,7 +167,7 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
 `MSG_CAP` bounds each finding and the overflow needs many findings or a small budget):
 
 - Oversized issue body truncates with the marker; tags stay balanced; rest intact.
-- Issue block dropped when the allowance is negative: budget 3,200 with a ~2,900-byte diff, one small finding (~200 B), and a ~5,000-byte issue → allowance = 3200 − (2900 + 200 + framing ~165 + overhead ~147) < 0 → `issueDropped`, `issueBody` undefined; step 2 then drops the finding too (`findingsOmitted = 1`, total ≈ 3,065 + 51 omission line < budget) and the review proceeds without issue context — deterministic; the finding pins the allowance so a zero-finding fixture cannot silently truncate instead.
+- Issue block dropped when the allowance is negative: budget 3,200 with a ~2,900-byte diff, one small finding (~200 B), and a ~5,000-byte issue → allowance = 3200 − (2900 + 200 + framing ~165 + overhead 145) < 0 → `issueDropped`, `issueBody` undefined; step 2 then drops the finding too (`findingsOmitted = 1`, total ≈ 3,065 + 51 omission line < budget) and the review proceeds without issue context — deterministic; the finding pins the allowance so a zero-finding fixture cannot silently truncate instead.
 - Fast-findings overflow drops whole tail findings with an exact omitted count rendered
   as the prose line after the findings JSON; the surviving JSON parses.
 - Diff is never cut below `maxDiffChars` (over-budget fixture with maxed diff →
@@ -199,7 +201,7 @@ fixtures stay small — one 4,000-character TODO line no longer suffices since
   captured prompt (pre-LLM sanitization).
 - `ActionInputs` fixture updates (`tests/main.test.ts:173`, `tests/evals/harness.ts:32`).
 - Default 120,000 leaves all existing suite fixtures untouched; full eval suite green
-  (sanitize identity on fixtures).
+  (artifacts byte-identical by construction — `fast` is never mutated).
 
 ## 4. Verification and release
 
