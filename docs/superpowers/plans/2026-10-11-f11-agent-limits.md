@@ -43,11 +43,11 @@
 
 **Interfaces:**
 - Consumes: F13 `WalkLimits`/`walkFiles`/`walkPaths`/`grepInRoot` (`WalkLimits.deadlineMs` stays a *duration*; absolute→duration conversion lives here, at the `executeTool` entry).
-- Produces: `executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: number })` (`deadlineMs` absolute epoch, `maxResultBytes` per-call cap); exported `TRUNCATION_MARKER` (the existing `"\n[truncated]"` literal, 12 bytes); `ToolContext.ensureLinked` gains `opts?: { deadlineMs?: number }` (interface change at `src/agent-tools.ts:14`); `grepInRoot(root, args, timeoutMs?, limits?, endMs?)`; per-tool `maxBytes` trailing params; `ERROR_MESSAGE_CAP = 2000` (new constant).
+- Produces: `executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: number })` (`deadlineMs` absolute epoch, `maxResultBytes` per-call cap); exported `TRUNCATION_MARKER` (the existing `"\n[truncated]"` literal, 12 bytes); `ToolContext.ensureLinked` gains `opts?: { deadlineMs?: number }` (interface change at `src/agent-tools.ts:14`); `grepInRoot(root, args, timeoutMs?, limits?, endMs?, maxBytes?)`; `readFile(args, ctx, opts?: { maxBytes?: number })`; `grep(args, ctx, opts?: { timeoutMs?: number; endMs?: number; maxBytes?: number })`; `listDir`/`glob` trailing `maxBytes?`; `ERROR_MESSAGE_CAP = 2000` (new constant). `executeTool` routes each `limits` field into every tool — including `grep`'s serializer, which parameterizes its `AGENT_LIMITS.resultBytes` hard-code (`src/agent-tools.ts:626`, same behavior at default).
 
 **Exact behavior:**
-- `deadlineMs` conversions: walk duration `min(limits?.deadlineMs ?? WALK_DEFAULT_DEADLINE_MS, max(0, end-now))` (never relaxes an explicit F13 bound or the default); grep worker recomputed post-walk as `min(timeoutMs, max(0, end-now))` where `timeoutMs` is the caller's (default `GREP_TIMEOUT_MS`) — an explicit 200 ms bound stays 200 ms. Entry-expired (`end-now <= 0`) returns the existing timeout/error result before any walk/spawn: grep → existing `"grep timed out"`, glob → new `errorResult("glob timed out")` (exact text). `read_file`/`list_dir` ignore deadlines (sync bounded work).
-- Per-tool caps via trailing `maxBytes` (default `AGENT_LIMITS.resultBytes` 32768): `read_file`/`grep` parameterize existing marker-inside logic; `list_dir`/`glob` drop tail entries (`truncated` stays true); `errorResult` caps at `ERROR_MESSAGE_CAP = 2000` with marker inside. Caps below a tool's minimum JSON envelope (~91 B read_file) are best-effort (envelope-only output) — the loop-layer backstop (Task 60) is what bounds those; tests use caps ≥ 500.
+- `deadlineMs` conversions: walk duration `min(limits?.deadlineMs ?? WALK_DEFAULT_DEADLINE_MS, max(0, end-now))` (never relaxes an explicit F13 bound or the default); grep worker recomputed post-walk as `min(timeoutMs, max(0, end-now))` where `timeoutMs` is the caller's (default `GREP_TIMEOUT_MS`) — an explicit 200 ms bound stays 200 ms. Entry-expired (`end-now <= 0`) returns the existing timeout/error result before any walk/spawn: grep → existing `"grep timed out"`, glob → new `errorResult("glob timed out")` (exact text). After the walk, if `end - now <= 0` return `"grep timed out"` WITHOUT spawning the worker (a walk-consumed deadline must not spawn). `read_file`/`list_dir` ignore deadlines (sync bounded work).
+- Per-tool caps (default `AGENT_LIMITS.resultBytes` 32768): `read_file` parameterizes its marker-inside logic via `opts.maxBytes`; `grep`/`list_dir`/`glob` drop tail entries (`truncated` stays true); `errorResult` caps at `ERROR_MESSAGE_CAP = 2000` with marker inside. Caps below a tool's minimum JSON envelope (≈91 B empty read_file, ≈103 B truncated minimum) are best-effort (envelope-only output) — the loop-layer backstop (Task 60) is what bounds those; tests use caps ≥ 500.
 - `resolveRoot(repo, ctx, deadlineMs?)` / `rootFor(args, ctx, deadlineMs?)` forward into `ensureLinked(alias, { deadlineMs })`; `read_file`'s 1 MiB refusal and confinement checks run before any deadline logic (unchanged order).
 
 - [ ] **Step 1: Write the failing tests in `tests/agent-tools.test.ts`** (existing
@@ -70,6 +70,15 @@ it("huge deadlineMs behaves exactly as today", async () => {
   writeFileSync(join(root, "a.txt"), "keep me\n");
   const g = await executeTool("grep", { pattern: "keep" }, ctxFor(root), { deadlineMs: Date.now() + 3600000 });
   expect(JSON.parse(g.output).matches.length).toBeGreaterThan(0);
+});
+it("generous endMs preserves today's worker timeout; expired endMs never spawns", async () => {
+  const root = tempRoot();
+  writeFileSync(join(root, "a.txt"), "keep me\n");
+  const ok = await grepInRoot(root, { pattern: "keep" }, 200, undefined, Date.now() + 3600000);
+  expect(JSON.parse(ok.output).matches.length).toBeGreaterThan(0);
+  const noSpawn = await grepInRoot(root, { pattern: "keep" }, 200, undefined, 1);
+  expect(noSpawn.isError).toBe(true);
+  expect(JSON.parse(noSpawn.output)).toEqual({ error: "grep timed out" });
 });
 it("per-tool maxResultBytes caps output with the marker inside", async () => {
   const root = tempRoot();
@@ -145,7 +154,7 @@ git commit -m "fix: deadline-aware tool execution with per-call byte caps (F11)"
 - `runAgent` uses `budget.deadlineMs ?? start + maxSeconds * 1000`, reusing existing locals (no new `clock()` reads). All four `hooks.call` sites route through `callWithDeadline` with `nowMs` passed in (never read the clock inside the helper) and pass `{ timeoutSeconds, deadlineMs }` (absolute).
 - `callWithDeadline`: `ms = deadline - nowMs`; `ms <= 0` → `{ reply: timeoutResult, raced: true }` WITHOUT invoking `hooks.call`; else `Promise.race` with a real-timer fallback resolving the same timeout result (`{ ok: false, result: { ok: false, reason: "timeout", detail: TIMEOUT_DETAIL } }`, reusing the constant); timer cleared on settle; dangling inner promise gets a noop-catch at race time. `raced === true` → `finish(timeout, "budget", false)` at every site; `false` flows through existing handling untouched.
 - `timeoutFor` = `Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)))`.
-- Tool loop per call: run EVERY tool output (content and tool-error alike) through `capToolResult(output, effective)` where `effective = min(maxResultBytes, remaining)`; `remaining = maxTotalBytes - bytes` (`bytes` counts content outputs only — tool errors from `errorResult` count; loop-generated budget-exhausted/backstop/too-many-calls records, turn logs, `elapsedMs` excluded, each ≤ 65 B). `remaining < 12` (marker bytes) → skip execution, record `{"error":"tool result budget exhausted (max <maxTotalBytes> bytes)"}` with the number, do NOT increment `calls`; else `limits = { deadlineMs: Date.now() + max(0, deadline - clock()), maxResultBytes: min(maxResultBytes, remaining) }` (wall-clock conversion at the boundary — identity in production, consistent under fake clocks).
+- Tool loop per call: run EVERY tool output (content and tool-error alike) through `capToolResult(output, effective)` where `effective = min(maxResultBytes, remaining)`; `remaining = maxTotalBytes - bytes` (`bytes` counts content outputs only — tool errors from `errorResult` count; loop-generated budget-exhausted/backstop/too-many-calls records, turn logs, `elapsedMs` excluded, each ≤ 65 B). `remaining < 12` (marker bytes) → skip execution, record `{"error":"tool result budget exhausted (max <maxTotalBytes> bytes)"}` with the number, do NOT increment `calls`; else `limits = { deadlineMs: Date.now() + max(0, deadline - clock()), maxResultBytes: min(maxResultBytes, remaining) }` (wall-clock conversion at the boundary — identity in production, consistent under fake clocks). Precedence in the per-call loop is existing-then-new: `i >= maxCalls` records too-many-calls first (unchanged behavior, still bookkeeping-excluded); only executable calls (`i < maxCalls`) take the `remaining < 12` skip.
 - `capToolResult`: JSON parses AND `byteLength <= maxBytes` → passthrough; else `{"error":"tool result exceeded the byte budget","truncated":true}` (exact, 65 B). Remove `capOutput`.
 - Forced gate: `turns >= budget.maxTurns || bytes >= maxTotalBytes || (maxTotalBytes - bytes) < 12` (residue clause — a 1–11 B remainder forces instead of looping to `maxTurns`).
 - `callWithProbeAgent` computes `Date.now() + maxSeconds * 1000` once, threads `deadlineMs` into every `runStyle` budget (explicit + probe). `agentCallFor` untouched. (Probe deadline is real-clock; loop tests use fake clocks around `runAgent` directly — no interaction.)
@@ -169,26 +178,33 @@ git commit -m "fix: deadline-aware tool execution with per-call byte caps (F11)"
     vi.advanceTimersByTimeAsync(30_000); const out = await p;` → `stop: "budget"`,
     `probeAdvance: false`; `vi.useRealTimers()` after. Far-future case: immediate
     hook + `{ maxSeconds: 3600 }` → normal handling (`stop: "final"`).
-  - Floor pin: existing `:166` fixture + `deadlineMs: 1_060_000` in the `toEqual`.
+  - Floor pin: existing `:166` fixture + `deadlineMs: 1_060_000` in the `toEqual`;
+    plus the spec §3 case — scripted clock sticking at `1_049_500` (49.5 s elapsed
+    of a 60 s budget, remaining 10_500 ms ≥ the 10 s margin so the call is reached)
+    with `{ maxSeconds: 60, timeoutSeconds: 120 }` → `seenOpts[0]` is exactly
+    `{ timeoutSeconds: 10, deadlineMs: 1_060_000 }` (floor; `Math.ceil` would give 11).
   - Sub-marker skip: `maxTotalBytes: 10` (the updated `"forced final on bytes
-    budget"` test) → first iteration forces (`remaining 10 < 12`): `calls` 0,
-    `stop: "budget"`, notes `[BUDGET_NOTE]`.
+    budget"` test) with replies `[okText(FINDINGS)]` — the forced turn consumes
+    the FINDINGS text directly (a tool-call reply here would parse to
+    invalid-json): first iteration forces (`remaining 10 < 12`): `calls` 0,
+    `stop: "budget"`, `seenFlags[0]` no-tools, notes `[BUDGET_NOTE]`.
+  - Exhausted-record skip (same-turn): `a.txt` = `"hello\n"` (99 B),
+    `maxTotalBytes: 110`, replies `[okText("", [tc("1", "read_file", { path: "a.txt" }), tc("2", "read_file", { path: "a.txt" })]), okText(FINDINGS)]` → call 1 executes (99 B, `calls` 1); call 2 sees remaining 11 `< 12` and records exactly `{"error":"tool result budget exhausted (max 110 bytes)"}` with `calls` still 1; round 2 forces (residue 11) → `stop: "budget"`, `bytes` 99.
   - Sub-envelope backstop: `a.txt` = `"hello\n"` (read output exactly 99 B, pinned
     by fixture) with `maxTotalBytes: 50` → remaining 50 ≥ 12 so the call executes
     with effective cap 50; the 99 B output exceeds it → recorded tool output is
     exactly `{"error":"tool result exceeded the byte budget","truncated":true}`,
     `bytes` stays 0 (`≤ total`), next reply `FINDINGS` → `stop: "final"`.
   - Multi-round exact totals + forced residue: `a.txt` = `"hello\n"`,
-    `maxTotalBytes: 110`, replies `[read a.txt, read a.txt, FINDINGS]` → round 1
+    `maxTotalBytes: 110`, replies `[okText("", [tc("1", "read_file", { path: "a.txt" })]), okText(FINDINGS)]` (the forced round consumes FINDINGS — a second read reply here would parse to invalid-json) → round 1
     `bytes` 99, remaining 11 `< 12` so round 2 forces (`BUDGET_NOTE`, no execution,
     `calls` stays 1) → forced-final `FINDINGS`, `stop: "budget"`, `bytes` 99.
   - Backstop unit tests (import `capToolResult` from `../src/agent.js`):
     passthrough (small valid JSON unchanged) / over-cap (→ exact envelope) /
     invalid-JSON (→ exact envelope) / multibyte-safe (emoji output over cap →
     envelope, no U+FFFD — supersedes the old `capOutput` surrogate test).
-  - Mid-conversation expiry: scripted hook advancing the fake clock past the
-    deadline mid-conversation → loop stops after the current turn (no further
-    calls), `stop: "budget"`, `probeAdvance: false` (probe never advances).
+  - Mid-conversation expiry: replies `[okText("", [tc("1", "read_file", { path: "a.txt" })]), okText(FINDINGS)]`, `a.txt` = `"hello\n"`, budget `{ maxSeconds: 30 }` (deadline `1_030_000`); wrap the harness hook so the FIRST invocation advances the fake clock by 40 s (`h.advance(40_000)`) before delegating → turn 1 executes normally, loop-top then sees `1_040_000` (past the deadline) → stops with `stop: "budget"`, `probeAdvance: false`, `ncalls()` 1 (no further calls; the FINDINGS reply is never consumed).
+  - (All race tests need `vi` added to the `vitest` import at `tests/agent.test.ts:1`, which currently imports only `afterEach, describe, expect, it`.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -227,7 +243,7 @@ git commit -m "fix: whole-agent deadline and exact byte allowance (F11)"
 
 **Exact behavior:**
 - `effectiveTimeout`: no deadline → `configuredMs`; `endMs - nowMs <= 0` → `"expired"`; else `max(1, min(configuredMs, endMs - nowMs))` (floor 1 — bare 0 means no-timeout in `execFile`).
-- `ensureLinkedRepo` entry pre-check FIRST (before `validateCache`, before `mkdir`): expired → `repository not accessible: <alias>: deadline exceeded` (exact detail text) with no `removeDir`/reclone/spawn. `validateCache` checks expiry at entry and returns `"expired"`; the caller maps it to the same error with no `removeDir` (a `null` still takes the existing removeDir+reclone path). Clone, `cloneHead`, and validation git calls take `effectiveTimeout` values; ANY `"expired"` mid-flow aborts with the error immediately — no further spawns, no wipe of an existing dir (replaces the old reclone-then-fail-fast residual).
+- `ensureLinkedRepo` entry pre-check FIRST (before `validateCache`, before `mkdir`): expired → `repository not accessible: <alias>: deadline exceeded` (exact detail text) with no `removeDir`/reclone/spawn. `validateCache` takes the deadline, checks expiry at entry, and re-checks `end - now <= 0` after EACH validation git call (a clamped-timeout kill returns non-zero/throws, which would otherwise read as `null` and wipe a valid cache); the caller maps `"expired"` to the same error with no `removeDir` (a `null` still takes the existing removeDir+reclone path). Fresh-clone failure cleanup is unchanged: a just-created partial dir is still removed (not a pre-existing cache). Clone, `cloneHead`, and validation git calls take `effectiveTimeout` values; ANY `"expired"` mid-flow aborts with the error immediately — no further spawns, no wipe of an existing dir (replaces the old reclone-then-fail-fast residual).
 - `sizeKb` lookup untouched (explicitly out of scope).
 - `main.ts` closure: `(alias, opts?)` + `deadlineMs: opts?.deadlineMs` in the `ensureLinkedRepo` args (covered by type-check + review — no dedicated seam exists for the inline closure; state that in the report).
 
@@ -242,6 +258,12 @@ git commit -m "fix: whole-agent deadline and exact byte allowance (F11)"
     `deps.run` uncalled (assert the recorded-calls array is empty).
   - Pre-seeded plain dir (no `.git`, so the non-deadline path would
     removeDir+reclone) + expired deadline → same error + dir still exists (no wipe).
+  - Pre-seeded dir with `.git` + valid marker (`mkdir .git`, write
+    `.lupa-clone.json` with `{ repo: "a/b", branch: "main", sha: "0"*40 }` per the
+    `:285` valid-cache test), `deps.run` fakes returning non-zero (as a
+    clamped-timeout kill would) + expired deadline → error
+    containing `deadline exceeded` (not a reclone) + dir still exists (proves the
+    per-call expiry check maps kills to `"expired"`, not to wipe-`null`).
   - In `tests/main.test.ts`: nothing new (closure covered by type-check + review).
 
 - [ ] **Step 2: Run tests to verify they fail**

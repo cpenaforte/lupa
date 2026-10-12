@@ -123,11 +123,18 @@ executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: nu
   the walk the worker timeout is recomputed as `min(timeoutMs, max(0, end-now))`
   where `timeoutMs` is `grepInRoot`'s own parameter (default `GREP_TIMEOUT_MS`) —
   never the constant alone, so an explicit caller bound (e.g. 200 ms in tests) is
-  preserved. Expired → timeout error, no spawn. `grepInRoot(root, args, timeoutMs?,
-  limits?, endMs?)` and `grep()` forward the absolute end.
-  Each tool function takes the per-call cap explicitly: `readFile`/`grep` parameterize
-  their caps; `listDir(args, ctx, maxBytes?)` / `glob(args, ctx, maxBytes?)` take an
+  preserved. After the walk, if `end - now <= 0` return `"grep timed out"` WITHOUT
+  spawning the worker (a walk-consumed deadline must not spawn); else the worker runs
+  with the recomputed timeout. `grepInRoot(root, args, timeoutMs?,
+  limits?, endMs?, maxBytes?)` and `grep()` forward the absolute end.
+  Each tool function takes the per-call cap explicitly:
+  `readFile(args, ctx, opts?: { maxBytes?: number })`;
+  `grep(args, ctx, opts?: { timeoutMs?: number; endMs?: number; maxBytes?: number })`;
+  `listDir(args, ctx, maxBytes?)` / `glob(args, ctx, maxBytes?)` take an
   optional trailing cap for entry-dropping; `errorResult` caps via the constant.
+  `executeTool` routes each `limits` field into every tool (deadline → walk/worker
+  end, cap → `maxBytes`) — including `grep`'s serializer, which parameterizes its
+  current `AGENT_LIMITS.resultBytes` hard-code (same behavior at default).
 - `walkPaths` via glob: duration `min(WALK_DEFAULT_DEADLINE_MS, max(0, end-now))`;
   entry-expired → `errorResult("glob timed out")` (exact text, mirroring grep — glob
   has no timeout today). `read_file`/`list_dir` are synchronous bounded work — no deadline
@@ -148,7 +155,11 @@ executeTool(name, args, ctx, limits?: { deadlineMs?: number; maxResultBytes?: nu
   error immediately — no spawn, and never `removeDir` on an existing dir (the
   validator returns `"expired"` distinctly from `null`, and the caller maps it to
   the error with no wipe; a mid-validation expiry aborts the same way rather than
-  recloning). The `sizeKb` lookup is explicitly out of scope (GitHub API, not git).
+  recloning — `validateCache` takes the deadline and re-checks `end - now <= 0`
+  after EACH validation git call (a clamped-timeout kill returns non-zero/throws,
+  which would otherwise read as `null` and wipe a valid cache). Fresh-clone
+  failure cleanup is unchanged: a just-created partial dir is still removed (it is
+  not a pre-existing cache). The `sizeKb` lookup is explicitly out of scope (GitHub API, not git).
 
 ### Byte allowance (exact)
 
@@ -160,9 +171,9 @@ turn logs, and `elapsedMs` are excluded (observability/metadata, each a fixed
 envelope ≤ 65 B by construction: 65/56/51 B measured).
 
 - Tools cap payloads to `limits?.maxResultBytes ?? AGENT_LIMITS.resultBytes`:
-  `read_file`/`grep` parameterize their existing marker-inside caps (same behavior
-  at default); `list_dir`/`glob` drop tail entries (`truncated` stays true — the
-  flag IS the signal, no marker needed); `errorResult` caps messages at 2000 chars
+  `read_file` parameterizes its existing marker-inside cap (same behavior
+  at default); `grep`/`list_dir`/`glob` drop tail entries (`truncated` stays true —
+  the flag IS the signal, no marker needed); `errorResult` caps messages at 2000 chars
   with the marker inside (`ERROR_MESSAGE_CAP = 2000`, new constant).
 - runAgent per tool call: `remaining = maxTotalBytes - bytes`; `remaining < markerBytes`
   (12, the `\n[truncated]` marker — below which no content output can fit) →
@@ -177,7 +188,7 @@ envelope ≤ 65 B by construction: 65/56/51 B measured).
   Never corrupts, never exceeds. runAgent invokes it on EVERY tool output (content
   and tool-error alike) with the per-call *effective* cap (`min(maxResultBytes,
   remaining)` — not the nominal: a remainder below a tool's minimum JSON envelope
-  (~91 B for read_file) cannot fit any real output, so the backstop replaces it
+  (≈91 B empty-content read_file, ≈103 B truncated minimum) cannot fit any real output, so the backstop replaces it
   with the fixed 65 B envelope; the replacement is bookkeeping, excluded from
   `bytes`, which is what keeps content totals exactly bounded). Tool-layer caps
   below a tool's minimum envelope are therefore best-effort (envelope-only output);
@@ -218,9 +229,10 @@ timeouts — no fake clocks there):
   spawns the worker thread (assert via `files_scanned`/error shape, not timing).
 - Clone with an expired deadline returns the existing "not accessible" error shape
   (detail `deadline exceeded`) without spawning git (assert `deps.run` uncalled)
-  and without wiping an existing dir; `effectiveTimeout` unit table passes `nowMs`
-  explicitly (no deadline → configured; future → min; past/at → `"expired"`;
-  `endMs = now + 1` → `1`, pinning the floor).
+  and without wiping an existing dir; a validation git failure under an expired
+  deadline maps to the same error, never to a reclone-wipe. `effectiveTimeout`
+  unit table passes `nowMs` explicitly (no deadline → configured; future → min;
+  past/at → `"expired"`; `endMs = now + 1` → `1`, pinning the floor).
 - Existing tests keep passing modulo named intentional updates: `seenOpts`
   `toEqual` gains `deadlineMs`; the `capOutput` surrogate test is replaced per above;
   turn accounting, forced-final note, repair flow, 400/404 probe paths unchanged.
