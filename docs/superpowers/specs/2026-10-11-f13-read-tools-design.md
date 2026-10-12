@@ -43,9 +43,9 @@ and bound traversal before the worker runs.
 
 ```ts
 export interface WalkLimits {
-  maxFiles?: number;    // default 10_000 — entries examined (each dequeued entry,
-  // files and directories alike; pruned/.git/symlink entries are never examined
-  // and never counted), not just returned
+  maxFiles?: number;    // default 10_000 — entries examined: each dirent classified
+  // in a directory loop counts 1, files and directories alike (pruned/.git/symlink/
+  // non-regular entries are never examined and never counted), not just returned
   deadlineMs?: number;  // default 10_000 — wall-clock for the walk, checked at the
   // top of each directory iteration including the first (a non-positive deadline
   // fires immediately — test-seam use); known granularity: one synchronous directory
@@ -55,9 +55,11 @@ export interface WalkLimits {
 export interface WalkSkipped {
   oversized: number;  // > 1 MiB, content walk only
   binary: number;     // NUL in first 8 KB, content walk only
-  // Entries still queued (current directory remainder + unvisited directories)
-  // at the moment a walk limit fired; pruned/.git/symlink entries are excluded
-  // (they are deliberately skipped, not limit-cut). 0 unless a limit fired.
+  // Entries still queued (current directory-loop remainder + 1 per stacked unvisited
+  // directory, whose contents are unknowable without visiting) at the moment a walk
+  // limit fired; pruned/.git/symlink/non-regular entries are excluded (they are
+  // deliberately skipped, not limit-cut). 0 unless a limit fired — a limit fires only
+  // when an unexamined entry remains, so exact fit yields `truncated: false`.
   overLimit: number;
 }
 ```
