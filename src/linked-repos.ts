@@ -234,8 +234,14 @@ export async function ensureLinkedRepo(
     result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
   }
   if (result.code !== 0) {
-    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
+    // Fresh-dir cleanup is unchanged; only the error detail depends on the
+    // deadline. A clone killed by the deadline clamp reports the deadline
+    // error rather than the kill's generic stderr.
     removeDir(dir);
+    if (o.deadlineMs !== undefined && o.deadlineMs - Date.now() <= 0) {
+      return { error: deadlineExceeded };
+    }
+    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
     return { error: `repository not accessible: ${alias}: ${detail}` };
   }
 
@@ -332,6 +338,7 @@ async function cloneHead(
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   let branch = "";
   let sha = "";
+  const isExpired = (): boolean => deadlineMs !== undefined && deadlineMs - Date.now() <= 0;
   try {
     const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
     if (branchTimeout === "expired") return "expired";
@@ -340,8 +347,12 @@ async function cloneHead(
     const headTimeout = effectiveTimeout(timeoutMs, deadlineMs);
     if (headTimeout === "expired") return "expired";
     const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
+    // A clamped-timeout kill returns non-zero here; without this re-check it
+    // would fall through to a success with an empty sha.
+    if (isExpired()) return "expired";
     if (h.code === 0) sha = h.stdout.trim();
   } catch {
+    if (isExpired()) return "expired";
     // Ignore: the clone itself succeeded, so return what was derived so far.
   }
   return { branch, sha };

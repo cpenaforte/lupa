@@ -25903,8 +25903,11 @@ async function ensureLinkedRepo(alias, o) {
     result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
   }
   if (result.code !== 0) {
-    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
     removeDir(dir);
+    if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
+      return { error: deadlineExceeded };
+    }
+    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
     return { error: `repository not accessible: ${alias}: ${detail}` };
   }
   if (o.maxBytes !== void 0) {
@@ -25965,6 +25968,7 @@ async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   let branch = "";
   let sha = "";
+  const isExpired = () => deadlineMs !== void 0 && deadlineMs - Date.now() <= 0;
   try {
     const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
     if (branchTimeout === "expired")
@@ -25976,9 +25980,13 @@ async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
     if (headTimeout === "expired")
       return "expired";
     const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
+    if (isExpired())
+      return "expired";
     if (h.code === 0)
       sha = h.stdout.trim();
   } catch {
+    if (isExpired())
+      return "expired";
   }
   return { branch, sha };
 }
