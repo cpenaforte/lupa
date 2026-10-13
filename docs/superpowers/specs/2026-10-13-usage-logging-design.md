@@ -30,23 +30,35 @@ interface AgentOutcome { ..., usage?: LlmUsage } // summed over turns, absent wh
 
 ## 4. Exact behavior
 
-- **Extraction (per completed call, success or failure-with-usage):**
+- **Extraction (one shared helper):** `extractUsage(body: unknown, apiStyle)` in `llm.ts`, called by all 8 call sites (`callLlm`/`callChatTurn`, `callResponses`/`callResponsesTurn`, `callMessages`/`callMessagesTurn`, `callGoogle`/`callGoogleTurn`) on the parsed JSON; adapters import it (as they import schema types today). Usage present iff input AND output are both finite numbers ≥ 0 — partial objects yield absent, never half-shaped. Mappings:
   chat → `{input: usage.prompt_tokens, output: usage.completion_tokens}`;
   responses → `{input: usage.input_tokens, output: usage.output_tokens}`;
-  messages → `{input: usage.input_tokens, output: usage.output_tokens}`;
+  messages → `{input: usage.input_tokens + cache_read_input_tokens + cache_creation_input_tokens (each missing → 0), output: usage.output_tokens}` (cache tokens are billed input — folding them is required, not optional);
   google → `{input: usageMetadata.promptTokenCount, output: (totalTokenCount − promptTokenCount) when both present else candidatesTokenCount}`
   (cached/thoughts fold into input/output respectively — no third field).
   Non-finite or negative values → field absent (never NaN/negative in output).
-- **Carriage:** adapters attach `usage` only when extracted (absent otherwise —
-  all existing fixtures stay green unchanged); `toFindings`/`stripProvenance`
-  ignore it (not a finding field, not provenance); `isFinding`/sanitize/redact
-  never see it (never serialized to artifacts — log/summary only, no secret
-  surface by construction).
-- **Aggregation:** single-shot sums the winning result's usage; agent sums
-  per-turn `AgentReply.usage` into `AgentOutcome.usage` (turns without usage
-  contribute zero). `slowPath` emits one `note()` line (log + summary):
+- **Carriage.** Adapters attach `extractUsage()` output to ok:true results only
+  (absent when unextractable — all existing fixtures stay green unchanged;
+  ok:false NEVER carries usage: failed-run spend is unobservable at this layer
+  and stays a listed residual). `AgentReply` ok:true gains optional `usage`;
+  `runAgent` accumulates per-turn `AgentReply.usage` inside `callWithDeadline`
+  (the sole `hooks.call` funnel — non-raced, ok replies only) into locals next
+  to `turns`/`calls`/`bytes`, and `finish()` attaches the total as
+  `AgentOutcome.usage` (absent when zero contributions — every exit flows
+  through `finish`, so no return site is missed; raced-timeout spend is lost
+  with the discarded reply, listed residual). `callByStyleAgent` /
+  `callWithProbeAgent` copy `outcome.usage` onto an ok:true `result.usage`
+  (overwrite — the agent total supersedes any single-turn value), so
+  `Analysis` (`Promise<LlmResult>`) and all fakes stay byte-identical.
+  `toFindings`/`stripProvenance` ignore it (not a finding field, not
+  provenance); `isFinding`/sanitize/redact never see it (never serialized to
+  artifacts — log/summary only, no secret surface by construction).
+- **Aggregation:** `slowPath` reads `result.usage` off the consumed result (single-shot winner or agent total — both arrive on ok:true `LlmResult.usage` via §4 carriage) and emits one `note()` line (log + summary):
   `lupa: llm usage input=<n> output=<m> tokens (calls=<k>)`, or
-  `lupa: llm usage unknown (provider omitted usage)` when nothing observed.
+  nothing observed → NO line at all (skip paths, failed runs, and
+  usage-less providers stay silent — this keeps eval summaries and
+  skip-path output byte-identical, so no pin updates). `calls=<k>` counts
+  contributing results only (single-shot: 0–1; agent: contributing turns).
   Numbers only — no model text, no prompts, no findings.
 - **Untouched.** Gates, findings, bodies, SARIF/artifact, F15, `Outcome`
   shape, `Analysis` interface (usage rides inside existing return types —
@@ -57,7 +69,7 @@ interface AgentOutcome { ..., usage?: LlmUsage } // summed over turns, absent wh
 - Per-adapter extraction units (usage present → exact `{input, output}`;
   usage absent/malformed → field absent; all four protocols).
 - `AgentReply`/`AgentOutcome` sum units (mixed present/absent turns).
-- `slowPath` note-line pin (exact string; unknown-variant pin).
+- `slowPath` note-line pin (exact string) + silence pin (no-usage run emits no line — asserts the eval-safe behavior).
 - Full suite + evals green with NO pin updates (absent-when-missing proves
   itself — any red pin is a defect in the change, not the test).
 - `failLevel` semantics unchanged.
@@ -73,5 +85,5 @@ units + note pin). No parallel work; pairs with the SARIF task in one plan.
 No new runtime dependencies, no new action inputs, stable namespace,
 no template/CI changes, `dist/` committed, suite + evals green. Ships with
 the next release vehicle — no tag alone. Accepted residuals: probe-retry and
-failed-attempt spend uncounted; unknown providers report unknown; per-model
+failed-attempt spend uncounted; usage-less providers/skips/failures emit no line (silence is the design, not a gap); per-model
 pricing left to the README cost section (no cost math in code).

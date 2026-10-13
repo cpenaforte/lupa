@@ -31,9 +31,9 @@ contract); `::error::` (wrong severity for an optional upload).
 - name: "Note SARIF upload failure"
   if: always() && steps.sarif.outcome == 'failure'
   run: |
-    echo "::warning::lupa: SARIF upload failed — code-scanning results were not uploaded. Enable security-events: write + actions: read, or ignore if code scanning is not used."
+    echo "::warning::lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly missing security-events: write / actions: read permissions), or ignore if code scanning is not used."
     cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-    lupa: SARIF upload failed — code-scanning results were not uploaded. Enable security-events: write + actions: read, or ignore if code scanning is not used.
+    lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly missing security-events: write / actions: read permissions), or ignore if code scanning is not used.
     EOF
 ```
 
