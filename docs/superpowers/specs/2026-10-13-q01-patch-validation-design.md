@@ -66,7 +66,11 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened?: boolea
   patch, or whitespace-only patch → no fence, ever.
 - **Target rule (display side unchanged).** The `side` argument still comes
   from `mapToComments` RIGHT-then-LEFT resolution; only RIGHT-side hits are
-  fence-eligible. A patch on a LEFT hit or general-body item renders first a
+  fence-eligible. `hasPatch` is the single gate for EVERY patch rendering
+  site (RIGHT fence, LEFT/general advice blocks, fallback row): a patch
+  failing `hasPatch` (absent, empty, whitespace-only, or TRUNC_MARK-capped)
+  contributes nothing anywhere — no label, no block, no row — while the
+  `suggestion` and remediation-placeholder paths render normally. A patch on a LEFT hit or general-body item renders first a
   label line `Suggested replacement (advice only):` then a plain fenced code
   block sized by `fenceFor(patch)` exactly like the RIGHT fence (``` unless the
   patch contains backticks; never ` ```suggestion `), then the `Suggested:` text when a
@@ -110,7 +114,7 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened?: boolea
   in the body, no parser impact), SARIF `message.text`, `findings.json`
   shape (new field rides along), F15 counts, `summaryFor`.
 - **Fallback report.** New `- Proposed patch (advice only):` fenced row via
-  the existing `field()` helper when patch is present, placed LAST (after the
+  the existing `field()` helper when `hasPatch(f)` holds, placed LAST (after the
   `- Suggested remediation` row, so the pinned order message < source <
   confidence < evidence < remediation < patch holds). The remediation row
   keeps its contract verbatim: suggestion absent → `No remediation

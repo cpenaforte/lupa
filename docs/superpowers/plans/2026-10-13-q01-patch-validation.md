@@ -82,7 +82,7 @@ git commit -m "feat: nullable patch field with confidence-style field-drop"
 ### Task 75: Q01 — rendering split, survivor, fallback, docs
 
 **Files:**
-- Modify: `src/review.ts` (`formatBody` fence-iff-`hasPatch`+RIGHT, `Suggested:` for suggestion everywhere, LEFT advice-only blocks via `fenceFor(patch)`, `buildBody` general-item advice-only blocks (general items render in `buildBody`, never `formatBody`), fallback `- Proposed patch (advice only):` row LAST, `survivor` first-`hasPatch`), `README.md` (spec §5 note verbatim)
+- Modify: `src/review.ts` (`formatBody` fence-iff-`hasPatch`+RIGHT, `Suggested:` for suggestion everywhere, LEFT advice-only blocks via `fenceFor(patch)`, `buildBody` general-item advice-only blocks (general items render in `buildBody`, never `formatBody`), fallback `- Proposed patch (advice only):` row LAST, `survivor` first-`hasPatch`, stale doc comments on `fenceFor`/`formatBody`/`buildBody` updated to the patch-gated wording), `README.md` (spec §5 note verbatim)
 - Test: `tests/review.test.ts` (rendering matrix, migrated fence tests, fallback order, survivor), `tests/readme.test.ts` (pin phrase `renders in an applicable suggestion fence`)
 - Rebuild: `dist/index.js`
 
@@ -92,13 +92,14 @@ git commit -m "feat: nullable patch field with confidence-style field-drop"
 
 **Exact behavior:**
 - RIGHT + `hasPatch` → `` `suggestion fence with patch verbatim, then `Suggested:` advice when suggestion exists, then trailer. RIGHT + suggestion-only → advice, NO fence (the audit regression pin).
-- LEFT/general + patch → `Suggested replacement (advice only):` label + plain fenced block sized by `fenceFor(patch)` (never ` ```suggestion `), then `Suggested:` text; separators per spec §4 (`\n\n` before label, `\n` label-to-fence, verbatim block, `\n\n` before `Suggested:`); `buildBody` items indent every continuation line with `\n  ` (label, fence, and content lines alike).
+- `hasPatch` gates every patch rendering site (fence, advice blocks, fallback row); failing patches render nothing anywhere (suggestion paths normal). LEFT/general + `hasPatch` → `Suggested replacement (advice only):` label + plain fenced block sized by `fenceFor(patch)` (never ` ```suggestion `), then `Suggested:` text; separators per spec §4 (`\n\n` before label, `\n` label-to-fence, verbatim block, `\n\n` before `Suggested:`); `buildBody` items indent every continuation line with `\n  ` (label, fence, and content lines alike).
 - Fallback: `- Proposed patch (advice only):` via `field()` LAST (order message < source < confidence < evidence < remediation < patch); remediation placeholder contract unchanged.
 - `survivor`: first member satisfying `hasPatch`, absent iff none.
 - Migrate (never delete) existing RIGHT-fence tests to `patch` (`:122-127`, `:151-158`, `:877-883`); audit-shape pins as new tests (prose → advice; genuine replacement → fence).
 - README note verbatim from spec §5. Gates, SARIF `message.text`, `findings.json` shape, F15, `summaryFor` untouched. `tests/fixtures/evals/cases.ts` needs NO changes (verified: zero suggestion literals — evals stay green by construction).
 
 - [ ] **Step 1: Write the failing tests**
+  - Invalid-patch rendering: whitespace-only / TRUNC_MARK-capped / absent patch on LEFT, general, and fallback inputs renders no label, block, or row (suggestion text or placeholder normal).
   - Matrix: RIGHT+patch fence (verbatim content + order head/fence/Suggested/trailer); RIGHT+suggestion-only advice; empty/whitespace/TRUNC_MARK patch advice; LEFT+patch label + sized block + Suggested; backtick patch stays fenced-in; general-body shapes; fallback row LAST + order assertion; trailer fence-external.
   - Migrate the three fence tests to `patch`; add audit-shape tests (credential-rotation prose, SQL prose → advice; genuine replacement → fence).
   - Survivor first-`hasPatch` + absent-iff-none. README phrase pin.
