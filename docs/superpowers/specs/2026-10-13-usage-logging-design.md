@@ -30,7 +30,7 @@ interface AgentOutcome { ..., usage?: LlmUsage } // summed over turns, absent wh
 
 ## 4. Exact behavior
 
-- **Extraction (one shared helper):** `extractUsage(body: unknown, apiStyle)` in `llm.ts`, called by all 8 call sites (`callLlm`/`callChatTurn`, `callResponses`/`callResponsesTurn`, `callMessages`/`callMessagesTurn`, `callGoogle`/`callGoogleTurn`) on the parsed JSON; adapters import it (as they import schema types today). Usage present iff input AND output are both finite numbers ≥ 0 — partial objects yield absent, never half-shaped. Non-object bodies (null, arrays, primitives) yield absent (adapters never reject on shape — agent.ts relies on it). Mappings:
+- **Extraction (one shared helper):** `extractUsage(body: unknown, apiStyle)` in `llm.ts`, called by all 8 call sites (`callLlm`/`callChatTurn`, `callResponses`/`callResponsesTurn`, `callMessages`/`callMessagesTurn`, `callGoogle`/`callGoogleTurn`) on the parsed JSON; adapters import it (as they import schema types today). extractUsage returns `{input, output}` only (pure shape normalization — counting is not its job); each of the 8 call sites attaches `calls: 1` alongside it. Usage present iff input AND output are both finite numbers ≥ 0 — partial objects yield absent, never half-shaped. Non-object bodies (null, arrays, primitives) yield absent (adapters never reject on shape — agent.ts relies on it). Mappings:
   chat → `{input: usage.prompt_tokens, output: usage.completion_tokens}`;
   responses → `{input: usage.input_tokens, output: usage.output_tokens}`;
   messages → `{input: usage.input_tokens + (cache_read_input_tokens ?? 0) + (cache_creation_input_tokens ?? 0), output: usage.output_tokens}` (cache tokens are billed input — folding them is required; a missing `input_tokens` itself means absent, caches alone do not form an input);
@@ -66,7 +66,7 @@ interface AgentOutcome { ..., usage?: LlmUsage } // summed over turns, absent wh
 
 ## 5. Tests
 
-- Per-adapter extraction units (usage present → exact `{input, output}`;
+- Per-adapter extraction units (extractUsage present → exact `{input, output}` (no calls key at this layer; attach-point adds `calls: 1`);
   usage absent/malformed → field absent; all four protocols).
 - `AgentReply`/`AgentOutcome` sum units (mixed present/absent turns).
 - `slowPath` note-line pin (exact string) + silence pin (no-usage run emits no line — asserts the eval-safe behavior).
