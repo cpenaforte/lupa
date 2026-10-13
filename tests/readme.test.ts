@@ -159,3 +159,10 @@ describe("README suggestion fences (Q01)", () => {
     );
   });
 });
+
+describe("README add-only heuristics (Q03)", () => {
+  it("pins the content-evidence policy note", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    expect(r).toContain("a path match alone never emits");
+  });
+});

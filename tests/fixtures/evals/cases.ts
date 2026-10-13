@@ -18,6 +18,15 @@ export const highFinding = {
   message: "The changed check runs without any authentication.",
 } as const;
 
+const q03KeyFinding = {
+  severity: "high",
+  file: "id_rsa",
+  rule: "sensitive-path",
+  message: "Sensitive file path changed: id_rsa",
+  source: "fastpath",
+  confidence: 50,
+} as const;
+
 const commandFinding = {
   severity: "warning",
   file: "src/archive.ts",
@@ -430,6 +439,43 @@ export const evalCases: readonly EvalCase[] = [
       exitCode: 0,
       summary: `${authzSummary}\n${staleSkipNote}`,
       publication: { kind: "none" },
+    },
+  },
+  {
+    id: "synthetic-positive-q03-key-addition",
+    categories: ["positive"],
+    syntheticRationale: "Synthetic Q03 regression: a newly added private key in a sensitive path emits an evidence-backed high finding.",
+    patchFixture: "q03-key-addition.patch",
+    inputOverrides: { failLevel: "high" },
+    llmFindings: [],
+    expected: {
+      promptDiffSnippet: "+-----BEGIN RSA PRIVATE KEY-----",
+      findings: [q03KeyFinding],
+      exitCode: 1,
+      summary: summaryForMany([q03KeyFinding]),
+      publication: {
+        kind: "review",
+        payload: {
+          commit_id: HEAD_SHA,
+          body: "lupa: 1 finding(s).\n\n**Findings not placed inline:**\n- **high** **blocking** id_rsa [sensitive-path] Sensitive file path changed: id_rsa\n  \n  \x60src:fastpath · conf 50\x60",
+          event: "REQUEST_CHANGES",
+          comments: [],
+        },
+      },
+    },
+  },
+  {
+    id: "synthetic-safe-negative-q03-cert-addition",
+    categories: ["safe-negative"],
+    syntheticRationale: "Synthetic Q03 safe control: a newly added public certificate carries no private-key evidence and emits nothing.",
+    patchFixture: "q03-cert-addition.patch",
+    llmFindings: [],
+    expected: {
+      promptDiffSnippet: "+-----BEGIN CERTIFICATE-----",
+      findings: [],
+      exitCode: 0,
+      summary: "lupa: no findings.",
+      publication: { kind: "review", payload: cleanPayload },
     },
   },
 ];

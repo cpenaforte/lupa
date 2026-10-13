@@ -365,8 +365,18 @@ describe("runL0", () => {
       expect(todoLines(hunks)).toEqual([41]);
     });
 
-    it("reports a TODO on a context line at its new-file line number", () => {
+    it("ignores a TODO on an unchanged context line (add-only scan)", () => {
       const hunks = ["@@ -5,3 +7,3 @@", " keep", " // FIXME ctx", "+added"].join("\n");
+      expect(todoLines(hunks)).toEqual([]);
+    });
+
+    it("does not scan a marker in a hunk header's trailing context", () => {
+      const hunks = ["@@ -1,2 +1,3 @@ function f() { // TODO refactor", " keep", "+added"].join("\n");
+      expect(todoLines(hunks)).toEqual([]);
+    });
+
+    it("reports only the added TODO when a context line carries one too", () => {
+      const hunks = ["@@ -5,3 +7,3 @@", " // TODO ctx", "+// TODO added", " keep"].join("\n");
       expect(todoLines(hunks)).toEqual([8]);
     });
 

@@ -265,9 +265,12 @@ export function runL0(
 const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /**
- * Scans unified-diff hunks for TODO/FIXME/XXX on ADDED or CONTEXT lines and
- * reports real new-file line numbers. Removed (`-`) lines are skipped entirely.
- * Input with no `@@` header is treated as new-file content counted from 1.
+ * Scans unified-diff hunks for TODO/FIXME/XXX on ADDED or unprefixed content
+ * lines only (add-only, via the shared `contentText` classifier). Context (` `)
+ * and empty lines advance the new-file counter exactly as today but are never
+ * scanned; removed (`-`) and no-newline (`\`) lines are skipped entirely; `@@`
+ * headers are never content and never advance. Input with no `@@` header is
+ * treated as new-file content counted from 1.
  */
 function todoMarkers(hunks: string): { line: number; text: string }[] {
   const out: { line: number; text: string }[] = [];
@@ -280,7 +283,6 @@ function todoMarkers(hunks: string): { line: number; text: string }[] {
       continue;
     }
     if (raw.startsWith("-") || raw.startsWith("\\")) continue;
-    const text = raw.startsWith("+") || raw.startsWith(" ") ? raw.slice(1) : raw;
     let line: number;
     if (newLine !== undefined) {
       line = newLine;
@@ -289,7 +291,8 @@ function todoMarkers(hunks: string): { line: number; text: string }[] {
       line = fallback;
       fallback += 1;
     }
-    if (TODO_RE.test(text)) out.push({ line, text });
+    const text = contentText(raw);
+    if (text !== undefined && TODO_RE.test(text)) out.push({ line, text });
   }
   return out;
 }

@@ -167,7 +167,7 @@ Every finding may carry where it came from, what proves it, and how confident th
 
 Provenance is display-only: it never changes gates or severity. It renders as an inline `` `src:<source> · conf <n>` `` trailer, `- Source:` / `- Confidence:` / `- Evidence:` fallback rows, and SARIF `properties`.
 
-Policy note: heuristic fastpath matches report confidence 50 even when they are high severity (for example sensitive-path findings), because a path match is not proof.
+Policy note: heuristic fastpath matches report confidence 50 even when they are high severity (for example sensitive-path findings), because emission requires added-line secret evidence — a path match alone never emits.
 
 ## Dry-run: `post_comment: false`
 

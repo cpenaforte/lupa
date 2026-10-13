@@ -25024,7 +25024,6 @@ function todoMarkers(hunks) {
     }
     if (raw.startsWith("-") || raw.startsWith("\\"))
       continue;
-    const text = raw.startsWith("+") || raw.startsWith(" ") ? raw.slice(1) : raw;
     let line;
     if (newLine !== void 0) {
       line = newLine;
@@ -25033,7 +25032,8 @@ function todoMarkers(hunks) {
       line = fallback;
       fallback += 1;
     }
-    if (TODO_RE.test(text))
+    const text = contentText(raw);
+    if (text !== void 0 && TODO_RE.test(text))
       out.push({ line, text });
   }
   return out;
