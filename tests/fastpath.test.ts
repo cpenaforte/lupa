@@ -327,6 +327,10 @@ describe("runL0", () => {
       expect(sensitive("config/.env", "+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7REALKEY")[0]?.severity).toBe("high");
     });
 
+    it("bare KEY_ID without a secret segment stays silent (scanners backstop AKIA IDs)", () => {
+      expect(sensitive("config/.env", "+AWS_KEY_ID=AKIAIOSFODNN7REALKEY")).toEqual([]);
+    });
+
     it("empty, binary, and hunk-less sensitive files are silent", () => {
       expect(sensitive("config/.env", "")).toEqual([]);
       expect(sensitive("certs/server.pem", "")).toEqual([]);
