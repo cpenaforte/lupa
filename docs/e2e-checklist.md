@@ -82,7 +82,8 @@ Release order (strict; `v1` moves exactly once, as the last tag move):
    - **SARIF check:** to verify the SARIF upload in the canary, enable **both** `security-events: write`
      and `actions: read` in the workflow, then confirm the findings appear in the repository's
      Security tab (Code scanning alerts). With either permission missing the upload fails with
-     "Resource not accessible by integration" and `continue-on-error` absorbs it without failing the job (a separate warning step reports the failure); that is
+     "Resource not accessible by integration" and `continue-on-error` absorbs it without failing the job
+     (a separate warning step reports the failure); that is
      expected, but the canary should exercise the enabled path at least once.
    - **Agent-mode check:** enable `llm_agent: true` on the canary and run two PRs: one that needs
      cross-file context (e.g. a changed function whose caller in another file breaks) and one whose
