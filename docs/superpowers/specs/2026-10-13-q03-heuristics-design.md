@@ -67,7 +67,7 @@ export function addedLines(hunks: string): string[]; // maps contentText over hu
     secret-shaped — contains (case-insensitive) `SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?KEY|SESSION[_-]?KEY`
     or a `_`/`-`-delimited segment equal to `PASS|SIGNING|ENCRYPTION|MASTER|AUTH|AUTHORIZATION`
     (`COMPASS`/`BYPASS` have no delimited segment — silent); AND (b) the value,
-    after trailing-comment strip (`\s+#.*$` — `a#b` keeps its hash), trim, one-pass
+    after trailing-comment strip (`(?:^|\s+)#.*$` — `a#b` keeps its hash), trim, one-pass
     matched-pair quote-strip, trim again, is not a placeholder; AND (c) the value
     is not obviously non-secret: not pure numeric (`/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/`),
     not boolean (`/^(true|false|yes|no|on|off)$/i`, `0`/`1` covered by numeric),
@@ -78,7 +78,7 @@ export function addedLines(hunks: string): string[]; // maps contentText over hu
     `*_KEY_ID` with AKIA values flags via the `ACCESS_KEY` substring (matches
     scanner behavior for key IDs — accepted, stated). Any added line carrying
     a private-key marker also flags (PEM blocks in env), independent of key names.
-- **Placeholder set (pinned, minimal).** `isPlaceholderValue` takes the raw extracted value and runs the full pipeline internally: strip one trailing CR, strip a trailing comment (whitespace + `#...`; `a#b` keeps its hash), trim, one-pass matched-pair quote-strip (`"..."`/`...` single layer only; mismatched/nested quotes strip nothing), trim again. Placeholder iff the result is empty OR a whole-value `$VAR` reference (`$NAME` / `${...}` — resolved elsewhere, not a committed secret; `$HOME/real` is NOT whole-value → real) OR case-insensitive match of:
+- **Placeholder set (pinned, minimal).** `isPlaceholderValue` takes the raw extracted value and runs the full pipeline internally: strip one trailing CR, strip a trailing comment (start-of-value or whitespace + `#...`, so `# fill in` alone strips to empty; `a#b` keeps its hash), trim, one-pass matched-pair quote-strip (`"..."`/`...` single layer only; mismatched/nested quotes strip nothing), trim again. Placeholder iff the result is empty OR a whole-value `$VAR` reference (`$NAME` / `${...}` — resolved elsewhere, not a committed secret; `$HOME/real` is NOT whole-value → real) OR case-insensitive match of:
   literals `changeme`, `change-me`, `example`, `sample`, `test`, `testing`, `xxx`,
   `password`, `password123`, `123456`, `placeholder`, `none`;
   anchored patterns: value contains `EXAMPLE_NOT_A_SECRET`, or starts with `AKIAIOSFODNN7EXAMPLE` / `ghp_EXAMPLE` (case-insensitive) — worked example: `DB_PASSWORD=x@db.example.com` matches neither, so with its secret key it flags (fail-safe toward detection);
@@ -126,6 +126,7 @@ export function addedLines(hunks: string): string[]; // maps contentText over hu
   cert-only + negative `BEGIN PUBLIC KEY`); `isPlaceholderValue` (every pinned
   literal + pattern + whole-value `$VAR` vs `$HOME/real` + mismatched quotes +
   negative real values like `ghp_live...`);
+  comment-only value `DB_PASSWORD= # fill in` → silent (placeholder);
   key-shape units (`DB_PASS`/`SMTP_PASS`/`JWT_SIGNING_KEY`/`ENCRYPTION_KEY`/`MASTER_KEY`
   secret-shaped; `COMPASS`/`BYPASS` not);
   value-shape units (numeric/boolean/credential-less-URL silent even under secret
