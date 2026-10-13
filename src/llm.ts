@@ -202,7 +202,8 @@ export function parseVerdicts(parsed: unknown): DedupVerdicts {
  * rejected: only an integer >= 1 is kept, anything else becomes undefined.
  * Single-shot provenance (Q04): every finding gains `source: "llm"`; a
  * safe-integer 0..100 `confidence` is carried, anything else drops the FIELD
- * (never the finding — verdict-index alignment is preserved).
+ * (never the finding — verdict-index alignment is preserved). A string `patch`
+ * is carried verbatim; a wrong-typed one drops the field the same way.
  */
 export function toFindings(v: unknown): Finding[] | undefined {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
@@ -224,6 +225,10 @@ export function toFindings(v: unknown): Finding[] | undefined {
     };
     if (Number.isInteger(i.line) && (i.line as number) >= 1) f.line = i.line as number;
     if (typeof i.suggestion === "string") f.suggestion = i.suggestion;
+    // Wrong-typed patch drops the FIELD only (confidence precedent): a single
+    // malformed patch must never discard the whole review — positions stay
+    // untouched, so verdict-index alignment holds.
+    if (typeof i.patch === "string") f.patch = i.patch;
     if (
       typeof i.confidence === "number" &&
       Number.isSafeInteger(i.confidence) &&

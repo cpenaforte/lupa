@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, formatBody, indexHunks, isTruncNoteLine, mapToComments, mergeDuplicates, normalizeBot, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened, truncNoteFor } from "../src/review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, formatBody, hasPatch, indexHunks, isTruncNoteLine, mapToComments, mergeDuplicates, normalizeBot, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened, truncNoteFor } from "../src/review.js";
 import { parseHunks, type FileDiff } from "../src/diff.js";
 import type { DedupVerdicts } from "../src/llm.js";
-import type { Finding } from "../src/fastpath.js";
+import { TRUNC_MARK, type Finding } from "../src/fastpath.js";
 
 // a.ts: line 3 is a deletion (LEFT 3), line 4 an addition (RIGHT 4); line 99 is outside every hunk.
 function hunksFixture() {
@@ -510,6 +510,32 @@ describe("redactFindings", () => {
     input[0].evidence!.analyzer = "mutated";
     input[0].evidence!.snippet = "mutated";
     expect(out[0].evidence).toEqual({ analyzer: "semgrep", snippet: "code" });
+  });
+
+  it("redactFindings redacts secrets in patch (fresh object, input untouched)", () => {
+    const input: Finding[] = [
+      { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", patch: "token sk-secret-1 here" },
+    ];
+    const out = redactFindings(input, ["sk-secret-1"]);
+    expect(out[0].patch).toBe("token [REDACTED] here");
+    expect(out[0]).not.toBe(input[0]);
+    expect(input[0].patch).toBe("token sk-secret-1 here");
+  });
+});
+
+describe("hasPatch", () => {
+  it("accepts a non-empty string patch, trimming only for the test (stored verbatim)", () => {
+    expect(hasPatch({ severity: "warning", file: "a.ts", rule: "r", message: "m", patch: "const x = 1;" })).toBe(true);
+    expect(hasPatch({ severity: "warning", file: "a.ts", rule: "r", message: "m", patch: "  const x = 1;  " })).toBe(true);
+  });
+
+  it("rejects absent, empty, whitespace-only, and TRUNC_MARK-capped patches", () => {
+    expect(hasPatch({ severity: "warning", file: "a.ts", rule: "r", message: "m" })).toBe(false);
+    expect(hasPatch({ severity: "warning", file: "a.ts", rule: "r", message: "m", patch: "" })).toBe(false);
+    expect(hasPatch({ severity: "warning", file: "a.ts", rule: "r", message: "m", patch: "  \n\t " })).toBe(false);
+    expect(
+      hasPatch({ severity: "warning", file: "a.ts", rule: "r", message: "m", patch: `code${TRUNC_MARK}` }),
+    ).toBe(false);
   });
 });
 

@@ -143,16 +143,17 @@ describe("buildMessages agent variant", () => {
 });
 
 describe("PR_REVIEW_SCHEMA", () => {
-  it("requires findings with strict item shape and all eight keys", () => {
+  it("requires findings with strict item shape and all nine keys", () => {
     const item = (PR_REVIEW_SCHEMA.schema.properties.findings as any).items;
-    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"]);
+    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"]);
     expect(Object.keys(item.properties).sort()).toEqual(
-      ["confidence", "duplicateOf", "file", "line", "message", "rule", "severity", "suggestion"],
+      ["confidence", "duplicateOf", "file", "line", "message", "patch", "rule", "severity", "suggestion"],
     );
     expect(item.additionalProperties).toBe(false);
     expect(item.properties.severity.enum).toEqual(["info", "warning", "high"]);
     expect(item.properties.duplicateOf).toEqual({ type: ["integer", "null"] });
     expect(item.properties.confidence).toEqual({ type: ["integer", "null"] });
+    expect(item.properties.patch).toEqual({ type: ["string", "null"] });
     expect(PR_REVIEW_SCHEMA.schema.additionalProperties).toBe(false);
     expect(PR_REVIEW_SCHEMA.schema.required).toEqual(["findings", "duplicates"]);
   });
@@ -274,5 +275,17 @@ describe("DEDUP_INSTRUCTIONS", () => {
     expect(buildMessages([], "D", undefined, [], undefined, 0, { withIds: true }).system).toContain("confidence");
     expect(buildMessages([], "D", undefined, [], { maxTurns: 10 }).system).not.toContain("confidence");
     expect(buildMessages([], "D").system).not.toContain("confidence");
+  });
+
+  it("names the patch field with the spec §4 sentence on the single-shot path only (agent prompts stay clean)", async () => {
+    const { buildMessages, DEDUP_INSTRUCTIONS } = await import("../src/prompt.js");
+    const SENTENCE =
+      "Set `patch` to the exact replacement code for the flagged line, and only then; put all explanations in `suggestion`; use null when there is no replacement.";
+    expect(DEDUP_INSTRUCTIONS).toContain(SENTENCE);
+    expect(buildMessages([], "D", undefined, [], undefined, 0, { withIds: true }).system).toContain(SENTENCE);
+    expect(buildMessages([], "D").system).not.toContain(SENTENCE);
+    const agent = buildMessages([], "D", undefined, [], { maxTurns: 10 });
+    expect(agent.system).not.toContain(SENTENCE);
+    expect(agent.system).not.toContain("Set `patch`");
   });
 });

@@ -1,5 +1,5 @@
 import type { Finding } from "./fastpath.js";
-import { MSG_CAP, RULE_CAP, capText } from "./fastpath.js";
+import { MSG_CAP, RULE_CAP, TRUNC_MARK, capText } from "./fastpath.js";
 import type { FailLevel } from "./inputs.js";
 import type { DedupVerdicts } from "./llm.js";
 import type { FileDiff, HunkLine, ParsedHunk } from "./diff.js";
@@ -39,6 +39,17 @@ function isValidLine(v: unknown): v is number {
 
 function hasSuggestion(f: Finding): f is Finding & { suggestion: string } {
   return typeof f.suggestion === "string" && f.suggestion !== "";
+}
+
+/**
+ * The single gate for every patch rendering site (Q01): a patch fences/renders
+ * **iff** its stored (sanitized) value is a non-empty, non-whitespace-only
+ * string that was NOT capped. The trim lives ONLY in this test — the stored and
+ * rendered value stays verbatim. A value ending in TRUNC_MARK was capped by
+ * `sanitizeFinding`, so it is advice-only and never fenced.
+ */
+export function hasPatch(f: Finding): f is Finding & { patch: string } {
+  return typeof f.patch === "string" && f.patch.trim() !== "" && !f.patch.endsWith(TRUNC_MARK);
 }
 
 /**
@@ -284,7 +295,7 @@ export function exitFor(failLevel: FailLevel, findings: Finding[]): number {
 const FALLBACK_SUMMARY = "lupa: review complete.";
 
 /**
- * Replaces every non-empty secret in `message`, `suggestion`, `file`,
+ * Replaces every non-empty secret in `message`, `suggestion`, `patch`, `file`,
  * `rule`, and `evidence.*` with the redaction marker. Empty secrets are
  * skipped: redacting with an empty key would interleave markers between
  * every character. The `evidence` object is always copied fresh, so mutating
@@ -301,6 +312,7 @@ export function redactFindings(findings: Finding[], secrets: readonly string[]):
         file: redact(out.file, key),
         rule: redact(out.rule, key),
         ...(out.suggestion !== undefined ? { suggestion: redact(out.suggestion, key) } : {}),
+        ...(out.patch !== undefined ? { patch: redact(out.patch, key) } : {}),
         ...(out.evidence !== undefined
           ? {
               evidence: {

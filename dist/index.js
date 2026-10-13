@@ -25698,7 +25698,7 @@ function agentAddendum(maxTurns) {
     `Tool budget: up to ${maxTurns} tool-call rounds. When you have enough evidence, respond with ONLY the JSON findings object matching the schema; no prose, no tool calls.`
   ].join("\n");
 }
-var DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null). Set "confidence" to your 0-100 integer confidence in each new finding; otherwise use null.`;
+var DEDUP_INSTRUCTIONS = `Dedup verdicts: each object in the fast-findings list above carries an "id" field holding its 0-based index into the sent list. If two SENT findings describe the same underlying issue at the same location, list the pair in "duplicates" as a two-element array [idA, idB] of 0-based sent-list indices. If one of YOUR new findings restates a sent finding, set that finding's "duplicateOf" to the sent finding's 0-based id; otherwise use null. Only judge duplicates you can point to at the same file and line; when in doubt, report no verdict ("duplicates": null, "duplicateOf": null). Set "confidence" to your 0-100 integer confidence in each new finding; otherwise use null. Set \`patch\` to the exact replacement code for the flagged line, and only then; put all explanations in \`suggestion\`; use null when there is no replacement.`;
 function buildMessages(fast, diffText, issueBody, skipped = [], agent, omitted = 0, opts) {
   const withIds = opts?.withIds === true && agent === void 0;
   const system = agent ? `${SYSTEM}
@@ -25742,7 +25742,7 @@ var PR_REVIEW_SCHEMA = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence"],
+          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"],
           properties: {
             severity: { type: "string", enum: ["info", "warning", "high"] },
             file: { type: "string" },
@@ -25751,7 +25751,8 @@ var PR_REVIEW_SCHEMA = {
             message: { type: "string" },
             suggestion: { type: ["string", "null"] },
             duplicateOf: { type: ["integer", "null"] },
-            confidence: { type: ["integer", "null"] }
+            confidence: { type: ["integer", "null"] },
+            patch: { type: ["string", "null"] }
           }
         }
       },
@@ -27099,6 +27100,8 @@ function toFindings(v) {
       f.line = i.line;
     if (typeof i.suggestion === "string")
       f.suggestion = i.suggestion;
+    if (typeof i.patch === "string")
+      f.patch = i.patch;
     if (typeof i.confidence === "number" && Number.isSafeInteger(i.confidence) && i.confidence >= 0 && i.confidence <= 100) {
       f.confidence = i.confidence;
     }
@@ -27727,6 +27730,7 @@ function redactFindings(findings, secrets) {
         file: redact(out.file, key),
         rule: redact(out.rule, key),
         ...out.suggestion !== void 0 ? { suggestion: redact(out.suggestion, key) } : {},
+        ...out.patch !== void 0 ? { patch: redact(out.patch, key) } : {},
         ...out.evidence !== void 0 ? {
           evidence: {
             ...out.evidence.analyzer !== void 0 ? { analyzer: redact(out.evidence.analyzer, key) } : {},
@@ -29095,7 +29099,7 @@ function isFinding(v) {
   if (typeof v !== "object" || v === null)
     return false;
   const f = v;
-  return typeof f.severity === "string" && SEVERITIES2.has(f.severity) && typeof f.file === "string" && typeof f.rule === "string" && typeof f.message === "string" && (f.line === void 0 || typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1) && (f.suggestion === void 0 || typeof f.suggestion === "string") && (f.source === void 0 || typeof f.source === "string" && f.source.length > 0 && f.source.length <= 100) && (f.confidence === void 0 || typeof f.confidence === "number" && Number.isSafeInteger(f.confidence) && f.confidence >= 0 && f.confidence <= 100) && (f.evidence === void 0 || typeof f.evidence === "object" && f.evidence !== null && !Array.isArray(f.evidence) && (f.evidence.snippet === void 0 || typeof f.evidence.snippet === "string") && (f.evidence.analyzer === void 0 || typeof f.evidence.analyzer === "string"));
+  return typeof f.severity === "string" && SEVERITIES2.has(f.severity) && typeof f.file === "string" && typeof f.rule === "string" && typeof f.message === "string" && (f.line === void 0 || typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1) && (f.suggestion === void 0 || typeof f.suggestion === "string") && (f.patch === void 0 || typeof f.patch === "string") && (f.source === void 0 || typeof f.source === "string" && f.source.length > 0 && f.source.length <= 100) && (f.confidence === void 0 || typeof f.confidence === "number" && Number.isSafeInteger(f.confidence) && f.confidence >= 0 && f.confidence <= 100) && (f.evidence === void 0 || typeof f.evidence === "object" && f.evidence !== null && !Array.isArray(f.evidence) && (f.evidence.snippet === void 0 || typeof f.evidence.snippet === "string") && (f.evidence.analyzer === void 0 || typeof f.evidence.analyzer === "string"));
 }
 function readFindings(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
   const path = join6(dir, "findings.json");
@@ -29142,6 +29146,9 @@ function sanitizeFinding(f) {
     out.line = line;
   if (f.suggestion !== void 0) {
     out.suggestion = capText(f.suggestion.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
+  }
+  if (f.patch !== void 0) {
+    out.patch = capText(f.patch.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
   }
   if (f.source !== void 0) {
     const stripped = f.source.replace(CONTROL_ALL, "");

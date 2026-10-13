@@ -357,6 +357,7 @@ function isFinding(v: unknown): v is Finding {
     typeof f.message === "string" &&
     (f.line === undefined || (typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1)) &&
     (f.suggestion === undefined || typeof f.suggestion === "string") &&
+    (f.patch === undefined || typeof f.patch === "string") &&
     (f.source === undefined || (typeof f.source === "string" && f.source.length > 0 && f.source.length <= 100)) &&
     (f.confidence === undefined ||
       (typeof f.confidence === "number" && Number.isSafeInteger(f.confidence) && f.confidence >= 0 && f.confidence <= 100)) &&
@@ -436,6 +437,9 @@ export function sanitizeFinding(f: Finding): Finding {
   if (line !== undefined) out.line = line;
   if (f.suggestion !== undefined) {
     out.suggestion = capText(f.suggestion.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
+  }
+  if (f.patch !== undefined) {
+    out.patch = capText(f.patch.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
   }
   if (f.source !== undefined) {
     const stripped = f.source.replace(CONTROL_ALL, "");

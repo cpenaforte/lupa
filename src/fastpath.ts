@@ -12,6 +12,11 @@ export interface Finding {
   source?: string;
   /** Claimant confidence, integer 0..100. Absent = unmarked (never defaulted). */
   confidence?: number;
+  /**
+   * Explicit replacement code for the flagged line (Q01). Absent = no patch
+   * claim. Stored and rendered verbatim; only `hasPatch` decides applicability.
+   */
+  patch?: string;
   /** What proves the claim. `snippet` is reserved: assigned by no producer in v1. */
   evidence?: { snippet?: string; analyzer?: string };
 }

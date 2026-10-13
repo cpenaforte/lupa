@@ -1647,6 +1647,42 @@ describe("finding provenance contract (Q04)", () => {
   });
 });
 
+describe("patch contract (Q01)", () => {
+  it("readFindings accepts an optional string patch and absence", () => {
+    const dir = scratch();
+    const valid = [{ ...LLM_FINDING, patch: "const x = 1;" }, { ...LLM_FINDING }];
+    writeFileSync(join(dir, "findings.json"), JSON.stringify(valid), "utf8");
+    expect(readFindings(dir)).toEqual(valid);
+  });
+
+  it.each([
+    ["number", 42],
+    ["array", ["x"]],
+    ["object", { a: 1 }],
+    ["boolean", true],
+  ])("readFindings rejects a %s patch", (_label, patch) => {
+    const dir = scratch();
+    writeFileSync(join(dir, "findings.json"), JSON.stringify([{ ...LLM_FINDING, patch }]), "utf8");
+    expect(() => readFindings(dir)).toThrow("lupa: findings.json does not match the finding contract");
+  });
+
+  it("sanitizeFinding carries a short patch unchanged and absent stays absent", () => {
+    const carried = sanitizeFinding({ ...LLM_FINDING, patch: "const x = 1;" });
+    expect(carried.patch).toBe("const x = 1;");
+    const absent = sanitizeFinding({ ...LLM_FINDING });
+    expect(absent.patch).toBeUndefined();
+  });
+
+  it("sanitizeFinding control-strips and caps patch at 4000", () => {
+    const capped = sanitizeFinding({ ...LLM_FINDING, patch: `a\u0000b${"y".repeat(5000)}` });
+    expect(capped.patch).toContain("ab");
+    expect(capped.patch).not.toContain("\u0000");
+    expect(Array.from(capped.patch!)).toHaveLength(4000);
+    expect(capped.patch).toContain(TRUNC);
+    expect(capped.patch).not.toContain("y".repeat(4000));
+  });
+});
+
 describe("findings from binaries, renames and skip paths", () => {
   it("a binary over 500 KB on disk triggers large-file (real stat, not hunk length)", async () => {
     const big = 'diff --git a/big.bin b/big.bin\nBinary files a/big.bin and b/big.bin differ\n';

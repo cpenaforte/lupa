@@ -466,6 +466,63 @@ describe("LLM structured confidence (toFindings via callLlm)", () => {
   });
 });
 
+describe("LLM structured patch (toFindings via callLlm)", () => {
+  const F = (extra: Record<string, unknown> = {}) => ({
+    severity: "warning",
+    file: "a.ts",
+    line: 1,
+    rule: "r",
+    message: "m",
+    suggestion: null,
+    ...extra,
+  });
+  const CLEAN = { severity: "warning", file: "a.ts", line: 1, rule: "r", message: "m", source: "llm" };
+
+  it("carries a string patch verbatim", async () => {
+    const content = JSON.stringify({ findings: [F({ patch: "const x = 1;" })] });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [{ ...CLEAN, patch: "const x = 1;" }],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+  });
+
+  it("null or absent patch stays absent (source still assigned)", async () => {
+    const content = JSON.stringify({ findings: [F(), F({ patch: null })] });
+    stubFetch(() => json(200, okChat(content)));
+    expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+      ok: true,
+      findings: [CLEAN, CLEAN],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+  });
+
+  it("drops wrong-typed patches as a field only, keeping every finding (positions untouched)", async () => {
+    for (const bad of [["x"], 42, true, { a: 1 }]) {
+      const content = JSON.stringify({ findings: [F({ patch: bad })] });
+      stubFetch(() => json(200, okChat(content)));
+      expect(await callLlm(fakeOpenAiEp(), msgs(), opts())).toEqual({
+        ok: true,
+        findings: [CLEAN],
+        verdicts: { pairs: [], links: [], malformed: 0 },
+      });
+    }
+  });
+
+  it("a finding with suggestion only is unchanged (no patch field)", async () => {
+    const content = JSON.stringify({ findings: [F({ suggestion: "advice" })] });
+    stubFetch(() => json(200, okChat(content)));
+    const r = await callLlm(fakeOpenAiEp(), msgs(), opts());
+    expect(r).toEqual({
+      ok: true,
+      findings: [{ ...CLEAN, suggestion: "advice" }],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+    });
+    expect(r.ok && "patch" in r.findings[0]).toBe(false);
+  });
+});
+
 describe("retry and timeout", () => {
   it("timeout degrades without retry", async () => {
     const r = await callLlmWithTimeout(1);
