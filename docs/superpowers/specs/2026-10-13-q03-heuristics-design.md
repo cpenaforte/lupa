@@ -33,7 +33,7 @@ export function runL0(files: FileDiff[], o?: { hasManifestFor?: (lockfile: strin
 // fastpath.ts — new pure helpers (exported for units)
 export function hasPrivateKeyMarker(addedLines: string[]): boolean;
 export function isPlaceholderValue(value: string): boolean;
-export function addedLines(hunks: string): string[]; // "+" lines + unprefixed headerless-content lines; skips " ", "-", "\\" Single classification rule: also applied inline in todoMarkers (which needs line numbers) — one rule, two call sites, no divergent filters.
+export function contentText(raw: string): string | undefined; // one shared classifier: text without prefix for content lines, undefined for ` `, `-`, `\`, `@@`. addedLines() maps it; todoMarkers applies it inline while counting lines. // "+" lines + unprefixed headerless-content lines; skips " ", "-", "\\" Single classification rule. Also applied inline in todoMarkers (which needs line numbers) — one rule, two call sites, no divergent filters.
 // diff.ts — unchanged (FileDiff.deleted?: boolean already exists, Q02)
 ```
 
@@ -43,36 +43,59 @@ export function addedLines(hunks: string): string[]; // "+" lines + unprefixed h
   entirely, all rules (deleted files introduce nothing — the literal policy
   reading; reuses Q02's marker). Surviving files are evaluated on added
   content; pure line-removals in a surviving file are not "deletions".
+  Disclosed behavior change: `binary-note` on deleted binaries and
+  `lockfile-without-manifest` on deleted lockfiles stop emitting (both fire
+  on deleted entries today); `large-file` never fired there (size 0 absent).
+  Policy-literal, stated here — not in the Untouched list by oversight.
 - **Content rule (`sensitive-path`, stays `high` — with direct evidence it
   is no longer heuristic-only).** For non-deleted sensitive paths
-  (`isSensitivePath` unchanged, `ENV_TEMPLATES` unchanged), inspect
+  (`isSensitivePath` unchanged; `ENV_TEMPLATES` unchanged by decision — a real
+  secret committed under a template name is user error outside heuristic scope,
+  and scanners still catch its content), inspect
   `addedLines(f.hunks)`:
-  - Private-key marker on any added line (leading-whitespace tolerant):
-    `/^-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----/`
+  - Private-key marker on any added line, leading-whitespace tolerant:
+    `/^\s*-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----/`
+    (PEM + OpenSSH scope explicitly — PGP `PRIVATE KEY BLOCK`, PuTTY PPK,
+    and other SSH2-misc formats are out of scope; scanners backstop them)
     → flag. Certificate-only content (`BEGIN CERTIFICATE`, no private-key
-    marker anywhere in added lines) → silent.
+    marker anywhere in added lines) → silent. `BEGIN PUBLIC KEY` in a `.pem`
+    is silent by construction (pinned by test).
   - `.env`/`.env.*` files: flag iff an added assignment line
-    `/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/`
-    (non-comment; `#`-led lines skipped) carries a non-placeholder value
-    OR any added line carries a private-key marker (PEM blocks in env).
+    `/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)$/`
+    (dotenv subset: plain `KEY=value` only — `#`-led, `KEY+=`, dashed-key, and
+    multiline values are skipped, stated scope) meets BOTH: (a) the key is
+    secret-shaped, `/(SECRET|TOKEN|PASSWOR?D|PASSWD|PRIVATE|CREDENTIALS?|API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?KEY|SESSION[_-]?KEY)/i`
+    (`PORT=3000`, `DEBUG=false`, `DATABASE_URL=…` do not match — silent even
+    with real-looking values; scanners backstop them); AND (b) the value, after
+    trailing-comment strip (`\s+#.*$` — `a#b` keeps its hash) and quote-strip,
+    is not a placeholder. Any added line carrying a private-key marker also
+    flags (PEM blocks in env), independent of key names.
   - No added content (empty, binary, hunk-less, mode-only hunks) → silent
     (no content means no evidence — the decided rule; scanners backstop).
   - `id_rsa` follows the same uniform content rule, no name exception.
-- **Placeholder set (pinned, minimal).** Strip surrounding single/double
-  quotes, trim; placeholder iff empty OR case-insensitive match of:
-  `changeme`, `change-me`, `example`, `sample`, `test`, `testing`, `xxx`,
-  `password`, `password123`, `123456`, `placeholder`, `none`
-  OR pattern: `/^x+$/i`, `/^<[^>]*>$/`, `/^\$\{[^}]*\}$/`, `/^\*+$/`,
-  contains `example` (case-insensitive — covers `AKIAIOSFODNN7EXAMPLE`,
-  `ghp_EXAMPLE_*`). Anything else is real. Evasion by novel placeholders
-  is accepted (scanners backstop real-shaped secrets).
+- **Placeholder set (pinned, minimal).** Strip a trailing comment (whitespace + `#...`; `a#b` keeps its hash), trim, strip surrounding single/double quotes, trim again; placeholder iff empty OR `$VAR` reference (`$NAME` / `${...}` — resolved elsewhere, not a committed secret) OR case-insensitive match of:
+  literals `changeme`, `change-me`, `sample`, `test`, `testing`, `xxx`,
+  `password`, `password123`, `123456`, `placeholder`, `none`, bare `example`;
+  anchored doc-prefix patterns `^AKIAIOSFODNN7EXAMPLE`, `^ghp_EXAMPLE`, `EXAMPLE_NOT_A_SECRET` (case-insensitive) — substring `example` elsewhere (e.g. `db.example.com`) is NOT a placeholder;
+  shape patterns `/^x+$/i`, `/^<[^>]*>$/`, `/^\${[^}]*}$/`, `/^\*+$/`.
+  Anything else is real. Judgment call recorded: a real weak password (`password123`) is silent — the false-positive-cost choice the policy mandates. Evasion by novel placeholders accepted (scanners backstop real-shaped secrets).
 - **Message text UNCHANGED** (`Sensitive file path changed: ${file}` —
   emission itself is now the evidence-backed claim; avoids pin churn;
   `source: "fastpath"`, `confidence: 50` unchanged).
 - **TODO rule.** `todoMarkers` scans `+`-prefixed lines and unprefixed
-  headerless-content lines only; `" "` context, `-`, and `\` lines skipped.
+  headerless-content lines only, via the shared `contentText` classifier;
+  `@@` headers are never content (git appends enclosing-line context that may
+  contain markers); `" "` context lines advance the new-file counter but are
+  never scanned; `-` and `\` lines are skipped entirely (as today).
   Added TODOs stay `info`; unchanged-context TODOs vanish.
-- **Untouched.** `large-file`, `binary-note`, `lockfile-without-manifest`;
+- **Untouched.** `large-file` always; `binary-note` and
+  `lockfile-without-manifest` on surviving files (deleted-entry behavior
+  moves under the deletion rule above). Scope ruling: the policy's operative
+  scope is its four named categories (sensitive-path + TODO rules — the audit
+  cites only those sites); the second sentence is read as defining those
+  categories, not as a general heuristic ban — otherwise `large-file`,
+  `binary-note`, and `lockfile` (useful, non-secret heuristics the audit never
+  questioned) would also die. Controller-ruled, stated here.
   Finding shape; `isFinding`/sanitize/redact; gates (`eventFor`/`exitFor`);
   Q02 partition/reopen (emission is upstream of gating — no gate-code
   changes); SARIF/artifact; F15 mechanics (counts shrink — expected).
@@ -80,7 +103,8 @@ export function addedLines(hunks: string): string[]; // "+" lines + unprefixed h
   blocks" rule now applies only when a finding is emitted. Pins that plant
   content-less `sensitive-path` fixtures flip and are reworked in-plan
   (known: `tests/main.test.ts:1257` gate test,
-  `tests/fastpath.test.ts:20,76-84,86-94` — enumerated in §6).
+  `tests/fastpath.test.ts:20,76-84,86-94` plus `:117-120` (context-line TODO
+  flips to `[]`; `:113-114` keeps `[41]` via counter-advance) — enumerated in §6).
 
 ## 5. Tests
 
@@ -96,11 +120,15 @@ export function addedLines(hunks: string): string[]; // "+" lines + unprefixed h
   negative real values like `ghp_live...`, `correct-horse-...`).
 - Reworked pins: fastpath `:20` (id_rsa fixture gains key content),
   `:76-84` (content-bearing fixtures; hunk-less trio asserts silence),
+  `:117-120` (context TODO asserts `[]`; `:113-114` counter-advance keeps `[41]`),
   `:86-94` (`.env.local` gains a real assignment; templates still silent);
   main.test `:1257` keeps a blocking-path test via a key-content id_rsa
   fixture + adds the silence variant (content-less → COMMENT + exit 0).
-- Evals: new `cases.ts` pair — private-key addition flags inline,
-  cert-only addition silent (no body item); bundle pins.
+- Evals: new `cases.ts` pair with named fixtures — `q03-key-addition.patch`
+  (new `id_rsa` + PEM marker → lineless high → general-body item with
+  `**blocking**` marker, REQUEST_CHANGES + exit 1 at `fail_level: high`) and
+  `q03-cert-addition.patch` (new `certs/public.pem`, cert-only → no finding,
+  clean body, exit 0); bundle pins on both.
 - Full suite + evals green; `failLevel` semantics unchanged (fewer findings,
   same gates).
 
@@ -115,6 +143,10 @@ evals pair, README heuristic-behavior note). Task (ii) consumes (i)'s
 helpers; no parallel work. Single task also acceptable if the implementer
 prefers — controller decides at plan time.
 
+- **README.** The `README:170` note ("a path match is not proof") is reworded
+  to the content-gated rule (emission now requires added-line evidence);
+  heuristic `confidence: 50` is kept by decision (the number describes the
+  claimant, not the proof).
 ## 7. Constraints and residuals
 
 No new runtime dependencies, no new action inputs, stable namespace
