@@ -380,6 +380,16 @@ describe("runL0", () => {
       expect(todoLines(hunks)).toEqual([8]);
     });
 
+    it("advances the counter on empty lines without scanning them", () => {
+      const hunks = ["@@ -1,2 +1,2 @@", "", "+// TODO after blank"].join("\n");
+      expect(todoLines(hunks)).toEqual([2]);
+    });
+
+    it("scans CRLF added lines through CR stripping", () => {
+      const hunks = ["@@ -1,1 +1,1 @@\r", "+// TODO crlf\r"].join("\n");
+      expect(todoLines(hunks)).toEqual([1]);
+    });
+
     it("skips TODO on removed lines entirely (no finding)", () => {
       const hunks = ["@@ -1,2 +1,1 @@", "-// TODO gone", " kept"].join("\n");
       expect(todoLines(hunks)).toEqual([]);
