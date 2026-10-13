@@ -43,12 +43,12 @@
 **Exact behavior:**
 - `extractUsage(body, apiStyle): {input,output} | undefined` — per spec §4 mappings (chat prompt/completion; responses input/output; messages input+caches/output with input_tokens required; google prompt/total−prompt-or-candidates); non-object → absent; partial/non-finite/negative → absent; Google cached no-addition.
 - Attach `calls: 1` at each call site (extractor returns shape only).
-- Agent: accumulate non-raced ok `AgentReply.usage` (with `calls`) at each `callWithDeadline` receive point AFTER the raced guard — never inside `.then` callbacks, so late dangling resolutions cannot add post-`finish()`; `finish()` attaches total iff contributions > 0; `callByStyleAgent` (`llm.ts:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`) copy `outcome.usage` onto ok:true results via one `withAgentUsage(outcome, result)` helper (conditional, no explicit undefined key); ok:false never carries.
+- Agent: accumulate non-raced ok `AgentReply.usage` (with `calls`) at each `callWithDeadline` receive point (`agent.ts:176,189,212,259`) AFTER the raced guard — never inside `.then` callbacks, so late dangling resolutions cannot add post-`finish()`; `finish()` attaches total iff contributions > 0; `callByStyleAgent` (`llm.ts:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`) copy `outcome.usage` onto ok:true results via one `withAgentUsage(outcome, result)` helper (conditional, no explicit undefined key); ok:false never carries.
 - `slowPath`: read `result.usage`; emit `lupa: llm usage input=<n> output=<m> tokens (calls=<k>)` via `note()` after verdict post-processing on each of the 3 success returns (agent branch, `verdicts === undefined` early return, final return); zero contributions → no line.
 - Numbers only everywhere. `Analysis` interface, fakes, prompts, budgets, gates untouched.
 
 - [ ] **Step 1: Write the failing tests**
-  - Extraction: 4 families × present-exact / absent / partial / non-object; messages cache fold + caches-alone-absent; Google total−prompt + candidates fallback + negative-derived absent; extractor returns `{input,output}`, attach points add `calls: 1` via `const u = extractUsage(...); ...(u ? { usage: {...u, calls: 1} } : {})` (never bare-spread); callChatTurn null-body attach case.
+  - Extraction: 4 families × present-exact / absent / partial / non-object; messages cache fold + caches-alone-absent + wrong-typed-cache-treated-as-0; Google total−prompt + candidates fallback + negative-derived absent; extractor returns `{input,output}`, attach points add `calls: 1` via `const u = extractUsage(...); ...(u ? { usage: {...u, calls: 1} } : {})` (never bare-spread); callChatTurn null-body attach case.
   - Agent: five-turn mixed present/absent sum (exact total incl. `calls`); raced timeout contributes nothing (outcome absent; placement after the raced guard is review-enforced — post-`finish` adds are unobservable by construction, so no late-resolution test is specified); outcome absent when zero; contributing-turns-then-failure → result has no `usage` key (`not.toHaveProperty`).
   - Eval silence: fake-Analysis run (no usage, as the harness provides) emits no `llm usage` line in log or summary (positive silence assertion, not just green evals).
   - slowPath: exact note string parametrized over all 3 success returns (agent branch, `verdicts === undefined`, final); silence (no line) on no-usage/agent-skip/failure.
@@ -81,7 +81,7 @@ git commit -m "feat: log aggregate LLM token usage per run"
 
 **Files:**
 - Modify: `docs/workflow-template.yml` (`id: sarif` + note step after upload), `README.md` (drop "silently" from the SARIF absorption sentence — failure now warns), `tests/templates.test.ts` (new pins), `tests/readme.test.ts` (pin the reworded sentence)
-- Test: `tests/templates.test.ts`, `tests/ci.test.ts` (actionlint coverage, unchanged)
+- Test: `tests/templates.test.ts`, `tests/ci.test.ts` (actionlint coverage, unchanged), `tests/readme.test.ts` (reword pin)
 
 **Interfaces:**
 - Consumes: existing upload step + privileged-notice precedent.
@@ -98,7 +98,7 @@ git commit -m "feat: log aggregate LLM token usage per run"
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `npx vitest run tests/templates.test.ts tests/ci.test.ts`
+Run: `npx vitest run tests/templates.test.ts tests/ci.test.ts tests/readme.test.ts`
 Expected: FAIL (no id, no note step).
 
 - [ ] **Step 3: Implement**
@@ -107,7 +107,7 @@ Per Exact behavior + Interfaces.
 
 - [ ] **Step 4: Run tests**
 
-Run: `npx vitest run tests/templates.test.ts tests/ci.test.ts && npx vitest run`
+Run: `npx vitest run tests/templates.test.ts tests/ci.test.ts tests/readme.test.ts && npm run evals && npx vitest run`
 Expected: PASS all green (evals for uniformity though no code changes; no build, `dist/` untouched).
 
 - [ ] **Step 5: Commit**
