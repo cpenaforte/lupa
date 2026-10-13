@@ -53,12 +53,14 @@ export function hasPatch(f: Finding): f is Finding & { patch: string } {
 }
 
 /**
- * Fence for a ```suggestion block: one backtick longer than the longest backtick run in
- * the suggestion (minimum three), so the suggestion can never close its own fence.
+ * Fence sized for a rendered code block: one backtick longer than the longest
+ * backtick run in the content (minimum three), so the block can never close its
+ * own fence. Used for the RIGHT ```suggestion fence and the advice-only
+ * replacement blocks (LEFT/general/fallback) — never for prose.
  */
-function fenceFor(suggestion: string): string {
+function fenceFor(content: string): string {
   let longest = 0;
-  for (const run of suggestion.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
+  for (const run of content.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
   return "`".repeat(Math.max(3, longest + 1));
 }
 
@@ -79,21 +81,29 @@ function provenanceTrailer(f: Finding): string {
 }
 
 /**
- * Inline body. Only RIGHT-side hits get a ```suggestion fence (a suggestion replaces the
- * commented line, which only exists on the new side). LEFT hits show the suggestion as
- * plain text instead. A reopened finding renders `**reopened**` between the severity
- * and the rule (`**high** **reopened** [rule] ...`) — the thread-fetch rule parser
- * tolerates this marker, so a re-posted thread stays parseable.
+ * Inline body. The applicable ```suggestion fence renders **iff** `hasPatch(f)`
+ * on a RIGHT-side hit — a patch replaces the commented new-side line, which only
+ * exists on the new side; a patch failing `hasPatch` fences nowhere. A patch on a
+ * LEFT hit renders as an advice-only replacement block (label + plain fence
+ * sized by `fenceFor(patch)`) instead of a ```suggestion fence. `suggestion`,
+ * when present, always renders as `Suggested:` advice text — on RIGHT hits too,
+ * it no longer fences anywhere. A reopened finding renders `**reopened**`
+ * between the severity and the rule (`**high** **reopened** [rule] ...`) — the
+ * thread-fetch rule parser tolerates this marker, so a re-posted thread stays
+ * parseable.
  */
 export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened = false): string {
   let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
-  if (hasSuggestion(f)) {
+  if (hasPatch(f)) {
+    const fence = fenceFor(f.patch);
     if (side === "RIGHT") {
-      const fence = fenceFor(f.suggestion);
-      body += `\n\n${fence}suggestion\n${f.suggestion}\n${fence}`;
+      body += `\n\n${fence}suggestion\n${f.patch}\n${fence}`;
     } else {
-      body += `\n\nSuggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+      body += `\n\nSuggested replacement (advice only):\n${fence}\n${f.patch}\n${fence}`;
     }
+  }
+  if (hasSuggestion(f)) {
+    body += `\n\nSuggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
   }
   return body + provenanceTrailer(f);
 }
@@ -369,6 +379,7 @@ export function buildFallbackReport(
       `- Message/evidence:\n${field(f.message)}`,
       ...provenance,
       `- Suggested remediation (advice only):\n${field(suggestion)}`,
+      ...(hasPatch(f) ? [`- Proposed patch (advice only):\n${field(f.patch)}`] : []),
     ].join("\n");
   });
   const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
@@ -414,8 +425,11 @@ export function buildFallbackReport(
 }
 
 /**
- * Review body: summary plus any findings that could not be placed inline. Suggestions are
- * rendered as plain text here (never as a fence). Never empty.
+ * Review body: summary plus any findings that could not be placed inline.
+ * General items never render a ```suggestion fence: a valid patch (`hasPatch`)
+ * renders as an advice-only replacement block (label, then a plain fence sized
+ * by `fenceFor(patch)`), and `suggestion` renders as plain `Suggested:` text.
+ * Continuation lines indent with `\n  `. Never empty.
  *
  * Blocking display: every body item in `marks.blocking` carries a marker after the
  * severity — `**reopened**` when also in `marks.reopened`, else `**blocking**`
@@ -437,6 +451,10 @@ export function buildBody(
     const marker =
       reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
     let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
+    if (hasPatch(f)) {
+      const fence = fenceFor(f.patch);
+      item += `\n  Suggested replacement (advice only):\n  ${fence}\n  ${f.patch.replace(/\n/g, "\n  ")}\n  ${fence}`;
+    }
     if (hasSuggestion(f)) item += `\n  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
     return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
   });
@@ -495,6 +513,15 @@ function survivor(members: Finding[]): Finding {
   for (const m of members) {
     if (m.suggestion !== undefined) {
       out.suggestion = m.suggestion;
+      break;
+    }
+  }
+  // Patch (Q01): the first member satisfying hasPatch wins; absent iff none
+  // (stricter than suggestion: a whitespace-only patch never shadows a valid
+  // later one).
+  for (const m of members) {
+    if (hasPatch(m)) {
+      out.patch = m.patch;
       break;
     }
   }

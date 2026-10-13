@@ -27559,9 +27559,12 @@ function isValidLine(v) {
 function hasSuggestion(f) {
   return typeof f.suggestion === "string" && f.suggestion !== "";
 }
-function fenceFor(suggestion) {
+function hasPatch(f) {
+  return typeof f.patch === "string" && f.patch.trim() !== "" && !f.patch.endsWith(TRUNC_MARK);
+}
+function fenceFor(content) {
   let longest = 0;
-  for (const run2 of suggestion.matchAll(/`+/g))
+  for (const run2 of content.matchAll(/`+/g))
     longest = Math.max(longest, run2[0].length);
   return "`".repeat(Math.max(3, longest + 1));
 }
@@ -27577,19 +27580,27 @@ function provenanceTrailer(f) {
 }
 function formatBody(f, side, reopened = false) {
   let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
-  if (hasSuggestion(f)) {
+  if (hasPatch(f)) {
+    const fence = fenceFor(f.patch);
     if (side === "RIGHT") {
-      const fence = fenceFor(f.suggestion);
       body += `
 
 ${fence}suggestion
-${f.suggestion}
+${f.patch}
 ${fence}`;
     } else {
       body += `
 
-Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+Suggested replacement (advice only):
+${fence}
+${f.patch}
+${fence}`;
     }
+  }
+  if (hasSuggestion(f)) {
+    body += `
+
+Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
   }
   return body + provenanceTrailer(f);
 }
@@ -27788,7 +27799,9 @@ ${field(f.rule)}`,
 ${field(f.message)}`,
       ...provenance,
       `- Suggested remediation (advice only):
-${field(suggestion)}`
+${field(suggestion)}`,
+      ...hasPatch(f) ? [`- Proposed patch (advice only):
+${field(f.patch)}`] : []
     ].join("\n");
   });
   const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
@@ -27851,6 +27864,14 @@ function buildBody(general, summary2, marks) {
     const key = reopenedKey(f);
     const marker = reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
     let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
+    if (hasPatch(f)) {
+      const fence = fenceFor(f.patch);
+      item += `
+  Suggested replacement (advice only):
+  ${fence}
+  ${f.patch.replace(/\n/g, "\n  ")}
+  ${fence}`;
+    }
     if (hasSuggestion(f))
       item += `
   Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
@@ -27906,6 +27927,12 @@ function survivor(members) {
   for (const m of members) {
     if (m.suggestion !== void 0) {
       out.suggestion = m.suggestion;
+      break;
+    }
+  }
+  for (const m of members) {
+    if (hasPatch(m)) {
+      out.patch = m.patch;
       break;
     }
   }

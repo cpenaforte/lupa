@@ -149,3 +149,13 @@ describe("README finding provenance (Q04)", () => {
     );
   });
 });
+
+describe("README suggestion fences (Q01)", () => {
+  it("pins the model-supplied patch rendering note", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    expect(r).toContain("renders in an applicable suggestion fence");
+    expect(r).toContain(
+      "Only model-supplied replacement code renders in an applicable suggestion fence; explanatory text always renders as advice.",
+    );
+  });
+});
