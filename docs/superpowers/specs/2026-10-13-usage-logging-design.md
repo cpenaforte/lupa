@@ -84,6 +84,5 @@ units + note pin). No parallel work; pairs with the SARIF task in one plan.
 
 No new runtime dependencies, no new action inputs, stable namespace,
 no template/CI changes, `dist/` committed, suite + evals green. Ships with
-the next release vehicle — no tag alone. Accepted residuals: probe-retry and
-failed-attempt spend uncounted; usage-less providers/skips/failures emit no line (silence is the design, not a gap); per-model
+the next release vehicle — no tag alone. Accepted residuals: discarded probe style-misses and failed attempts uncounted (the consumed turn-0 tools-fallback retry DOES count — its reply continues the loop; pinned by test); usage-less providers/skips/failures emit no line (silence is the design, not a gap); per-model
 pricing left to the README cost section (no cost math in code).

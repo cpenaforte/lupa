@@ -198,6 +198,14 @@ describe("runAgent", () => {
     expect(h.seenFlags[1]).toEqual({ allowTools: false, allowFormat: true });
   });
 
+  it("turn-0 tools-fallback retry counts its consumed usage", async () => {
+    const root = tempRoot();
+    const h = harness(root, [fail(400), okUsage(FINDINGS, [], { input: 3, output: 2, calls: 1 })]);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.stop).toBe("fallback");
+    expect(out.usage).toEqual({ input: 3, output: 2, calls: 1 });
+  });
+
   it("turn-0 400 then 400 again → probeAdvance true; turn-0 500 → false", async () => {
     const root = tempRoot();
     const h = harness(root, [fail(400), fail(400)]);
