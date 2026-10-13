@@ -1217,6 +1217,17 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/id_rsa
+@@ -0,0 +1,2 @@
++-----BEGIN OPENSSH PRIVATE KEY-----
++private-key-material
+`;
+
+  // The same id_rsa addition without any private-key marker: content-gating makes it silent.
+  const SENSITIVE_NO_MARKER_DIFF = `diff --git a/id_rsa b/id_rsa
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/id_rsa
 @@ -0,0 +1 @@
 +private-key-material
 `;
@@ -1262,6 +1273,15 @@ index 111..222 100644
     expect(r.reviews[0]!.comments).toEqual([]);
     expect(r.reviews[0]!.body).toContain("- **high** **blocking** id_rsa [sensitive-path]");
     expect(r.reviews[0]!.body).not.toContain("outside the PR diff");
+  });
+
+  it("marker-less sensitive-path content is silent: COMMENT + exit 0, no body item", async () => {
+    const r = await runWithMocks({ diff: SENSITIVE_NO_MARKER_DIFF, failLevel: "high", llm: [] });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.reviews[0]!.comments).toEqual([]);
+    expect(r.reviews[0]!.body).toBe("lupa: no findings.");
   });
 
   it("posted payload comments carry no rule key", async () => {

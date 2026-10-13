@@ -24825,11 +24825,139 @@ function isSensitivePath(file) {
     return true;
   return false;
 }
+function contentText(raw) {
+  const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+  if (line === "")
+    return void 0;
+  const first = line[0];
+  if (first === "+")
+    return line.slice(1);
+  if (first === " " || first === "-" || first === "\\")
+    return void 0;
+  if (line.startsWith("@@"))
+    return void 0;
+  return line;
+}
+function addedLines(hunks) {
+  const out = [];
+  for (const raw of hunks.split("\n")) {
+    const text = contentText(raw);
+    if (text !== void 0)
+      out.push(text);
+  }
+  return out;
+}
+var PRIVATE_KEY_MARKER_RE = /^\s*-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----/;
+function hasPrivateKeyMarker(lines) {
+  return lines.some((line) => PRIVATE_KEY_MARKER_RE.test(line));
+}
+function normalizeSecretValue(raw) {
+  let value = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+  value = value.replace(/(?:^|\s+)#.*$/, "");
+  value = value.trim();
+  if (value.length >= 2) {
+    const first = value[0];
+    if ((first === '"' || first === "'") && value.endsWith(first))
+      value = value.slice(1, -1);
+  }
+  return value.trim();
+}
+var PLACEHOLDER_LITERALS = /* @__PURE__ */ new Set([
+  "changeme",
+  "change-me",
+  "example",
+  "sample",
+  "test",
+  "testing",
+  "xxx",
+  "password",
+  "password123",
+  "123456",
+  "placeholder",
+  "none"
+]);
+function isPlaceholderValue(rawValue) {
+  const value = normalizeSecretValue(rawValue);
+  if (value === "")
+    return true;
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value))
+    return true;
+  if (/^\$\{[^}]*\}$/.test(value))
+    return true;
+  if (PLACEHOLDER_LITERALS.has(value.toLowerCase()))
+    return true;
+  if (/EXAMPLE_NOT_A_SECRET/i.test(value))
+    return true;
+  if (/^AKIAIOSFODNN7EXAMPLE/i.test(value))
+    return true;
+  if (/^ghp_EXAMPLE/i.test(value))
+    return true;
+  if (/^x+$/i.test(value))
+    return true;
+  if (/^<[^>]*>$/.test(value))
+    return true;
+  if (/^\*+$/.test(value))
+    return true;
+  return false;
+}
+var SECRET_KEY_SUBSTRING_RE = /(?:SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?KEY|SESSION[_-]?KEY)/i;
+var SECRET_KEY_SEGMENTS = /* @__PURE__ */ new Set([
+  "PASS",
+  "SIGNING",
+  "ENCRYPTION",
+  "MASTER",
+  "AUTH",
+  "AUTHORIZATION"
+]);
+function isSecretKeyName(key) {
+  if (SECRET_KEY_SUBSTRING_RE.test(key))
+    return true;
+  return key.split(/[_-]/).some((segment) => SECRET_KEY_SEGMENTS.has(segment.toUpperCase()));
+}
+var NUMERIC_VALUE_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+var BOOLEAN_VALUE_RE = /^(true|false|yes|no|on|off)$/i;
+var URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+function isCredentiallessUrl(value) {
+  const scheme = URL_SCHEME_RE.exec(value);
+  if (scheme === null)
+    return false;
+  const rest = value.slice(scheme[0].length);
+  const slash = rest.indexOf("/");
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  return !authority.includes("@");
+}
+function isSecretValue(rawValue) {
+  if (isPlaceholderValue(rawValue))
+    return false;
+  const value = normalizeSecretValue(rawValue);
+  if (NUMERIC_VALUE_RE.test(value))
+    return false;
+  if (BOOLEAN_VALUE_RE.test(value))
+    return false;
+  if (isCredentiallessUrl(value))
+    return false;
+  return true;
+}
+var ENV_ASSIGNMENT_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)$/;
+function sensitiveEvidence(file, hunks) {
+  const lines = addedLines(hunks);
+  if (hasPrivateKeyMarker(lines))
+    return true;
+  const name = basename2(file);
+  if (name !== ".env" && !name.startsWith(".env."))
+    return false;
+  return lines.some((line) => {
+    const m = ENV_ASSIGNMENT_RE.exec(line);
+    return m !== null && isSecretKeyName(m[1]) && isSecretValue(m[2]);
+  });
+}
 function runL0(files, o = {}) {
   const hasManifestFor = o.hasManifestFor ?? (() => false);
   const out = [];
   for (const f of files) {
-    if (isSensitivePath(f.file)) {
+    if (f.deleted === true)
+      continue;
+    if (isSensitivePath(f.file) && sensitiveEvidence(f.file, f.hunks)) {
       out.push({
         severity: "high",
         file: f.file,
