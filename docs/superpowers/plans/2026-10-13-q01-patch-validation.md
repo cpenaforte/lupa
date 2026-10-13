@@ -23,7 +23,7 @@
 
 - **A prose suggestion on a valid RIGHT line no longer fences.** Test in Task 75's step style (suggestion-only RIGHT hit → advice text, no fence).
 - **A whitespace-only patch never fences.** Test in Task 74's step style (`hasPatch` unit) and Task 75's step style (no fence rendered).
-- **An over-cap patch renders advice, never a truncation-marker fence.** Test in Task 75's step style (4000-space prefix + code → advice-only block).
+- **An over-cap patch renders advice, never a truncation-marker fence.** Test in Task 75's step style (4000-space prefix + code through `sanitizeFinding` THEN `formatBody` → advice-only block; raw-to-formatBody would fence and must not be tested that way).
 - **A wrong-typed patch keeps its finding with no patch.** Test in Task 74's step style (`patch: [...]` → finding kept, field absent).
 - **A backtick-containing patch on LEFT stays inside its advice block.** Test in Task 75's step style (fence sized past the backtick run).
 
@@ -53,7 +53,8 @@
   - `toFindings`: carried / `null`→absent / absent→absent / `[...]`
     → field dropped, finding kept / finding with suggestion-only unchanged.
   - `isFinding`: string ok, wrong-type violation. Sanitize: caps + control-strip at 4000. Redact: secret in patch redacted, fresh objects.
-  - Update pins: prompt `:148` + `:150`, google `:48` + `:551` + properties + `:122`, probe-routing + adapters-routing single-shot pins.
+  - Instruction tests: `DEDUP_INSTRUCTIONS` contains the spec §4 sentence verbatim; agent `SYSTEM` lacks it (extend the `:250-262` gate-test style: agent system without `DEDUP_INSTRUCTIONS`).
+  - Update pins: prompt `:148` + `:150`, google `:48` + `:551` + properties + `:122`. Verify unchanged (no edits): `adapters-routing.test.ts:155` compares dynamically to `PR_REVIEW_SCHEMA` (self-updating); `probe-routing` carries finding inputs only, no schema pins.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -81,7 +82,7 @@ git commit -m "feat: nullable patch field with confidence-style field-drop"
 ### Task 75: Q01 — rendering split, survivor, fallback, docs
 
 **Files:**
-- Modify: `src/review.ts` (`formatBody` fence-iff-`hasPatch`+RIGHT, `Suggested:` for suggestion everywhere, LEFT/general advice-only blocks via `fenceFor(patch)`, fallback `- Proposed patch (advice only):` row LAST, `survivor` first-`hasPatch`), `README.md` (spec §5 note verbatim)
+- Modify: `src/review.ts` (`formatBody` fence-iff-`hasPatch`+RIGHT, `Suggested:` for suggestion everywhere, LEFT advice-only blocks via `fenceFor(patch)`, `buildBody` general-item advice-only blocks (general items render in `buildBody`, never `formatBody`), fallback `- Proposed patch (advice only):` row LAST, `survivor` first-`hasPatch`), `README.md` (spec §5 note verbatim)
 - Test: `tests/review.test.ts` (rendering matrix, migrated fence tests, fallback order, survivor), `tests/readme.test.ts` (pin phrase `renders in an applicable suggestion fence`)
 - Rebuild: `dist/index.js`
 
@@ -91,7 +92,7 @@ git commit -m "feat: nullable patch field with confidence-style field-drop"
 
 **Exact behavior:**
 - RIGHT + `hasPatch` → `` `suggestion fence with patch verbatim, then `Suggested:` advice when suggestion exists, then trailer. RIGHT + suggestion-only → advice, NO fence (the audit regression pin).
-- LEFT/general + patch → `Suggested replacement (advice only):` label + plain fenced block sized by `fenceFor(patch)` (never ` ```suggestion `), then `Suggested:` text; body-item continuation indents `\n  `.
+- LEFT/general + patch → `Suggested replacement (advice only):` label + plain fenced block sized by `fenceFor(patch)` (never ` ```suggestion `), then `Suggested:` text; separators per spec §4 (`\n\n` before label, `\n` label-to-fence, verbatim block, `\n\n` before `Suggested:`); `buildBody` items indent every continuation line with `\n  ` (label, fence, and content lines alike).
 - Fallback: `- Proposed patch (advice only):` via `field()` LAST (order message < source < confidence < evidence < remediation < patch); remediation placeholder contract unchanged.
 - `survivor`: first member satisfying `hasPatch`, absent iff none.
 - Migrate (never delete) existing RIGHT-fence tests to `patch` (`:122-127`, `:151-158`, `:877-883`); audit-shape pins as new tests (prose → advice; genuine replacement → fence).

@@ -70,8 +70,12 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened?: boolea
   label line `Suggested replacement (advice only):` then a plain fenced code
   block sized by `fenceFor(patch)` exactly like the RIGHT fence (``` unless the
   patch contains backticks; never ` ```suggestion `), then the `Suggested:` text when a
-  suggestion exists; continuation lines inside `- ` body items indent with
-  `\n  ` like the existing `Suggested:` rendering. Trailer placement follows
+  suggestion exists. Separators (pinned): `\n\n` before the label line,
+  `\n` between label line and fence-open, verbatim fence block
+  (`fence/open \n patch \n fence/close` with no extra blank lines inside),
+  `\n\n` before a following `Suggested:` line; continuation lines inside
+  `- ` body items indent with `\n  ` like the existing `Suggested:`
+  rendering. Trailer placement follows
   the Q04 rule (after any fence or `Suggested:` block, never inside).
 - **Multiline allowed.** Patch content may span lines (GitHub replaces the
   flagged line with the block); no single-line enforcement in v1 (findings
@@ -85,10 +89,11 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened?: boolea
   `DEDUP_INSTRUCTIONS` confidence sentence (single-shot path only); the
   sentence contains backticks inside a backtick template literal, so they are
   escaped at the implementation site.
-  Agent mode gets the field through the shared schema/parser only — the
-  sentence lives on the single-shot (withIds, agent-undefined) path, so an
-  agent run on a non-schema-enforced path never learns the patch semantics
-  (accepted gap: same residual class as §2; fail-safe silent no-op).
+  Agent mode transmits the field via schema where enforced (forced-final
+  NO_TOOLS sets allowFormat) — identical status to `confidence`/`duplicateOf`
+  on agent paths today: schema-transmitted, instruction-undescribed. The
+  sentence lives on the single-shot (withIds, agent-undefined) path only.
+  Prose-in-`patch` via agent is the same accepted residual as §2.
   Patch is content, not provenance, so `stripProvenance` leaves it alone.
 - **Validation shapes.** `isFinding`: patch absent or string (else violation
   as today). `toFindings`: `patch: null`/absent → field absent; wrong-type
@@ -168,4 +173,5 @@ on prompt-only (non-schema) provider paths still fences (instruction sentence
 is the only guard there); patch correctness is never validated (applicability
 only, never auto-apply); multi-line range targeting stays v1-out-of-scope;
 fence-parity miscount on truncation mid-fence is pre-existing (isFenceLine
-counts any ``` opener — unchanged by this spec).
+counts any ``` opener — unchanged by this spec, now reachable from advice
+blocks on any surface too, same accounting).
