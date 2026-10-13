@@ -44,7 +44,7 @@
 - `extractUsage(body, apiStyle): {input,output} | undefined` — per spec §4 mappings (chat prompt/completion; responses input/output; messages input+caches/output with input_tokens required; google prompt/total−prompt-or-candidates); non-object → absent; partial/non-finite/negative → absent; Google cached no-addition.
 - Attach `calls: 1` at each call site (extractor returns shape only).
 - Agent: accumulate non-raced ok `AgentReply.usage` (with `calls`) at each `callWithDeadline` receive point AFTER the raced guard — never inside `.then` callbacks, so late dangling resolutions cannot add post-`finish()`; `finish()` attaches total iff contributions > 0; `callByStyleAgent` (`llm.ts:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`) copy `outcome.usage` onto ok:true results via one `withAgentUsage(outcome, result)` helper (conditional, no explicit undefined key); ok:false never carries.
-- `slowPath`: read `result.usage`; emit `lupa: llm usage input=<n> output=<m> tokens (calls=<k>)` via `note()` after verdict post-processing on success returns; zero contributions → no line.
+- `slowPath`: read `result.usage`; emit `lupa: llm usage input=<n> output=<m> tokens (calls=<k>)` via `note()` after verdict post-processing on each of the 3 success returns (agent branch, `verdicts === undefined` early return, final return); zero contributions → no line.
 - Numbers only everywhere. `Analysis` interface, fakes, prompts, budgets, gates untouched.
 
 - [ ] **Step 1: Write the failing tests**
