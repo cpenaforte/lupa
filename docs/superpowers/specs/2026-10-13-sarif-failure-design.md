@@ -31,9 +31,9 @@ contract); `::error::` (wrong severity for an optional upload).
 - name: "Note SARIF upload failure"
   if: always() && steps.sarif.outcome == 'failure'
   run: |
-    echo "::warning::lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly missing security-events: write / actions: read permissions), or ignore if code scanning is not used."
+    echo "::warning::lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly: grant security-events: write / actions: read in workflow permissions), or ignore if code scanning is not used."
     cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-    lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly missing security-events: write / actions: read permissions), or ignore if code scanning is not used.
+    lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly: grant security-events: write / actions: read in workflow permissions), or ignore if code scanning is not used.
     EOF
 ```
 
@@ -57,7 +57,7 @@ contract); `::error::` (wrong severity for an optional upload).
   unchanged. `:204-210` silent-absorption wording stays true (job still
   passes) — extend the comment block only if a pinned substring requires it;
   prefer no comment edits.
-- `actionlint` coverage via `tests/ci.test.ts` (templates already linted).
+- `actionlint` runs in the CI actionlint job over both templates (`ci.test.ts` pins the invocation and file list only).
 - Full suite green.
 
 ## 6. Implementation split (plan preview)
