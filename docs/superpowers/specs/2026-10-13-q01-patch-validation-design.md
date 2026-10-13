@@ -68,7 +68,8 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened?: boolea
   from `mapToComments` RIGHT-then-LEFT resolution; only RIGHT-side hits are
   fence-eligible. A patch on a LEFT hit or general-body item renders first a
   label line `Suggested replacement (advice only):` then a plain fenced code
-  block (```, never ` ```suggestion `), then the `Suggested:` text when a
+  block sized by `fenceFor(patch)` exactly like the RIGHT fence (``` unless the
+  patch contains backticks; never ` ```suggestion `), then the `Suggested:` text when a
   suggestion exists; continuation lines inside `- ` body items indent with
   `\n  ` like the existing `Suggested:` rendering. Trailer placement follows
   the Q04 rule (after any fence or `Suggested:` block, never inside).
