@@ -32,7 +32,7 @@
 ### Task 78: aggregate usage from adapters to one slowPath line
 
 **Files:**
-- Modify: `src/llm.ts` (`LlmUsage{input,output,calls}` + `extractUsage(body, apiStyle: ResolvedApiStyle)` exported + its 2 call-site attaches + `AgentReply.usage?` + `LlmResult` ok:true gains `usage?: LlmUsage` + `withAgentUsage(outcome, result)` propagation in `callByStyleAgent` (`:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`)), `src/adapters/google.ts` + `src/adapters/messages.ts` + `src/adapters/responses.ts` (2 call-site attaches each), `src/agent.ts` (accumulate at each `callWithDeadline` receive point after the raced guard, attach total in `finish()`), `src/main.ts` (`slowPath` sum + `note()`)
+- Modify: `src/llm.ts` (`LlmUsage{input,output,calls}` + `extractUsage(body, apiStyle: ResolvedApiStyle)` exported + its 2 call-site attaches + `AgentReply.usage?` + `LlmResult` ok:true gains `usage?: LlmUsage` + `withAgentUsage(outcome, result)` propagation in `callByStyleAgent` (`:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`)), `src/adapters/google.ts` + `src/adapters/messages.ts` + `src/adapters/responses.ts` (2 call-site attaches each), `src/agent.ts` (accumulate at each `callWithDeadline` receive point after the raced guard, attach total in `finish()`), `src/main.ts` (`slowPath` read + `note()`)
 - Test: `tests/llm.test.ts` (extraction present/absent/partial/non-object per style family), `tests/adapters-google.test.ts` + `tests/adapters-messages.test.ts` + `tests/adapters-responses.test.ts` (usage fixtures: present exact, absent unchanged), `tests/agent.test.ts` (mixed-turn sum, raced-timeout exclusion), `tests/main.test.ts` (note exact string + silence pin)
 - Rebuild: `dist/index.js`
 
@@ -48,10 +48,10 @@
 - Numbers only everywhere. `Analysis` interface, fakes, prompts, budgets, gates untouched.
 
 - [ ] **Step 1: Write the failing tests**
-  - Extraction: 4 families × present-exact / absent / partial / non-object; messages cache fold + caches-alone-absent; Google total−prompt + candidates fallback + negative-derived absent; extractor returns `{input,output}`, attach points add `calls: 1`.
-  - Agent: five-turn mixed present/absent sum (exact total incl. `calls`); raced timeout excluded incl. a late-resolution-observability case (dangling resolve after `finish` adds nothing); outcome absent when zero.
+  - Extraction: 4 families × present-exact / absent / partial / non-object; messages cache fold + caches-alone-absent; Google total−prompt + candidates fallback + negative-derived absent; extractor returns `{input,output}`, attach points add `calls: 1` via `const u = extractUsage(...); ...(u ? { usage: {...u, calls: 1} } : {})` (never bare-spread); callChatTurn null-body attach case.
+  - Agent: five-turn mixed present/absent sum (exact total incl. `calls`); raced timeout contributes nothing (outcome absent; placement after the raced guard is review-enforced — post-`finish` adds are unobservable by construction, so no late-resolution test is specified); outcome absent when zero; contributing-turns-then-failure → result has no `usage` key (`not.toHaveProperty`).
   - Eval silence: fake-Analysis run (no usage, as the harness provides) emits no `llm usage` line in log or summary (positive silence assertion, not just green evals).
-  - slowPath: exact note string; silence (no line) on no-usage/agent-skip/failure.
+  - slowPath: exact note string parametrized over all 3 success returns (agent branch, `verdicts === undefined`, final); silence (no line) on no-usage/agent-skip/failure.
   - No updates to existing pins (absent-when-missing proves itself) + NEW `not.toHaveProperty("usage")` assertions on absent paths (`toEqual` ignores undefined keys, so green alone proves nothing).
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -80,7 +80,7 @@ git commit -m "feat: log aggregate LLM token usage per run"
 ### Task 79: warn on SARIF upload failure (template-only)
 
 **Files:**
-- Modify: `docs/workflow-template.yml` (`id: sarif` + note step after upload), `tests/templates.test.ts` (new pins)
+- Modify: `docs/workflow-template.yml` (`id: sarif` + note step after upload), `README.md` (drop "silently" from the SARIF absorption sentence — failure now warns), `tests/templates.test.ts` (new pins), `tests/readme.test.ts` (pin the reworded sentence)
 - Test: `tests/templates.test.ts`, `tests/ci.test.ts` (actionlint coverage, unchanged)
 
 **Interfaces:**
@@ -94,7 +94,7 @@ git commit -m "feat: log aggregate LLM token usage per run"
 - Privileged template, code, `dist/`, inputs, evals untouched.
 
 - [ ] **Step 1: Write the failing tests**
-  - Presence/shape pins per Exact behavior; guard-vocabulary pin (`== 'failure'`, skipped stays silent — cite outcome semantics); note-step echoes-only pin (step has only name/if/run keys, no exit/continue-on-error/false).
+  - Presence/shape pins per Exact behavior; guard-vocabulary pin (`== 'failure'`, skipped stays silent — cite outcome semantics); note-step echoes-only pin (step has only name/if/run keys, no exit/continue-on-error/false); README reword pin (phrase "a separate warning step reports the failure").
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -108,7 +108,7 @@ Per Exact behavior + Interfaces.
 - [ ] **Step 4: Run tests**
 
 Run: `npx vitest run tests/templates.test.ts tests/ci.test.ts && npx vitest run`
-Expected: PASS all green. (No build: template-only, `dist/` untouched.)
+Expected: PASS all green (evals for uniformity though no code changes; no build, `dist/` untouched).
 
 - [ ] **Step 5: Commit**
 
