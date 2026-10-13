@@ -376,7 +376,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.llmCalled += 1;
         rec.llmVia = "style";
         rec.prompts = messages as { system: string; user: string };
-        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
+        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)", ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
         return {
           ok: true,
           findings: o.llm ?? [LLM_FINDING],
@@ -400,7 +400,7 @@ async function runWithMocks(o: MockOpts = {}) {
               } catch {
                 // No early payload on disk; leave earlyFindingsRaw unset.
               }
-              if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
+              if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)", ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
               return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmVerdicts !== undefined ? { verdicts: o.llmVerdicts } : {}), ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
             },
       callByStyleAgent: async (_ep, conv, opts, toolCtx) => {
@@ -411,7 +411,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.agentToolCtx = toolCtx as ToolContext | undefined;
         rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
         rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
-        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
+        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)", ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
         return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
       },
       callWithProbeAgent: async (_provider, _model, _baseUrl, _key, conv, opts, toolCtx) => {
@@ -427,7 +427,7 @@ async function runWithMocks(o: MockOpts = {}) {
           rec.toolOutput = res.output;
           rec.toolError = res.isError;
         }
-        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
+        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)", ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
         return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
       },
     },
