@@ -178,4 +178,7 @@ is the only guard there); patch correctness is never validated (applicability
 only, never auto-apply); multi-line range targeting stays v1-out-of-scope;
 fence-parity miscount on truncation mid-fence is pre-existing (isFenceLine
 counts any ``` opener — unchanged by this spec, now reachable from advice
-blocks on any surface too, same accounting).
+blocks on any surface too, same accounting); unclosed fences inside `suggestion`
+prose render raw and can swallow the trailer (pre-existing on LEFT/general
+paths, extended to RIGHT by the advice-always rule — display-only, no gate
+impact, accepted).
