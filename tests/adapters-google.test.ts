@@ -227,6 +227,22 @@ describe("callGoogle", () => {
     expect(withoutUsage).not.toHaveProperty("usage");
   });
 
+  it("does not add cachedContentTokenCount to input (promptTokenCount is already inclusive)", async () => {
+    stubFetch(() =>
+      json(200, {
+        ...okGoogle('{"findings":[]}'),
+        usageMetadata: { promptTokenCount: 10, cachedContentTokenCount: 5, candidatesTokenCount: 4 },
+      }),
+    );
+    const r = await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts());
+    expect(r).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: EMPTY_VERDICTS,
+      usage: { input: 10, output: 4, calls: 1 },
+    });
+  });
+
   it("finishReason STOP→ok; MAX_TOKENS→degrade; SAFETY/other→skip without retry", async () => {
     stubFetch(() => json(200, okGoogle('{"findings":[]}', { finishReason: "MAX_TOKENS" })));
     expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toMatchObject({

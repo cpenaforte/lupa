@@ -267,6 +267,8 @@ interface MockOpts {
   llmVerdicts?: DedupVerdicts;
   /** Aggregate usage returned by the mocked slow-path LLM seams (absent = the usage-less default). */
   llmUsage?: LlmUsage;
+  /** Slow-path LLM seams return an ok:false failure instead of a result (silence pin). */
+  llmFail?: boolean;
   headMoves?: boolean;
   /** getPr throws once the call count exceeds this number. */
   failGetPrAfter?: number;
@@ -374,6 +376,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.llmCalled += 1;
         rec.llmVia = "style";
         rec.prompts = messages as { system: string; user: string };
+        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
         return {
           ok: true,
           findings: o.llm ?? [LLM_FINDING],
@@ -397,6 +400,7 @@ async function runWithMocks(o: MockOpts = {}) {
               } catch {
                 // No early payload on disk; leave earlyFindingsRaw unset.
               }
+              if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
               return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmVerdicts !== undefined ? { verdicts: o.llmVerdicts } : {}), ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
             },
       callByStyleAgent: async (_ep, conv, opts, toolCtx) => {
@@ -407,6 +411,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.agentToolCtx = toolCtx as ToolContext | undefined;
         rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
         rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
+        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
         return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
       },
       callWithProbeAgent: async (_provider, _model, _baseUrl, _key, conv, opts, toolCtx) => {
@@ -422,6 +427,7 @@ async function runWithMocks(o: MockOpts = {}) {
           rec.toolOutput = res.output;
           rec.toolError = res.isError;
         }
+        if (o.llmFail) return { ok: false, reason: "timeout", detail: "slow path failed (test)" };
         return { ok: true, findings: o.llm ?? [LLM_FINDING], ...(o.llmUsage !== undefined ? { usage: o.llmUsage } : {}) };
       },
     },
@@ -977,6 +983,26 @@ describe("run() orchestration", () => {
       info.mockClear();
       const r = await runWithMocks({});
       expect(r.posted).toBe(true);
+      expect(info.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("llm usage");
+      expect(readFileSync(r.summaryPath, "utf8")).not.toContain("llm usage");
+    });
+
+    it("silence: a no-llm-key run emits no llm usage line anywhere", async () => {
+      const info = vi.mocked(core.info);
+      info.mockClear();
+      const r = await runWithMocks({ llmApiKey: "" });
+      expect(r.posted).toBe(true);
+      expect(r.llmCalled).toBe(0);
+      expect(info.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("llm usage");
+      expect(readFileSync(r.summaryPath, "utf8")).not.toContain("llm usage");
+    });
+
+    it("silence: an ok:false slow-path failure emits no llm usage line anywhere", async () => {
+      const info = vi.mocked(core.info);
+      info.mockClear();
+      const r = await runWithMocks({ llmFail: true, llmUsage: USAGE });
+      expect(r.posted).toBe(true);
+      expect(r.llmCalled).toBe(1);
       expect(info.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("llm usage");
       expect(readFileSync(r.summaryPath, "utf8")).not.toContain("llm usage");
     });
