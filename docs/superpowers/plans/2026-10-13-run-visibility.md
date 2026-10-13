@@ -113,6 +113,6 @@ Expected: PASS all green (evals for uniformity though no code changes; no build,
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/workflow-template.yml tests/templates.test.ts
+git add docs/workflow-template.yml README.md tests/templates.test.ts tests/readme.test.ts
 git commit -m "docs: warn visibly on SARIF upload failure"
 ```
