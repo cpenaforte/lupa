@@ -38,19 +38,19 @@
 
 **Interfaces:**
 - Consumes: `FileDiff.deleted` (Q02), `capText`/`TRUNC_MARK` untouched.
-- Produces: `contentText(raw)` (CR-strip, shared classifier); `addedLines(hunks)`; `hasPrivateKeyMarker(lines)`; `isPlaceholderValue(rawValue)` (owns comment/quote/trim pipeline); `isSecretKeyName(key)` (substring list OR delimited PASS/SIGNING/ENCRYPTION/MASTER/AUTH/AUTHORIZATION segments); `isSecretValue(rawValue)` (non-placeholder AND non-numeric/boolean/bare-URL) — plan-level split of the spec §4 key/value rules (spec §5 units require testable units). `todoMarkers` untouched (Task 77) — `:117-120` keeps passing here.
+- Produces: `contentText(raw)` (CR-strip, shared classifier); `addedLines(hunks)`; `hasPrivateKeyMarker(lines)`; `isPlaceholderValue(rawValue)` (owns comment/quote/trim pipeline); `isSecretKeyName(key)` (substring list OR delimited PASS/SIGNING/ENCRYPTION/MASTER/AUTH/AUTHORIZATION segments); `isSecretValue(rawValue)` (non-placeholder AND non-numeric/boolean/bare-URL) — plan-level split of the spec §4 key/value rules (spec §5 units require testable units). Plus plan-level `normalizeSecretValue(raw)` (CR → comment → trim → quote → trim), shared by `isPlaceholderValue` and `isSecretValue`; `isSecretKeyName(key)` (substring list OR delimited PASS/SIGNING/ENCRYPTION/MASTER/AUTH/AUTHORIZATION segments, case-insensitive); `isSecretValue(rawValue)` (placeholder-false AND non-numeric/boolean/bare-URL on the NORMALIZED value). `todoMarkers` untouched (Task 77) — `:117-120` keeps passing here.
 
 **Exact behavior:**
 - `runL0` loop top: `if (f.deleted === true) continue;` (all rules).
-- Sensitive-path emits iff file non-deleted, `isSensitivePath`, AND (`hasPrivateKeyMarker(addedLines)` OR (sensitive is `.env`-family AND some added assignment has `isSecretKeyName(key)` AND `isSecretValue(value)`)). Message/`high`/`source`/`confidence` unchanged.
+- Sensitive-path emits iff file non-deleted, `isSensitivePath`, AND (route by kind: `*.pem`/`id_rsa` → `hasPrivateKeyMarker(addedLines(f.hunks))`; `.env`/`.env.*` → marker OR some added assignment with `isSecretKeyName(key)` AND `isSecretValue(value)`).ment has `isSecretKeyName(key)` AND `isSecretValue(value)`)). Message/`high`/`source`/`confidence` unchanged.
 - `isSecretValue`: `isPlaceholderValue` false AND not numeric `/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/`, not boolean `/^(true|false|yes|no|on|off)$/i`, not credential-less URL (scheme `://`, no `@` before first `/`). Comment-only values (`# fill in`) strip to empty → placeholder → silent.
 - Pin rework (gates stay green THIS task): `:20` id_rsa gains PEM content; `:76-84` content-bearing + hunk-less silence trio; `:87+` `.env.local` gains secret-keyed real assignment; `:1257` SENSITIVE_DIFF gains a PEM marker line (blocking path kept) + new silence variant (marker-less content → COMMENT + exit 0, no item).
 - Deviation from spec §6 preview (stated): `:1257` moves to Task 76 — the task that flips its behavior owns its pins (per-task green requirement). Task 77 keeps `:117-120`, evals, README.
 
 - [ ] **Step 1: Write the failing tests**
-  - Helpers: marker variants + cert-only/PUBLIC-KEY negatives; placeholder literals/patterns/`$VAR` vs `$HOME/real`/quotes/`# fill in`; key segments (`DB_PASS`, `SIGNING`, `COMPASS`); value shapes (numeric/boolean/bare-URL/userinfo-URL); CRLF trio.
+  - Helpers: marker variants + cert-only/PUBLIC-KEY negatives; placeholder literals/patterns/`$VAR` vs `$HOME/real`/quotes/`# fill in`; key segments case-insensitive (`db_pass` flags; `DB_PASS`, `SIGNING`, `COMPASS`); value shapes (numeric/boolean/bare-URL incl. `TOKEN_TTL=3600 # seconds` + `MAX_TOKENS="4096"` silent via normalization; numeric/boolean/bare-URL/userinfo-URL); CRLF trio.
   - Matrix: deleted → nothing; cert-only → nothing; key `.pem`/`id_rsa` → high; placeholder `.env` → nothing; `PORT`/`DEBUG` → nothing; `DB_PASS=hunter2` → high; empty/binary/hunk-less → nothing; `export`/quotes/comments.
-  - Reworked pins as above + `:1257` blocking-kept + silence variant.
+  - Reworked pins as above; `:1257` SENSITIVE_DIFF gains a PEM marker line with a valid header (`@@ -0,0 +1,2 @@` for two `+` lines) keeping the blocking path; silence variant reuses the CURRENT marker-less fixture unchanged (already the silence shape).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -89,8 +89,8 @@ git commit -m "feat: gate sensitive-path on added-line secret evidence"
 **Exact behavior:**
 - `todoMarkers`: TODO-test applies only when `contentText(raw)` is defined; `@@` never advances; `" "`/empty advance exactly as today; `-`/`\` skipped. Only the predicate changes.
 - `:117-120` asserts `[]`; `:113-114` keeps `[41]` (already pinned — verifies counting untouched).
-- Evals fixtures `q03-key-addition.patch` (new `id_rsa` + `-----BEGIN RSA PRIVATE KEY-----` → lineless high → general-body `**blocking**` item, REQUEST_CHANGES + exit 1 at `fail_level: high`) + `q03-cert-addition.patch` (new `certs/public.pem` cert-only → zero findings, clean body, exit 0); follow the `positive-authz` case shape for bodies/payloads.
-- README: reword the `:170` note to the content-gated rule; keep `confidence: 50`; add one `readme.test` pin phrase taken from the new note.
+- Evals fixtures `q03-key-addition.patch` (new `id_rsa`, `@@ -0,0 +1,2 @@`, `+-----BEGIN RSA PRIVATE KEY-----` + `+x` → lineless high → general-body `**blocking**` item, REQUEST_CHANGES + exit 1 at `fail_level: high`; findings EXACTLY `[{severity:"high",file:"id_rsa",rule:"sensitive-path",message:"Sensitive file path changed: id_rsa",source:"fastpath",confidence:50}]`, summary `"lupa: 1 finding(s)."`, body `"lupa: 1 finding(s).\n\n**Findings not placed inline:**\n- **high** **blocking** id_rsa [sensitive-path] Sensitive file path changed: id_rsa\n  \n  \`src:fastpath · conf 50\`"` — verify against the actual run in the red phase, fix drift there) and `q03-cert-addition.patch` (new `certs/public.pem`, cert-only `BEGIN CERTIFICATE` block → zero findings, `"lupa: no findings."`, exit 0, clean review payload); categories `positive` + `safe-negative` (existing union — no `types.ts` change); follow the `positive-authz` case shape for bodies/payloads.QUEST_CHANGES + exit 1 at `fail_level: high`) + `q03-cert-addition.patch` (new `certs/public.pem` cert-only → zero findings, clean body, exit 0); follow the `positive-authz` case shape for bodies/payloads.
+- README: replace the `:170` policy-note sentence ending "because a path match is not proof." with "because emission requires added-line secret evidence — a path match alone never emits."; `readme.test` pins the phrase "a path match alone never emits"; `confidence: 50` sentence untouched.
 - Gates, SARIF/artifact/F15 mechanics untouched (counts shrink by construction).
 
 - [ ] **Step 1: Write the failing tests**
