@@ -71,6 +71,12 @@ describe("README", () => {
     expect(sec).toMatch(/review still posts/i);
   });
 
+  it("readme says a failed SARIF upload is no longer silent (a separate warning step reports it)", () => {
+    const r = fs.readFileSync("README.md", "utf8");
+    expect(r).toContain("a separate warning step reports the failure");
+    expect(r).not.toContain("silently absorbs it");
+  });
+
   it("documents the agent inputs, tools and disclosure", () => {
     const r = fs.readFileSync("README.md", "utf8");
     for (const s of [

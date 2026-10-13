@@ -152,11 +152,20 @@ jobs:
       # continue-on-error absorbs it, so the job still passes. The guard is false on
       # issue_comment and workflow_dispatch (no PR head context), where the step is skipped.
       - name: "Upload SARIF (same-repo PRs; needs security-events: write + actions: read above)"
+        id: sarif
         if: always() && github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ runner.temp }}/pr-reviewer-out/sarif.json
+
+      - name: "Note SARIF upload failure"
+        if: always() && steps.sarif.outcome == 'failure'
+        run: |
+          echo "::warning::lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly: grant security-events: write / actions: read in workflow permissions), or ignore if code scanning is not used."
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly: grant security-events: write / actions: read in workflow permissions), or ignore if code scanning is not used.
+          EOF
 
       - name: Upload review artifact
         if: always()

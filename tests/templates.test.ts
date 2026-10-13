@@ -267,6 +267,55 @@ describe("workflow templates", () => {
     expect(p).toContain("steps.app.outcome == 'success' && 'app'");
   });
 
+  it("unprivileged template warns visibly when the optional SARIF upload fails", () => {
+    const t = fs.readFileSync("docs/workflow-template.yml", "utf8");
+    const sentence =
+      "lupa: SARIF upload failed — code-scanning results were not uploaded. See the Upload SARIF step log for the cause (commonly: grant security-events: write / actions: read in workflow permissions), or ignore if code scanning is not used.";
+    const escaped = sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    /** Step keys only (6-space `- key:` or 8-space `key:`), excluding the indented run body. */
+    const stepKeys = (block: string): string[] =>
+      block
+        .split("\n")
+        .map((l) => /^(?: {6}- | {8}|- )([a-z-]+):/.exec(l)?.[1])
+        .filter((k): k is string => k !== undefined);
+
+    // The upload step gains exactly one line (`id: sarif`); every other key is unchanged.
+    const uploadIdx = t.indexOf('- name: "Upload SARIF');
+    expect(uploadIdx).toBeGreaterThanOrEqual(0);
+    const uploadEnd = t.indexOf("- name:", uploadIdx + 1);
+    const uploadBlock = t.slice(uploadIdx, uploadEnd);
+    expect(stepKeys(uploadBlock)).toEqual(["name", "id", "if", "continue-on-error", "uses", "with"]);
+
+    // The note step sits immediately after the upload step (nothing else moves).
+    const noteIdx = t.indexOf('- name: "Note SARIF upload failure"');
+    expect(noteIdx).toBeGreaterThanOrEqual(0);
+    expect(t.slice(uploadEnd, uploadEnd + 40)).toContain("Note SARIF upload failure");
+    const noteEnd = t.indexOf("- name:", noteIdx + 1);
+    const noteBlock = t.slice(noteIdx, noteEnd);
+    expect(stepKeys(noteBlock)).toEqual(["name", "if", "run"]);
+
+    // Guard pins always() plus `== 'failure'`: a failed upload warns, while a skipped step
+    // (fork, issue_comment, workflow_dispatch, or the same-repo guard false) has outcome
+    // 'skipped' — `!= 'success'` would warn on those too, so the vocabulary is load-bearing.
+    expect(noteBlock).toContain("always()");
+    expect(noteBlock).toContain("steps.sarif.outcome == 'failure'");
+    expect(noteBlock).not.toContain("!= 'success'");
+
+    // Annotation echoes the sentence with the ::warning:: prefix.
+    expect(noteBlock).toContain(`echo "::warning::${sentence}"`);
+
+    // Summary emission is a heredoc carrying the bare sentence on its own line
+    // (leading YAML indent allowed; an echo-prefix or trailing text fails).
+    expect(noteBlock).toContain('cat >> "$GITHUB_STEP_SUMMARY" <<\'EOF\'');
+    expect(noteBlock).toMatch(new RegExp(`^[ \\t]*${escaped}$`, "m"));
+    expect(noteBlock).toMatch(/^[ \t]*EOF$/m);
+
+    // Echoes only: the note step never fails the job (no continue-on-error, exit or false).
+    expect(noteBlock).not.toContain("continue-on-error");
+    expect(noteBlock).not.toMatch(/\bexit\b/);
+    expect(noteBlock).not.toMatch(/\bfalse\b/);
+  });
+
   it("both templates pin the same fail_level (severity parity)", () => {
     const extract = (file: string): string => {
       const text = fs.readFileSync(file, "utf8");
