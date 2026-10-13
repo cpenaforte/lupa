@@ -10,7 +10,7 @@ Heuristic-only findings without direct secret evidence stop existing
 entirely — not emitted, not downgraded. Four categories from the binding
 policy: deletions, public certificates, placeholders, unchanged TODO context
 lines. The audit's cases (deleted `certs/public.pem` high, TODO on unchanged
-context lines) emit nothing; a newly added private key and a secret-shaped `.env` assignment with a real value still flags. Secret scanners (gitleaks/trivy/semgrep) own
+context lines) emit nothing; a newly added private key in a sensitive path and a secret-shaped `.env` assignment with a real value still flags. Secret scanners (gitleaks/trivy/semgrep) own
 content-secrets everywhere and are the backstop — fastpath keeps only the
 evidence-backed tripwire.
 
@@ -32,7 +32,8 @@ export function runL0(files: FileDiff[], o?: { hasManifestFor?: (lockfile: strin
 // fastpath.ts — new pure helpers (exported for units)
 export function hasPrivateKeyMarker(addedLines: string[]): boolean;
 export function isPlaceholderValue(value: string): boolean;
-export function contentText(raw: string): string | undefined; // one shared classifier: content text without prefix, or undefined for blank/context/removed/header lines. addedLines() maps it; todoMarkers applies it inline while counting new-file lines.
+export function contentText(raw: string): string | undefined; // one shared classifier over a CR-stripped line (one trailing CR removed first — CRLF diffs): content text without prefix for `+`/unprefixed lines, undefined for ` `, `-`, `\\`, `@@`, and empty. addedLines() maps it over hunks; todoMarkers applies it inline while counting new-file lines.
+export function addedLines(hunks: string): string[]; // maps contentText over hunks lines, dropping undefined (fastpath.ts, exported for units)
 // diff.ts — unchanged (FileDiff.deleted?: boolean already exists, Q02)
 ```
 
@@ -62,31 +63,38 @@ export function contentText(raw: string): string | undefined; // one shared clas
   - `.env`/`.env.*` files: flag iff an added assignment line
     `/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)$/`
     (dotenv subset: plain `KEY=value` only — `#`-led, `KEY+=`, dashed-key, and
-    multiline values are skipped, stated scope) meets BOTH: (a) the key is
-    secret-shaped, `/(SECRET|TOKEN|PASSWOR?D|PASSWD|PRIVATE|CREDENTIALS?|API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?KEY|SESSION[_-]?KEY)/i`
-    (`PORT=3000`, `DEBUG=false`, `DATABASE_URL=…` do not match — silent even
-    with real-looking values; scanners backstop them); AND (b) the value, after
-    trailing-comment strip (`\s+#.*$` — `a#b` keeps its hash) and quote-strip,
-    is not a placeholder. Any added line carrying a private-key marker also
-    flags (PEM blocks in env), independent of key names.
-  - No added content (empty, binary, hunk-less, mode-only hunks) → silent
-    (no content means no evidence — the decided rule; scanners backstop).
-  - `id_rsa` follows the same uniform content rule, no name exception.
-- **Placeholder set (pinned, minimal).** Strip a trailing comment (whitespace + `#...`; `a#b` keeps its hash), trim, strip surrounding single/double quotes, trim again; placeholder iff empty OR `$VAR` reference (`$NAME` / `${...}` — resolved elsewhere, not a committed secret) OR case-insensitive match of:
-  literals `changeme`, `change-me`, `sample`, `test`, `testing`, `xxx`,
-  `password`, `password123`, `123456`, `placeholder`, `none`, bare `example`;
-  anchored doc-prefix patterns `^AKIAIOSFODNN7EXAMPLE`, `^ghp_EXAMPLE`, `EXAMPLE_NOT_A_SECRET` (case-insensitive) — substring `example` elsewhere (e.g. `db.example.com`) is NOT a placeholder;
-  shape patterns `/^x+$/i`, `/^<[^>]*>$/`, `/^\${[^}]*}$/`, `/^\*+$/`.
+    multiline values are skipped, stated scope) meets ALL THREE: (a) the key is
+    secret-shaped — contains (case-insensitive) `SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?KEY|SESSION[_-]?KEY`
+    or a `_`/`-`-delimited segment equal to `PASS|SIGNING|ENCRYPTION|MASTER|AUTH|AUTHORIZATION`
+    (`COMPASS`/`BYPASS` have no delimited segment — silent); AND (b) the value,
+    after trailing-comment strip (`\s+#.*$` — `a#b` keeps its hash), trim, one-pass
+    matched-pair quote-strip, trim again, is not a placeholder; AND (c) the value
+    is not obviously non-secret: not pure numeric (`/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/`),
+    not boolean (`/^(true|false|yes|no|on|off)$/i`, `0`/`1` covered by numeric),
+    not a credential-less URL (`scheme://` with no `@` before the first `/`).
+    So `PORT=3000`, `DEBUG=false`, `MAX_TOKENS=4096`, `PRIVATE_MODE=false`,
+    `PASSWORD_MIN_LENGTH=8`, `TOKEN_URL=https://api.acme.io` are silent, while
+    `DB_PASS=hunter2`, `JWT_SIGNING_KEY=x`, `GITHUB_TOKEN=ghp_…` flag.
+    `*_KEY_ID` with AKIA values flags via the `ACCESS_KEY` substring (matches
+    scanner behavior for key IDs — accepted, stated). Any added line carrying
+    a private-key marker also flags (PEM blocks in env), independent of key names.
+- **Placeholder set (pinned, minimal).** `isPlaceholderValue` takes the raw extracted value and runs the full pipeline internally: strip one trailing CR, strip a trailing comment (whitespace + `#...`; `a#b` keeps its hash), trim, one-pass matched-pair quote-strip (`"..."`/`...` single layer only; mismatched/nested quotes strip nothing), trim again. Placeholder iff the result is empty OR a whole-value `$VAR` reference (`$NAME` / `${...}` — resolved elsewhere, not a committed secret; `$HOME/real` is NOT whole-value → real) OR case-insensitive match of:
+  literals `changeme`, `change-me`, `example`, `sample`, `test`, `testing`, `xxx`,
+  `password`, `password123`, `123456`, `placeholder`, `none`;
+  anchored patterns: value contains `EXAMPLE_NOT_A_SECRET`, or starts with `AKIAIOSFODNN7EXAMPLE` / `ghp_EXAMPLE` (case-insensitive) — worked example: `DB_PASSWORD=x@db.example.com` matches neither, so with its secret key it flags (fail-safe toward detection);
+  shape patterns `/^x+$/i`, `/^<[^>]*>$/`, `/^${...}$/` (literal `$`, `{`, `}` with any non-`}` inside), `/^\*+$/`.
   Anything else is real. Judgment call recorded: a real weak password (`password123`) is silent — the false-positive-cost choice the policy mandates. Evasion by novel placeholders accepted (scanners backstop real-shaped secrets).
 - **Message text UNCHANGED** (`Sensitive file path changed: ${file}` —
   emission itself is now the evidence-backed claim; avoids pin churn;
   `source: "fastpath"`, `confidence: 50` unchanged).
 - **TODO rule.** `todoMarkers` scans `+`-prefixed lines and unprefixed
   headerless-content lines only, via the shared `contentText` classifier;
-  `@@` headers are never content (git appends enclosing-line context that may
-  contain markers); `" "` context lines advance the new-file counter but are
-  never scanned; `-` and `\` lines are skipped entirely (as today).
-  Added TODOs stay `info`; unchanged-context TODOs vanish.
+  `@@` headers are never content and never advance the counter (git appends
+  enclosing-line context that may contain markers); `" "` context and empty
+  lines advance the new-file counter exactly as today but are never scanned;
+  `-` and `\` lines are skipped entirely (as today). Only the scan predicate
+  changes — counting is byte-identical to the current loop, so `:113-114`
+  keeps `[41]`. Added TODOs stay `info`; unchanged-context TODOs vanish.
 - **Untouched.** `large-file` always; `binary-note` and
   `lockfile-without-manifest` on surviving files (deleted-entry behavior
   moves under the deletion rule above). Scope ruling: the policy's operative
@@ -108,19 +116,25 @@ export function contentText(raw: string): string | undefined; // one shared clas
 ## 5. Tests
 
 - Emission matrix (`tests/fastpath.test.ts`): deleted sensitive file →
-  nothing (all rules); cert-only `.pem` addition → nothing; private-key
+  nothing (all rules); cert-only `.pem` addition → nothing (incl. explicit `BEGIN PUBLIC KEY` pin); private-key
   `.pem`/`id_rsa` addition → high; placeholder-only `.env` → nothing;
-  real-value `.env` → high; empty/binary/hunk-less/mode-only sensitive →
+  secret-key + real-value `.env` → high; non-secret-key / numeric / boolean / bare-URL values → nothing; empty/binary/hunk-less/mode-only sensitive →
   nothing; `export`-prefixed + quoted values; `#` comments skipped;
   `todoMarkers` context-line TODO → nothing, added-line TODO → info
   (incl. headerless).
 - Helper units: `hasPrivateKeyMarker` (each marker variant + negative
-  cert-only); `isPlaceholderValue` (every pinned literal + pattern +
-  negative real values like `ghp_live...`, `correct-horse-...`).
+  cert-only + negative `BEGIN PUBLIC KEY`); `isPlaceholderValue` (every pinned
+  literal + pattern + whole-value `$VAR` vs `$HOME/real` + mismatched quotes +
+  negative real values like `ghp_live...`);
+  key-shape units (`DB_PASS`/`SMTP_PASS`/`JWT_SIGNING_KEY`/`ENCRYPTION_KEY`/`MASTER_KEY`
+  secret-shaped; `COMPASS`/`BYPASS` not);
+  value-shape units (numeric/boolean/credential-less-URL silent even under secret
+  keys; userinfo-URL real); CRLF units (assignment with trailing CR parses,
+  `xxx`+CR is placeholder, marker line with CR matches).
 - Reworked pins: fastpath `:20` (id_rsa fixture gains key content),
   `:76-84` (content-bearing fixtures; hunk-less trio asserts silence),
   `:117-120` (context TODO asserts `[]`; `:113-114` counter-advance keeps `[41]`),
-  `:86-94` (`.env.local` gains a real assignment; templates still silent);
+  `:87+` (`.env.local` gains a secret-keyed real assignment; templates still silent);
   main.test `:1257` keeps a blocking-path test via a key-content id_rsa
   fixture + adds the silence variant (content-less → COMMENT + exit 0).
 - Evals: new `cases.ts` pair with named fixtures — `q03-key-addition.patch`
@@ -149,6 +163,5 @@ No new runtime dependencies, no new action inputs, stable namespace
 committed per task, suite + evals green. Ships with the next release
 vehicle — no tag alone. Accepted residuals: scanners backstop all
 content-secrets (the fastpath tripwire is a convenience, not the
-detection floor); placeholder-list evasion; renamed-file attribution rides
-hunks (new content — fine); mode-only/binary `.env` silent even if a real
+detection floor); placeholder-list evasion; renamed-file attribution rides hunks: a pure rename with no hunks is silent (accepted — nothing added); mode-only/binary `.env` silent even if a real
 secret hides inside (gitleaks scans the checkout regardless).
