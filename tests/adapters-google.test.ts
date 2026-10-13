@@ -207,6 +207,26 @@ describe("callGoogle", () => {
     expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toEqual({ ok: true, findings: [], verdicts: EMPTY_VERDICTS });
   });
 
+  it("attaches calls:1 usage (google total−prompt) when usageMetadata present; absent otherwise", async () => {
+    stubFetch(() =>
+      json(200, {
+        ...okGoogle('{"findings":[]}'),
+        usageMetadata: { promptTokenCount: 10, totalTokenCount: 16, candidatesTokenCount: 4 },
+      }),
+    );
+    const withUsage = await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts());
+    expect(withUsage).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: EMPTY_VERDICTS,
+      usage: { input: 10, output: 6, calls: 1 },
+    });
+    stubFetch(() => json(200, okGoogle('{"findings":[]}')));
+    const withoutUsage = await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts());
+    expect(withoutUsage.ok).toBe(true);
+    expect(withoutUsage).not.toHaveProperty("usage");
+  });
+
   it("finishReason STOP→ok; MAX_TOKENS→degrade; SAFETY/other→skip without retry", async () => {
     stubFetch(() => json(200, okGoogle('{"findings":[]}', { finishReason: "MAX_TOKENS" })));
     expect(await callGoogle(fakeGoogleEp(), MODEL, msgs(), opts())).toMatchObject({
@@ -318,6 +338,15 @@ describe("callGoogleTurn", () => {
     // The system instruction (with the agent addendum) must ride in BOTH modes.
     expect(body.systemInstruction).toEqual({ parts: [{ text: "s" }] });
     expect((body.systemInstruction as { parts: Array<{ text: string }> }).parts[0]!.text).toBe(c.system);
+  });
+
+  it("turn attaches calls:1 usage (candidates fallback) from usageMetadata", async () => {
+    stubFetch(() =>
+      json(200, { ...okGoogle('{"findings":[]}'), usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } }),
+    );
+    const r = await callGoogleTurn(fakeGoogleEp(), MODEL, conv(), opts(), turnFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.usage).toEqual({ input: 3, output: 2, calls: 1 });
   });
 
   it("echoes model functionCall parts and role=user functionResponse parts", async () => {

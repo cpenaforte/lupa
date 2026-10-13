@@ -4,7 +4,7 @@ import { executeTool } from "./agent-tools.js";
 import type { ToolContext } from "./agent-tools.js";
 import { parseContent, toFindings } from "./llm.js";
 import { stripProvenance } from "./fastpath.js";
-import type { AgentReply, LlmResult } from "./llm.js";
+import type { AgentReply, LlmResult, LlmUsage } from "./llm.js";
 
 export interface AgentBudget {
   maxTurns: number;
@@ -36,6 +36,8 @@ export interface AgentOutcome {
   calls: number;
   bytes: number;
   elapsedMs: number;
+  /** Aggregate token usage over the contributing turns; absent when none observed. */
+  usage?: LlmUsage;
 }
 
 const BUDGET_NOTE = "Tool budget exhausted. Respond with ONLY the JSON findings object matching the schema.";
@@ -102,8 +104,21 @@ export async function runAgent(
   let calls = 0;
   let bytes = 0;
   let toolsUnsupported = false;
+  let usageInput = 0;
+  let usageOutput = 0;
+  let usageCalls = 0;
 
   const elapsedMs = (): number => clock() - start;
+  // Accumulates only ok replies that carry usage, on the non-raced branch
+  // (never inside a `.then`, so a late dangling resolution cannot add after
+  // finish()). ok:false replies never carry usage.
+  const accumulateUsage = (reply: AgentReply): void => {
+    if (reply.ok && reply.usage !== undefined) {
+      usageInput += reply.usage.input;
+      usageOutput += reply.usage.output;
+      usageCalls += reply.usage.calls;
+    }
+  };
   const finish = (
     result: LlmResult,
     stop: AgentOutcome["stop"],
@@ -111,7 +126,17 @@ export async function runAgent(
   ): AgentOutcome => {
     const ms = elapsedMs();
     hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1000}s`);
-    return { result, stop, probeAdvance, toolsUnsupported, turns, calls, bytes, elapsedMs: ms };
+    return {
+      result,
+      stop,
+      probeAdvance,
+      toolsUnsupported,
+      turns,
+      calls,
+      bytes,
+      elapsedMs: ms,
+      ...(usageCalls > 0 ? { usage: { input: usageInput, output: usageOutput, calls: usageCalls } } : {}),
+    };
   };
   const timeoutFor = (remaining: number): number =>
     Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)));
@@ -176,6 +201,7 @@ export async function runAgent(
     const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
     if (first.raced) return finish(timeoutLlmResult(), "budget", false);
     const reply = first.reply;
+    accumulateUsage(reply);
 
     if (!reply.ok) {
       const status = statusOf(reply.result);
@@ -193,6 +219,7 @@ export async function runAgent(
           );
           if (retried.raced) return finish(timeoutLlmResult(), "budget", false);
           const retry = retried.reply;
+          accumulateUsage(retry);
           if (!retry.ok) {
             const s2 = statusOf(retry.result);
             toolsUnsupported = true;
@@ -216,6 +243,7 @@ export async function runAgent(
           );
           if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
           const fixed = repaired.reply;
+          accumulateUsage(fixed);
           if (!fixed.ok) {
             toolsUnsupported = true;
             return finish(fixed.result, "error", false);
@@ -263,6 +291,7 @@ export async function runAgent(
       );
       if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
       const fixed = repaired.reply;
+      accumulateUsage(fixed);
       if (!fixed.ok) return finish(fixed.result, "error", false);
       appendAssistant(fixed);
       turns += 1;

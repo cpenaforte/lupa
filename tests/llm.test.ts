@@ -6,11 +6,13 @@ import {
   tokenFieldFor,
   parseContent,
   ensureOllama,
+  extractUsage,
   OllamaMissingError,
   InvalidJsonError,
 } from "../src/llm.js";
 import type { ResolvedEndpoint } from "../src/providers.js";
 import type { Conversation } from "../src/agent-types.js";
+import type { LlmUsage } from "../src/llm.js";
 
 // ---------- helpers ----------
 
@@ -195,6 +197,110 @@ describe("tokenFieldFor", () => {
   });
 });
 
+describe("extractUsage", () => {
+  it("chat: present → exact {input,output} (shape only, no calls key)", () => {
+    expect(extractUsage({ usage: { prompt_tokens: 10, completion_tokens: 4 } }, "openai-chat")).toEqual({
+      input: 10,
+      output: 4,
+    });
+  });
+
+  it("chat: absent / partial / non-object / non-finite / negative → undefined", () => {
+    expect(extractUsage({}, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: {} }, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: { prompt_tokens: 10 } }, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: { completion_tokens: 4 } }, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: null }, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: { prompt_tokens: NaN, completion_tokens: 4 } }, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: { prompt_tokens: Infinity, completion_tokens: 4 } }, "openai-chat")).toBeUndefined();
+    expect(extractUsage({ usage: { prompt_tokens: -1, completion_tokens: 4 } }, "openai-chat")).toBeUndefined();
+    expect(extractUsage(null, "openai-chat")).toBeUndefined();
+    expect(extractUsage([{ usage: { prompt_tokens: 1, completion_tokens: 1 } }], "openai-chat")).toBeUndefined();
+    expect(extractUsage("x", "openai-chat")).toBeUndefined();
+    expect(extractUsage(7, "openai-chat")).toBeUndefined();
+  });
+
+  it("responses: present → exact; absent / partial / non-object → undefined", () => {
+    expect(extractUsage({ usage: { input_tokens: 7, output_tokens: 3 } }, "openai-responses")).toEqual({
+      input: 7,
+      output: 3,
+    });
+    expect(extractUsage({}, "openai-responses")).toBeUndefined();
+    expect(extractUsage({ usage: { input_tokens: 7 } }, "openai-responses")).toBeUndefined();
+    expect(extractUsage({ usage: { output_tokens: 3 } }, "openai-responses")).toBeUndefined();
+    expect(extractUsage({ usage: { input_tokens: -2, output_tokens: 3 } }, "openai-responses")).toBeUndefined();
+    expect(extractUsage(null, "openai-responses")).toBeUndefined();
+    expect(extractUsage([], "openai-responses")).toBeUndefined();
+  });
+
+  it("messages: input+output present → exact (caches absent add nothing)", () => {
+    expect(extractUsage({ usage: { input_tokens: 5, output_tokens: 2 } }, "anthropic-messages")).toEqual({
+      input: 5,
+      output: 2,
+    });
+  });
+
+  it("messages: cache read + creation fold into input", () => {
+    expect(
+      extractUsage(
+        { usage: { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 } },
+        "anthropic-messages",
+      ),
+    ).toEqual({ input: 12, output: 2 });
+  });
+
+  it("messages: caches alone (no input_tokens) do not form an input → undefined", () => {
+    expect(
+      extractUsage({ usage: { output_tokens: 2, cache_read_input_tokens: 3 } }, "anthropic-messages"),
+    ).toBeUndefined();
+  });
+
+  it("messages: wrong-typed caches are treated as 0, never concatenated", () => {
+    expect(
+      extractUsage(
+        { usage: { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: "7", cache_creation_input_tokens: null } },
+        "anthropic-messages",
+      ),
+    ).toEqual({ input: 5, output: 2 });
+  });
+
+  it("messages: output missing / negative input / non-object usage → undefined", () => {
+    expect(extractUsage({ usage: { input_tokens: 5 } }, "anthropic-messages")).toBeUndefined();
+    expect(extractUsage({ usage: { input_tokens: -1, output_tokens: 2 } }, "anthropic-messages")).toBeUndefined();
+    expect(extractUsage({ usage: null }, "anthropic-messages")).toBeUndefined();
+    expect(extractUsage(null, "anthropic-messages")).toBeUndefined();
+  });
+
+  it("google: prompt + candidates present → exact", () => {
+    expect(
+      extractUsage({ usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4 } }, "google-models"),
+    ).toEqual({ input: 10, output: 4 });
+  });
+
+  it("google: total−prompt wins when both present; candidates fallback otherwise", () => {
+    expect(
+      extractUsage(
+        { usageMetadata: { promptTokenCount: 10, totalTokenCount: 16, candidatesTokenCount: 4 } },
+        "google-models",
+      ),
+    ).toEqual({ input: 10, output: 6 });
+    expect(
+      extractUsage({ usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4 } }, "google-models"),
+    ).toEqual({ input: 10, output: 4 });
+  });
+
+  it("google: negative derived output / missing prompt / non-object → undefined", () => {
+    expect(
+      extractUsage({ usageMetadata: { promptTokenCount: 10, totalTokenCount: 3 } }, "google-models"),
+    ).toBeUndefined();
+    expect(
+      extractUsage({ usageMetadata: { totalTokenCount: 5, candidatesTokenCount: 4 } }, "google-models"),
+    ).toBeUndefined();
+    expect(extractUsage({ usageMetadata: [] }, "google-models")).toBeUndefined();
+    expect(extractUsage(null, "google-models")).toBeUndefined();
+  });
+});
+
 describe("callLlm request shape", () => {
   it("explicit sampling IS sent for openai non-reasoning, still omitted for anthropic", async () => {
     await callLlm(fakeOpenAiEp(), msgs(), { ...opts(), model: "gpt-4o-mini", temperature: 0.3 });
@@ -343,6 +449,23 @@ describe("callLlm response handling", () => {
     const r = await callLlm(fakeOpenAiEp(), msgs(), { ...opts(), model: "o1", temperature: 0.5 });
     expect(r).toMatchObject({ ok: false, reason: "unsupported" });
     expect(fetchCallCount()).toBe(0);
+  });
+
+  it("attaches calls:1 usage alongside input/output when the body carries usage", async () => {
+    stubFetch(() => json(200, { ...okChat(), usage: { prompt_tokens: 12, completion_tokens: 3 } }));
+    const r = await callLlm(fakeOpenAiEp(), msgs(), opts());
+    expect(r).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+      usage: { input: 12, output: 3, calls: 1 },
+    });
+  });
+
+  it("carries no usage key when the body omits usage (absent, not undefined)", async () => {
+    const r = await callLlm(fakeOpenAiEp(), msgs(), opts());
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty("usage");
   });
 });
 
@@ -877,5 +1000,20 @@ describe("callChatTurn", () => {
       ok: false,
       result: { ok: false, reason: "invalid-json", detail: "response truncated (finish_reason=length)" },
     });
+  });
+
+  it("attaches calls:1 usage on a turn when the body carries usage", async () => {
+    const usage: LlmUsage = { input: 8, output: 2, calls: 1 };
+    stubFetch(() => json(200, { ...okChat('{"findings":[]}'), usage: { prompt_tokens: 8, completion_tokens: 2 } }));
+    const r = await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.usage).toEqual(usage);
+  });
+
+  it("null turn body: ok with no usage key (attach point stays absent)", async () => {
+    stubFetch(() => json(200, null));
+    const r = await callChatTurn(fakeOpenAiEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    expect(r).not.toHaveProperty("usage");
   });
 });

@@ -601,6 +601,13 @@ async function slowPath(
   prBody: string,
 ): Promise<{ findings: Finding[]; verdicts?: DedupVerdicts } | undefined> {
   const i = env.inputs;
+  /** One aggregate-usage line when the consumed result observed usage; silent otherwise. */
+  const noteUsage = (result: LlmResult): void => {
+    if (result.ok && result.usage !== undefined) {
+      const u = result.usage;
+      note(env, out, `lupa: llm usage input=${u.input} output=${u.output} tokens (calls=${u.calls})`);
+    }
+  };
   if (i.llmApiKey === "") {
     core.info("no llm_api_key: slow path skipped");
     return undefined;
@@ -742,6 +749,7 @@ async function slowPath(
       core.warning(`slow path failed (${res.reason}): ${res.detail}`);
       return undefined;
     }
+    noteUsage(res);
     return { findings: res.findings };
   }
   const res: LlmResult =
@@ -753,7 +761,10 @@ async function slowPath(
     return undefined;
   }
   const verdicts = res.verdicts;
-  if (verdicts === undefined) return { findings: res.findings };
+  if (verdicts === undefined) {
+    noteUsage(res);
+    return { findings: res.findings };
+  }
   // Links convert to absolute all-list indices against the UNCUT fast list (never b.fast.length).
   // Verdicts naming a cut-tail sent index (≥ b.fast.length) name findings the model never saw:
   // dropped whole and counted as malformed. All findings are kept regardless.
@@ -770,6 +781,7 @@ async function slowPath(
     else links.push([fast.length + r, s]);
   }
   if (malformed > 0) core.warning(`lupa: ignored ${malformed} malformed dedup verdict(s)`);
+  noteUsage(res);
   return { findings: res.findings, verdicts: { pairs, links, malformed } };
 }
 

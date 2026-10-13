@@ -4,6 +4,7 @@ import type { Conversation, ToolCall } from "../agent-types.js";
 import {
   attempt,
   errMessage,
+  extractUsage,
   parseContent,
   parseVerdicts,
   redact,
@@ -244,7 +245,13 @@ export async function callResponses(
   if (findings === undefined) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
+  const u = extractUsage(json, "openai-responses");
+  return {
+    ok: true,
+    findings,
+    verdicts: parseVerdicts(parsed),
+    ...(u ? { usage: { ...u, calls: 1 } } : {}),
+  };
 }
 
 /**
@@ -311,10 +318,12 @@ export async function callResponsesTurn(
   }
   const reply = parseResponsesReply(json, rFlags);
   if (!reply.ok) return { ok: false, result: reply.result };
+  const u = extractUsage(json, "openai-responses");
   return {
     ok: true,
     text: reply.text ?? "",
     toolCalls: reply.toolCalls,
     ...(reply.rawItems.length > 0 ? { rawItems: reply.rawItems } : {}),
+    ...(u ? { usage: { ...u, calls: 1 } } : {}),
   };
 }

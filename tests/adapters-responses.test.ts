@@ -92,6 +92,21 @@ describe("callResponses", () => {
     expect(body.top_p).toBeUndefined();
   });
 
+  it("attaches calls:1 usage when the envelope carries usage; absent otherwise", async () => {
+    stubFetch(() => json(200, okResponses('{"findings":[]}', { usage: { input_tokens: 7, output_tokens: 3 } })));
+    const withUsage = await callResponses(fakeResponsesEp(), msgs(), opts());
+    expect(withUsage).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+      usage: { input: 7, output: 3, calls: 1 },
+    });
+    stubFetch(() => json(200, okResponses('{"findings":[]}')));
+    const withoutUsage = await callResponses(fakeResponsesEp(), msgs(), opts());
+    expect(withoutUsage.ok).toBe(true);
+    expect(withoutUsage).not.toHaveProperty("usage");
+  });
+
   it("falls back without format on 400", async () => {
     stubFetch((_c, n) =>
       n === 1 ? json(400, { error: "unsupported format" }) : json(200, okResponses('{"findings":[]}')),
@@ -206,6 +221,19 @@ describe("callResponsesTurn", () => {
       { type: "function", name: "read_file", description: "Read a file", parameters: toolDef.parameters },
     ]);
     expect("text" in body).toBe(false);
+  });
+
+  it("turn attaches calls:1 usage from the envelope", async () => {
+    stubFetch(() =>
+      json(200, {
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: '{"findings":[]}' }] }],
+        usage: { input_tokens: 9, output_tokens: 1 },
+      }),
+    );
+    const r = await callResponsesTurn(fakeResponsesEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.usage).toEqual({ input: 9, output: 1, calls: 1 });
   });
 
   it("translates function_call echo and function_call_output", async () => {

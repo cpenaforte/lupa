@@ -26378,7 +26378,13 @@ async function callGoogle(ep, modelId, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
+  const u = extractUsage(json, "google-models");
+  return {
+    ok: true,
+    findings,
+    verdicts: parseVerdicts(parsed),
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 async function callGoogleTurn(ep, modelId, conv, o, flags) {
   const key = o.apiKey;
@@ -26431,7 +26437,14 @@ async function callGoogleTurn(ep, modelId, conv, o, flags) {
   const reply = parseGoogleReply(json, gFlags);
   if (!reply.ok)
     return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls, rawItems: reply.rawItems };
+  const u = extractUsage(json, "google-models");
+  return {
+    ok: true,
+    text: reply.text ?? "",
+    toolCalls: reply.toolCalls,
+    rawItems: reply.rawItems,
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 
 // lib/src/adapters/messages.js
@@ -26593,7 +26606,13 @@ async function callMessages(ep, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
+  const u = extractUsage(json, "anthropic-messages");
+  return {
+    ok: true,
+    findings,
+    verdicts: parseVerdicts(parsed),
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 async function callMessagesTurn(ep, conv, o, flags) {
   const key = o.apiKey;
@@ -26641,7 +26660,14 @@ async function callMessagesTurn(ep, conv, o, flags) {
   const reply = parseMessagesReply(json, mFlags);
   if (!reply.ok)
     return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls, rawItems: reply.rawItems };
+  const u = extractUsage(json, "anthropic-messages");
+  return {
+    ok: true,
+    text: reply.text ?? "",
+    toolCalls: reply.toolCalls,
+    rawItems: reply.rawItems,
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 
 // lib/src/adapters/responses.js
@@ -26808,7 +26834,13 @@ async function callResponses(ep, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
+  const u = extractUsage(json, "openai-responses");
+  return {
+    ok: true,
+    findings,
+    verdicts: parseVerdicts(parsed),
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 async function callResponsesTurn(ep, conv, o, flags) {
   const key = o.apiKey;
@@ -26852,11 +26884,13 @@ async function callResponsesTurn(ep, conv, o, flags) {
   const reply = parseResponsesReply(json, rFlags);
   if (!reply.ok)
     return { ok: false, result: reply.result };
+  const u = extractUsage(json, "openai-responses");
   return {
     ok: true,
     text: reply.text ?? "",
     toolCalls: reply.toolCalls,
-    ...reply.rawItems.length > 0 ? { rawItems: reply.rawItems } : {}
+    ...reply.rawItems.length > 0 ? { rawItems: reply.rawItems } : {},
+    ...u ? { usage: { ...u, calls: 1 } } : {}
   };
 }
 
@@ -26906,11 +26940,31 @@ async function runAgent(conv, toolCtx, budget, hooks) {
   let calls = 0;
   let bytes = 0;
   let toolsUnsupported = false;
+  let usageInput = 0;
+  let usageOutput = 0;
+  let usageCalls = 0;
   const elapsedMs = () => clock() - start;
+  const accumulateUsage = (reply) => {
+    if (reply.ok && reply.usage !== void 0) {
+      usageInput += reply.usage.input;
+      usageOutput += reply.usage.output;
+      usageCalls += reply.usage.calls;
+    }
+  };
   const finish = (result, stop, probeAdvance) => {
     const ms = elapsedMs();
     hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1e3}s`);
-    return { result, stop, probeAdvance, toolsUnsupported, turns, calls, bytes, elapsedMs: ms };
+    return {
+      result,
+      stop,
+      probeAdvance,
+      toolsUnsupported,
+      turns,
+      calls,
+      bytes,
+      elapsedMs: ms,
+      ...usageCalls > 0 ? { usage: { input: usageInput, output: usageOutput, calls: usageCalls } } : {}
+    };
   };
   const timeoutFor = (remaining) => Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1e3)));
   const timedOut = () => {
@@ -26960,6 +27014,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     if (first.raced)
       return finish(timeoutLlmResult(), "budget", false);
     const reply = first.reply;
+    accumulateUsage(reply);
     if (!reply.ok) {
       const status = statusOf(reply.result);
       if (turns === 0 && !forced) {
@@ -26972,6 +27027,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           if (retried.raced)
             return finish(timeoutLlmResult(), "budget", false);
           const retry = retried.reply;
+          accumulateUsage(retry);
           if (!retry.ok) {
             const s2 = statusOf(retry.result);
             toolsUnsupported = true;
@@ -26993,6 +27049,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           if (repaired.raced)
             return finish(timeoutLlmResult(), "budget", false);
           const fixed = repaired.reply;
+          accumulateUsage(fixed);
           if (!fixed.ok) {
             toolsUnsupported = true;
             return finish(fixed.result, "error", false);
@@ -27039,6 +27096,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
       if (repaired.raced)
         return finish(timeoutLlmResult(), "budget", false);
       const fixed = repaired.reply;
+      accumulateUsage(fixed);
       if (!fixed.ok)
         return finish(fixed.result, "error", false);
       appendAssistant(fixed);
@@ -27199,6 +27257,51 @@ function parseVerdicts(parsed) {
     }
   }
   return verdicts;
+}
+function nonNegNumber(v) {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : void 0;
+}
+function extractUsage(body, apiStyle) {
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return void 0;
+  const root = body;
+  const usage = apiStyle === "google-models" ? root.usageMetadata : root.usage;
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage))
+    return void 0;
+  const u = usage;
+  switch (apiStyle) {
+    case "openai-chat": {
+      const input = nonNegNumber(u.prompt_tokens);
+      const output = nonNegNumber(u.completion_tokens);
+      return input === void 0 || output === void 0 ? void 0 : { input, output };
+    }
+    case "openai-responses": {
+      const input = nonNegNumber(u.input_tokens);
+      const output = nonNegNumber(u.output_tokens);
+      return input === void 0 || output === void 0 ? void 0 : { input, output };
+    }
+    case "anthropic-messages": {
+      const input = nonNegNumber(u.input_tokens);
+      const output = nonNegNumber(u.output_tokens);
+      if (input === void 0 || output === void 0)
+        return void 0;
+      const cacheRead = nonNegNumber(u.cache_read_input_tokens) ?? 0;
+      const cacheCreation = nonNegNumber(u.cache_creation_input_tokens) ?? 0;
+      return { input: input + cacheRead + cacheCreation, output };
+    }
+    case "google-models": {
+      const input = nonNegNumber(u.promptTokenCount);
+      if (input === void 0)
+        return void 0;
+      const total = nonNegNumber(u.totalTokenCount);
+      if (total !== void 0) {
+        const derived = total - input;
+        return derived >= 0 ? { input, output: derived } : void 0;
+      }
+      const candidates = nonNegNumber(u.candidatesTokenCount);
+      return candidates === void 0 ? void 0 : { input, output: candidates };
+    }
+  }
 }
 function toFindings(v) {
   if (typeof v !== "object" || v === null || Array.isArray(v))
@@ -27411,7 +27514,13 @@ async function callLlm(ep, messages, o) {
   if (findings === void 0) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
+  const u = extractUsage(json, "openai-chat");
+  return {
+    ok: true,
+    findings,
+    verdicts: parseVerdicts(parsed),
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 async function callChatTurn(ep, conv, o, flags) {
   const key = o.apiKey;
@@ -27450,7 +27559,13 @@ async function callChatTurn(ep, conv, o, flags) {
   const reply = parseChatReply(json, chatFlags);
   if (!reply.ok)
     return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+  const u = extractUsage(json, "openai-chat");
+  return {
+    ok: true,
+    text: reply.text ?? "",
+    toolCalls: reply.toolCalls,
+    ...u ? { usage: { ...u, calls: 1 } } : {}
+  };
 }
 var PULL_TIMEOUT_DEFAULT_S = 300;
 async function callByStyle(ep, messages, o) {
@@ -27552,9 +27667,14 @@ function agentCallFor(ep, o) {
     provider: o.provider
   }, flags);
 }
+function withAgentUsage(outcome, result) {
+  if (result.ok && outcome.usage !== void 0)
+    return { ...result, usage: outcome.usage };
+  return result;
+}
 async function callByStyleAgent(ep, conv, o, toolCtx) {
   const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds }, { call: agentCallFor(ep, o), log: info });
-  return outcome.result;
+  return withAgentUsage(outcome, outcome.result);
 }
 async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolCtx, explicitStyle) {
   if (key === "") {
@@ -27588,7 +27708,7 @@ async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolC
   };
   if (explicitStyle !== void 0 && explicitStyle !== "auto") {
     const { outcome } = await runStyle(explicitStyle);
-    return { result: outcome.result, via: explicitStyle };
+    return { result: withAgentUsage(outcome, outcome.result), via: explicitStyle };
   }
   const memoized = PROBE_MEMO.get(memoKey);
   const order = memoized !== void 0 ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
@@ -27604,13 +27724,13 @@ async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolC
     }
     if (outcome.toolsUnsupported) {
       TOOLS_MEMO.set(memoKey, false);
-      return { result: outcome.result, via: style };
+      return { result: withAgentUsage(outcome, outcome.result), via: style };
     }
     if (outcome.result.ok) {
       PROBE_MEMO.set(memoKey, style);
-      return { result: outcome.result, via: style };
+      return { result: withAgentUsage(outcome, outcome.result), via: style };
     }
-    return { result: outcome.result, via: style };
+    return { result: withAgentUsage(outcome, outcome.result), via: style };
   }
   warning(`model "${model}": no API style accepted the request; tried ${attempted.join(" \u2192 ")}. Set llm_api_style explicitly to skip the probe.`);
   const detail = last !== void 0 && !last.ok ? last.detail : "no API style accepted the request";
@@ -29400,6 +29520,12 @@ function summaryFor(findings) {
 }
 async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped, prBody) {
   const i = env.inputs;
+  const noteUsage = (result) => {
+    if (result.ok && result.usage !== void 0) {
+      const u = result.usage;
+      note(env, out, `lupa: llm usage input=${u.input} output=${u.output} tokens (calls=${u.calls})`);
+    }
+  };
   if (i.llmApiKey === "") {
     info("no llm_api_key: slow path skipped");
     return void 0;
@@ -29516,6 +29642,7 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
       warning(`slow path failed (${res2.reason}): ${res2.detail}`);
       return void 0;
     }
+    noteUsage(res2);
     return { findings: res2.findings };
   }
   const res = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts) : await deps.analysis.callByStyle(ep, messages, llmOpts);
@@ -29524,8 +29651,10 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
     return void 0;
   }
   const verdicts = res.verdicts;
-  if (verdicts === void 0)
+  if (verdicts === void 0) {
+    noteUsage(res);
     return { findings: res.findings };
+  }
   const kept = b.fast.length;
   let malformed = verdicts.malformed;
   const pairs = [];
@@ -29544,6 +29673,7 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
   }
   if (malformed > 0)
     warning(`lupa: ignored ${malformed} malformed dedup verdict(s)`);
+  noteUsage(res);
   return { findings: res.findings, verdicts: { pairs, links, malformed } };
 }
 function runtimeSecrets(env) {

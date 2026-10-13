@@ -7,7 +7,7 @@ import type { ApiStyle, ResolvedApiStyle, ResolvedEndpoint } from "./providers.j
 import { callGoogle, callGoogleTurn } from "./adapters/google.js";
 import { callMessages, callMessagesTurn } from "./adapters/messages.js";
 import { callResponses, callResponsesTurn } from "./adapters/responses.js";
-import { runAgent } from "./agent.js";
+import { runAgent, type AgentOutcome } from "./agent.js";
 import type { ToolContext } from "./agent-tools.js";
 import * as core from "@actions/core";
 
@@ -27,7 +27,7 @@ const MAX_RETRY_AFTER_MS = 5_000;
 export const SNIPPET_CHARS = 200;
 
 export type LlmResult =
-  | { ok: true; findings: Finding[]; verdicts?: DedupVerdicts }
+  | { ok: true; findings: Finding[]; verdicts?: DedupVerdicts; usage?: LlmUsage }
   | {
       ok: false;
       reason: "no-key" | "unsupported" | "timeout" | "content-filter" | "invalid-json";
@@ -42,13 +42,24 @@ export type LlmResult =
     };
 
 /**
+ * Aggregate LLM token usage (numbers only — never model text or prompts).
+ * `calls` counts the contributing results: each adapter attaches 1 to the
+ * result it produced; the agent loop's total adds the per-turn counts.
+ */
+export interface LlmUsage {
+  input: number;
+  output: number;
+  calls: number;
+}
+
+/**
  * A single agent-mode turn reply: the assistant's text plus any tool calls it
  * requested. A failure keeps the single-shot LlmResult union so callers handle
  * both shapes identically. `rawItems` carries adapter-specific raw reply items
  * to echo verbatim on the next turn (unused by the chat adapter).
  */
 export type AgentReply =
-  | { ok: true; text: string; toolCalls: ToolCall[]; rawItems?: unknown[] }
+  | { ok: true; text: string; toolCalls: ToolCall[]; rawItems?: unknown[]; usage?: LlmUsage }
   | { ok: false; result: LlmResult };
 
 type ResponseFormat = { type: "json_schema"; json_schema: typeof PR_REVIEW_SCHEMA } | { type: "json_object" };
@@ -194,6 +205,68 @@ export function parseVerdicts(parsed: unknown): DedupVerdicts {
     }
   }
   return verdicts;
+}
+
+/** A finite number >= 0, or undefined (never NaN/Infinity/negative/wrong-typed). */
+function nonNegNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
+/**
+ * Pure shape normalization of a provider response body into `{input, output}`
+ * per API style (spec §4). Returns undefined for a non-object body, a missing /
+ * non-numeric / negative / non-finite field, or a half-shaped usage object —
+ * never a partial, NaN or negative result. Counting is the call site's job:
+ * each adapter attaches `calls: 1` to the result it produced. Non-object bodies
+ * (null, arrays, primitives) yield undefined so adapters never reject on shape.
+ */
+export function extractUsage(
+  body: unknown,
+  apiStyle: ResolvedApiStyle,
+): { input: number; output: number } | undefined {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const root = body as Record<string, unknown>;
+  const usage = apiStyle === "google-models" ? root.usageMetadata : root.usage;
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return undefined;
+  const u = usage as Record<string, unknown>;
+
+  switch (apiStyle) {
+    case "openai-chat": {
+      const input = nonNegNumber(u.prompt_tokens);
+      const output = nonNegNumber(u.completion_tokens);
+      return input === undefined || output === undefined ? undefined : { input, output };
+    }
+    case "openai-responses": {
+      const input = nonNegNumber(u.input_tokens);
+      const output = nonNegNumber(u.output_tokens);
+      return input === undefined || output === undefined ? undefined : { input, output };
+    }
+    case "anthropic-messages": {
+      // input_tokens is required (caches alone do not form an input); the cache
+      // counters are billed input, so they fold in. Wrong-typed caches count as
+      // 0, never concatenated.
+      const input = nonNegNumber(u.input_tokens);
+      const output = nonNegNumber(u.output_tokens);
+      if (input === undefined || output === undefined) return undefined;
+      const cacheRead = nonNegNumber(u.cache_read_input_tokens) ?? 0;
+      const cacheCreation = nonNegNumber(u.cache_creation_input_tokens) ?? 0;
+      return { input: input + cacheRead + cacheCreation, output };
+    }
+    case "google-models": {
+      // promptTokenCount already includes cached tokens: no addition. Output is
+      // total−prompt when both are present (a negative derivation is absent),
+      // else candidatesTokenCount.
+      const input = nonNegNumber(u.promptTokenCount);
+      if (input === undefined) return undefined;
+      const total = nonNegNumber(u.totalTokenCount);
+      if (total !== undefined) {
+        const derived = total - input;
+        return derived >= 0 ? { input, output: derived } : undefined;
+      }
+      const candidates = nonNegNumber(u.candidatesTokenCount);
+      return candidates === undefined ? undefined : { input, output: candidates };
+    }
+  }
 }
 
 /**
@@ -487,7 +560,13 @@ export async function callLlm(
   if (findings === undefined) {
     return { ok: false, reason: "invalid-json", detail: "response does not match the review schema" };
   }
-  return { ok: true, findings, verdicts: parseVerdicts(parsed) };
+  const u = extractUsage(json, "openai-chat");
+  return {
+    ok: true,
+    findings,
+    verdicts: parseVerdicts(parsed),
+    ...(u ? { usage: { ...u, calls: 1 } } : {}),
+  };
 }
 
 /**
@@ -549,7 +628,13 @@ export async function callChatTurn(
   }
   const reply = parseChatReply(json, chatFlags);
   if (!reply.ok) return { ok: false, result: reply.result };
-  return { ok: true, text: reply.text ?? "", toolCalls: reply.toolCalls };
+  const u = extractUsage(json, "openai-chat");
+  return {
+    ok: true,
+    text: reply.text ?? "",
+    toolCalls: reply.toolCalls,
+    ...(u ? { usage: { ...u, calls: 1 } } : {}),
+  };
 }
 
 /** Default client timeout for the Ollama pull (pulls can be slow). */
@@ -821,6 +906,16 @@ function agentCallFor(ep: ResolvedEndpoint, o: AgentCallOptions) {
 }
 
 /**
+ * Propagates the agent-loop usage total onto an ok:true result (overwriting any
+ * single-turn value — the total supersedes it). Conditional so no explicit
+ * `usage: undefined` key is written; ok:false results never carry usage.
+ */
+function withAgentUsage(outcome: AgentOutcome, result: LlmResult): LlmResult {
+  if (result.ok && outcome.usage !== undefined) return { ...result, usage: outcome.usage };
+  return result;
+}
+
+/**
  * Runs the agent tool loop against one already-resolved endpoint. The `agent
  * done` summary is logged through runAgent; the loop's final result is
  * returned directly.
@@ -837,7 +932,7 @@ export async function callByStyleAgent(
     { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds },
     { call: agentCallFor(ep, o), log: core.info },
   );
-  return outcome.result;
+  return withAgentUsage(outcome, outcome.result);
 }
 
 /**
@@ -912,7 +1007,7 @@ export async function callWithProbeAgent(
   // Explicit style: the user decided; exactly one loop, no probe.
   if (explicitStyle !== undefined && explicitStyle !== "auto") {
     const { outcome } = await runStyle(explicitStyle);
-    return { result: outcome.result, via: explicitStyle };
+    return { result: withAgentUsage(outcome, outcome.result), via: explicitStyle };
   }
 
   // A stale memo must not dead-end the probe: the memoized style goes first,
@@ -940,13 +1035,13 @@ export async function callWithProbeAgent(
       // result may still be ok (fallback success), so this check must come
       // before the ok branch.
       TOOLS_MEMO.set(memoKey, false);
-      return { result: outcome.result, via: style };
+      return { result: withAgentUsage(outcome, outcome.result), via: style };
     }
     if (outcome.result.ok) {
       PROBE_MEMO.set(memoKey, style);
-      return { result: outcome.result, via: style };
+      return { result: withAgentUsage(outcome, outcome.result), via: style };
     }
-    return { result: outcome.result, via: style };
+    return { result: withAgentUsage(outcome, outcome.result), via: style };
   }
 
   // Every tried style failed: report the last failure, name what was tried.

@@ -104,6 +104,28 @@ describe("callMessages", () => {
     expect(body).not.toHaveProperty("response_format");
   });
 
+  it("attaches calls:1 usage with cache tokens folded into input; absent otherwise", async () => {
+    stubFetch(() =>
+      json(
+        200,
+        okMessages('{"findings":[]}', {
+          usage: { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
+        }),
+      ),
+    );
+    const withUsage = await callMessages(fakeMessagesEp(), msgs(), opts());
+    expect(withUsage).toEqual({
+      ok: true,
+      findings: [],
+      verdicts: { pairs: [], links: [], malformed: 0 },
+      usage: { input: 12, output: 2, calls: 1 },
+    });
+    stubFetch(() => json(200, okMessages('{"findings":[]}')));
+    const withoutUsage = await callMessages(fakeMessagesEp(), msgs(), opts());
+    expect(withoutUsage.ok).toBe(true);
+    expect(withoutUsage).not.toHaveProperty("usage");
+  });
+
   it("joins content[].text blocks and parses findings", async () => {
     stubFetch(() =>
       json(200, {
@@ -218,6 +240,13 @@ describe("callMessagesTurn", () => {
     await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), { allowTools: true, allowFormat: true });
     const body = lastBody();
     expect(body).not.toHaveProperty("response_format");
+  });
+
+  it("turn attaches calls:1 usage from the envelope", async () => {
+    stubFetch(() => json(200, okMessages('{"findings":[]}', { usage: { input_tokens: 6, output_tokens: 1 } })));
+    const r = await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.usage).toEqual({ input: 6, output: 1, calls: 1 });
   });
 
   it("translates tool_use echo and tool_result blocks (is_error only when set)", async () => {

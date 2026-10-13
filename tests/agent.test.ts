@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentReply } from "../src/llm.js";
+import type { LlmUsage } from "../src/llm.js";
 import type { Conversation, ToolCall } from "../src/agent-types.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import { capToolResult, runAgent } from "../src/agent.js";
@@ -23,6 +24,9 @@ function tc(id: string, name: string, args: unknown): ToolCall {
 }
 function okText(text: string, toolCalls: ToolCall[] = [], rawItems?: unknown[]): AgentReply {
   return rawItems === undefined ? { ok: true, text, toolCalls } : { ok: true, text, toolCalls, rawItems };
+}
+function okUsage(text: string, toolCalls: ToolCall[], usage: LlmUsage): AgentReply {
+  return { ok: true, text, toolCalls, usage };
 }
 function fail(status: number): AgentReply {
   return { ok: false, result: { ok: false, reason: "http-error", detail: `HTTP ${status}: nope`, status } };
@@ -447,5 +451,60 @@ describe("runAgent", () => {
     expect(out.stop).toBe("budget");
     expect(out.probeAdvance).toBe(false);
     expect(h.ncalls()).toBe(1);
+  });
+
+  it("sums usage across turns, skipping absent turns (exact total incl. calls)", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const read = (id: string) => [tc(id, "read_file", { path: "a.txt" })];
+    const h = harness(root, [
+      okUsage("", read("1"), { input: 1, output: 1, calls: 1 }),
+      okUsage("", read("2"), { input: 2, output: 2, calls: 1 }),
+      okText("", read("3")),
+      okUsage("", read("4"), { input: 3, output: 3, calls: 1 }),
+      okUsage(FINDINGS, [], { input: 4, output: 4, calls: 1 }),
+    ]);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.stop).toBe("final");
+    expect(out.turns).toBe(5);
+    expect(out.usage).toEqual({ input: 10, output: 10, calls: 4 });
+  });
+
+  it("carries no usage key when nothing observed", async () => {
+    const root = tempRoot();
+    const h = harness(root, [okText(FINDINGS)]);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.result).toEqual({ ok: true, findings: [] });
+    expect(out).not.toHaveProperty("usage");
+  });
+
+  it("contributing turns then a failure: outcome accumulates, failed result carries no usage", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(root, [
+      okUsage("", [tc("1", "read_file", { path: "a.txt" })], { input: 5, output: 2, calls: 1 }),
+      fail(500),
+    ]);
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.stop).toBe("error");
+    expect(out.result.ok).toBe(false);
+    expect(out.result).not.toHaveProperty("usage");
+    expect(out.usage).toEqual({ input: 5, output: 2, calls: 1 });
+  });
+
+  it("a raced timeout contributes no usage (outcome absent)", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = tempRoot();
+      const h = harness(root, [okUsage(FINDINGS, [], { input: 9, output: 9, calls: 1 })], { maxSeconds: 30 });
+      h.hooks.call = () => new Promise<AgentReply>(() => {});
+      const p = runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const out = await p;
+      expect(out.stop).toBe("budget");
+      expect(out).not.toHaveProperty("usage");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
