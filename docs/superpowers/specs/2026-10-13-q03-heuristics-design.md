@@ -71,10 +71,10 @@ export function addedLines(hunks: string): string[]; // maps contentText over hu
     matched-pair quote-strip, trim again, is not a placeholder; AND (c) the value
     is not obviously non-secret: not pure numeric (`/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/`),
     not boolean (`/^(true|false|yes|no|on|off)$/i`, `0`/`1` covered by numeric),
-    not a credential-less URL (`scheme://` with no `@` before the first `/`).
+    not a credential-less URL (`scheme://` with no `@` in the authority, i.e. between `://` and the next `/` — a `@` before any path `/` means userinfo and stays real).
     So `PORT=3000`, `DEBUG=false`, `MAX_TOKENS=4096`, `PRIVATE_MODE=false`,
     `PASSWORD_MIN_LENGTH=8`, `TOKEN_URL=https://api.acme.io` are silent, while
-    `DB_PASS=hunter2`, `JWT_SIGNING_KEY=x`, `GITHUB_TOKEN=ghp_…` flag.
+    `DB_PASS=hunter2`, `JWT_SIGNING_KEY=k8s-sign-01`, `GITHUB_TOKEN=ghp_…` flag. (If the example value were bare `x`, the `/^x+$/i` placeholder shape would silence it — examples use real-shaped values.)
     `*_KEY_ID` with AKIA values flags via the `ACCESS_KEY` substring (matches
     scanner behavior for key IDs — accepted, stated). Any added line carrying
     a private-key marker also flags (PEM blocks in env), independent of key names.
@@ -82,7 +82,7 @@ export function addedLines(hunks: string): string[]; // maps contentText over hu
   literals `changeme`, `change-me`, `example`, `sample`, `test`, `testing`, `xxx`,
   `password`, `password123`, `123456`, `placeholder`, `none`;
   anchored patterns: value contains `EXAMPLE_NOT_A_SECRET`, or starts with `AKIAIOSFODNN7EXAMPLE` / `ghp_EXAMPLE` (case-insensitive) — worked example: `DB_PASSWORD=x@db.example.com` matches neither, so with its secret key it flags (fail-safe toward detection);
-  shape patterns `/^x+$/i`, `/^<[^>]*>$/`, `/^${...}$/` (literal `$`, `{`, `}` with any non-`}` inside), `/^\*+$/`.
+  shape patterns `/^x+$/i`, `/^<[^>]*>$/`, `/^\$\{[^}]*\}$/` (literal `$`, `{`, any non-`}`, literal `}`), `/^\*+$/`.
   Anything else is real. Judgment call recorded: a real weak password (`password123`) is silent — the false-positive-cost choice the policy mandates. Evasion by novel placeholders accepted (scanners backstop real-shaped secrets).
 - **Message text UNCHANGED** (`Sensitive file path changed: ${file}` —
   emission itself is now the evidence-backed claim; avoids pin churn;
