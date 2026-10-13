@@ -10,8 +10,7 @@ Heuristic-only findings without direct secret evidence stop existing
 entirely — not emitted, not downgraded. Four categories from the binding
 policy: deletions, public certificates, placeholders, unchanged TODO context
 lines. The audit's cases (deleted `certs/public.pem` high, TODO on unchanged
-context lines) emit nothing; a newly added private key and a real-value
-`.env` assignment still flag. Secret scanners (gitleaks/trivy/semgrep) own
+context lines) emit nothing; a newly added private key and a secret-shaped `.env` assignment with a real value still flags. Secret scanners (gitleaks/trivy/semgrep) own
 content-secrets everywhere and are the backstop — fastpath keeps only the
 evidence-backed tripwire.
 
@@ -33,7 +32,7 @@ export function runL0(files: FileDiff[], o?: { hasManifestFor?: (lockfile: strin
 // fastpath.ts — new pure helpers (exported for units)
 export function hasPrivateKeyMarker(addedLines: string[]): boolean;
 export function isPlaceholderValue(value: string): boolean;
-export function contentText(raw: string): string | undefined; // one shared classifier: text without prefix for content lines, undefined for ` `, `-`, `\`, `@@`. addedLines() maps it; todoMarkers applies it inline while counting lines. // "+" lines + unprefixed headerless-content lines; skips " ", "-", "\\" Single classification rule. Also applied inline in todoMarkers (which needs line numbers) — one rule, two call sites, no divergent filters.
+export function contentText(raw: string): string | undefined; // one shared classifier: content text without prefix, or undefined for blank/context/removed/header lines. addedLines() maps it; todoMarkers applies it inline while counting new-file lines.
 // diff.ts — unchanged (FileDiff.deleted?: boolean already exists, Q02)
 ```
 
@@ -139,14 +138,10 @@ gating (`deleted` continue, three helpers, `sensitive-path` rewrite,
 `isSensitivePath`/`ENV_TEMPLATES`/message unchanged, helper + matrix units,
 fastpath pin rework); (ii) TODO add-only + Q02-pin rework + evals + docs
 (`todoMarkers` line filter, main.test `:1257` rework + silence variant,
-evals pair, README heuristic-behavior note). Task (ii) consumes (i)'s
+evals pair, README heuristic-behavior note (rewords README:170 "a path match is not proof" to the content-gated rule; keeps heuristic confidence 50 by decision)). Task (ii) consumes (i)'s
 helpers; no parallel work. Single task also acceptable if the implementer
 prefers — controller decides at plan time.
 
-- **README.** The `README:170` note ("a path match is not proof") is reworded
-  to the content-gated rule (emission now requires added-line evidence);
-  heuristic `confidence: 50` is kept by decision (the number describes the
-  claimant, not the proof).
 ## 7. Constraints and residuals
 
 No new runtime dependencies, no new action inputs, stable namespace
