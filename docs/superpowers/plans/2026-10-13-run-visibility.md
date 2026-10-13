@@ -32,7 +32,7 @@
 ### Task 78: aggregate usage from adapters to one slowPath line
 
 **Files:**
-- Modify: `src/llm.ts` (`LlmUsage` + `extractUsage` + its 2 call-site attaches + `AgentReply.usage?`), `src/adapters/google.ts` + `src/adapters/messages.ts` + `src/adapters/responses.ts` (2 call-site attaches each), `src/agent.ts` (accumulate in `callWithDeadline` non-raced branch, attach total in `finish()`, propagate in `callByStyleAgent`/`callWithProbeAgent` onto ok:true results), `src/main.ts` (`slowPath` sum + `note()`)
+- Modify: `src/llm.ts` (`LlmUsage{input,output,calls}` + `extractUsage(body, apiStyle: ResolvedApiStyle)` exported + its 2 call-site attaches + `AgentReply.usage?` + `LlmResult` ok:true gains `usage?: LlmUsage` + `withAgentUsage(outcome, result)` propagation in `callByStyleAgent` (`:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`)), `src/adapters/google.ts` + `src/adapters/messages.ts` + `src/adapters/responses.ts` (2 call-site attaches each), `src/agent.ts` (accumulate at each `callWithDeadline` receive point after the raced guard, attach total in `finish()`), `src/main.ts` (`slowPath` sum + `note()`)
 - Test: `tests/llm.test.ts` (extraction present/absent/partial/non-object per style family), `tests/adapters-google.test.ts` + `tests/adapters-messages.test.ts` + `tests/adapters-responses.test.ts` (usage fixtures: present exact, absent unchanged), `tests/agent.test.ts` (mixed-turn sum, raced-timeout exclusion), `tests/main.test.ts` (note exact string + silence pin)
 - Rebuild: `dist/index.js`
 
@@ -43,15 +43,16 @@
 **Exact behavior:**
 - `extractUsage(body, apiStyle): {input,output} | undefined` — per spec §4 mappings (chat prompt/completion; responses input/output; messages input+caches/output with input_tokens required; google prompt/total−prompt-or-candidates); non-object → absent; partial/non-finite/negative → absent; Google cached no-addition.
 - Attach `calls: 1` at each call site (extractor returns shape only).
-- Agent: accumulate non-raced ok `AgentReply.usage` in `callWithDeadline` locals; `finish()` attaches total iff contributions > 0; `call*Agent` copies `outcome.usage` onto ok:true results (conditional, no explicit undefined key); ok:false never carries.
+- Agent: accumulate non-raced ok `AgentReply.usage` (with `calls`) at each `callWithDeadline` receive point AFTER the raced guard — never inside `.then` callbacks, so late dangling resolutions cannot add post-`finish()`; `finish()` attaches total iff contributions > 0; `callByStyleAgent` (`llm.ts:828`) and all 4 `callWithProbeAgent` returns (`:915,:943,:947,:949`) copy `outcome.usage` onto ok:true results via one `withAgentUsage(outcome, result)` helper (conditional, no explicit undefined key); ok:false never carries.
 - `slowPath`: read `result.usage`; emit `lupa: llm usage input=<n> output=<m> tokens (calls=<k>)` via `note()` after verdict post-processing on success returns; zero contributions → no line.
 - Numbers only everywhere. `Analysis` interface, fakes, prompts, budgets, gates untouched.
 
 - [ ] **Step 1: Write the failing tests**
-  - Extraction: 4 families × present-exact / absent / partial / non-object.
-  - Agent: mixed present/absent turns sum; raced timeout excluded; outcome absent when zero.
+  - Extraction: 4 families × present-exact / absent / partial / non-object; messages cache fold + caches-alone-absent; Google total−prompt + candidates fallback + negative-derived absent; extractor returns `{input,output}`, attach points add `calls: 1`.
+  - Agent: five-turn mixed present/absent sum (exact total incl. `calls`); raced timeout excluded incl. a late-resolution-observability case (dangling resolve after `finish` adds nothing); outcome absent when zero.
+  - Eval silence: fake-Analysis run (no usage, as the harness provides) emits no `llm usage` line in log or summary (positive silence assertion, not just green evals).
   - slowPath: exact note string; silence (no line) on no-usage/agent-skip/failure.
-  - No updates to existing pins (absent-when-missing proves itself).
+  - No updates to existing pins (absent-when-missing proves itself) + NEW `not.toHaveProperty("usage")` assertions on absent paths (`toEqual` ignores undefined keys, so green alone proves nothing).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -93,7 +94,7 @@ git commit -m "feat: log aggregate LLM token usage per run"
 - Privileged template, code, `dist/`, inputs, evals untouched.
 
 - [ ] **Step 1: Write the failing tests**
-  - Presence/shape pins per Exact behavior.
+  - Presence/shape pins per Exact behavior; guard-vocabulary pin (`== 'failure'`, skipped stays silent — cite outcome semantics); note-step echoes-only pin (step has only name/if/run keys, no exit/continue-on-error/false).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
