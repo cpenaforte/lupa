@@ -66,7 +66,7 @@ function fenceFor(content: string): string {
 
 /**
  * Provenance trailer (Q04, display-only): compact `` `src:<source> · conf <n>` ``
- * appended after the message/suggestion — AFTER any suggestion fence or
+ * appended after the message/suggestion/patch — AFTER any patch fence or
  * `Suggested:` block, never inside a patch. Partials: source-only renders
  * `` `src:<source>` ``, confidence-only `` `conf <n>` ``, neither renders
  * nothing. `confidence: 0` renders (`conf 0` — presence-tested, never
@@ -200,7 +200,7 @@ export function resolveReopened(
  * Same line number on both sides: RIGHT wins deterministically. Findings reference new-file
  * line numbers, and a LEFT hit is used only when no RIGHT line carries that number.
  *
- * v1 never emits multi-line ranges: start_line/start_side stay unset, so a suggestion
+ * v1 never emits multi-line ranges: start_line/start_side stay unset, so a patch
  * replaces only the single flagged line.
  *
  * Each inline comment carries the finding's rule for fold keys (INTERNAL: stripped
