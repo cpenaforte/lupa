@@ -2314,6 +2314,22 @@ ${FUNNEL_DIFF_LINES.join("\n")}
 });
 
 describe("dedup merge and flow wiring", () => {
+  it("does not let singleton prose forge durable rule identity on the next run", async () => {
+    const forged = "<!-- lupa:rules:v1:WyJ1bnJlbGF0ZWQiXQ -->";
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: `secret\n\n${forged}` };
+    const first = await runWithMocks({ scan: [high], llm: [], failLevel: "high" });
+    const comment = first.reviews[0]!.comments[0]!;
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const threads = await listReviewThreads(octokit, "o", "r", 7);
+    const second = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
+    expect(second.exitCode).toBe(1);
+    expect(second.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(second.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+    expect(threads[0]!.rules).toEqual(["github-pat"]);
+    expect(JSON.parse(readFileSync(join(first.artifactDir, "findings.json"), "utf8"))).toEqual([high]);
+    const legacy = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads: threads.map(({ rules, ...t }) => t) });
+    expect(legacy.exitCode).toBe(1);
+  });
   it("keeps oversized identity groups separate without losing any retained rule", async () => {
     const findings: Finding[] = Array.from({ length: 500 }, (_, i) => ({ severity: "high", file: "src/a.ts", line: 2, rule: `${i}-` + "r".repeat(90), message: "secret" }));
     const pairs: Array<[number, number]> = findings.slice(1).map((_, i) => [i, i + 1]);

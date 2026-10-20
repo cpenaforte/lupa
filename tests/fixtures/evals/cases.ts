@@ -136,7 +136,7 @@ function summaryFor(finding: { severity: string; file: string; line: number; rul
 function inlinePayload(finding: typeof deletionFinding, side: "LEFT" | "RIGHT") {
   return {
     commit_id: "a".repeat(40), body: "lupa: 1 finding(s).", event: "COMMENT" as const,
-    comments: [{ path: finding.file, line: finding.line, side, body: `**${finding.severity}** [${finding.rule}] ${finding.message}` }],
+    comments: [{ path: finding.file, line: finding.line, side, body: `**${finding.severity}** [${finding.rule}] ${finding.message}\n\n<!-- lupa:rules:v1:WyJyZW1vdmVkLXVuc2FmZS1icmFuY2giXQ -->` }],
   };
 }
 
@@ -154,7 +154,7 @@ const authzReviewPayload = {
     path: "src/auth.ts",
     line: 2,
     side: "RIGHT" as const,
-    body: "**warning** [authorization-missing] " + authzFinding.message,
+    body: "**warning** [authorization-missing] " + authzFinding.message + "\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->",
   }],
 };
 
@@ -202,7 +202,7 @@ export const evalCases: readonly EvalCase[] = [
             path: "src/auth.ts",
             line: 2,
             side: "RIGHT",
-            body: "**warning** [authorization-missing] " + authzFinding.message,
+            body: "**warning** [authorization-missing] " + authzFinding.message + "\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->",
           }],
         },
       },
@@ -229,7 +229,7 @@ export const evalCases: readonly EvalCase[] = [
             path: "src/archive.ts",
             line: 2,
             side: "RIGHT",
-            body: "**warning** [shell-argument-interpolation] " + commandFinding.message,
+            body: "**warning** [shell-argument-interpolation] " + commandFinding.message + "\n\n<!-- lupa:rules:v1:WyJzaGVsbC1hcmd1bWVudC1pbnRlcnBvbGF0aW9uIl0 -->",
           }],
         },
       },
@@ -409,7 +409,7 @@ export const evalCases: readonly EvalCase[] = [
           commit_id: HEAD_SHA,
           body: "lupa: 1 finding(s).",
           event: "REQUEST_CHANGES",
-          comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**high** [missing-auth] " + highFinding.message }],
+          comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**high** [missing-auth] " + highFinding.message + "\n\n<!-- lupa:rules:v1:WyJtaXNzaW5nLWF1dGgiXQ -->" }],
         },
       },
     },

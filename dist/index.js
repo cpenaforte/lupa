@@ -27659,8 +27659,6 @@ async function publishReview(a) {
     warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
   const identityMarkers = /* @__PURE__ */ new Map();
   const groups = proposedGroups.flatMap((group) => {
-    if (group.members.length === 1)
-      return [group];
     const marker = memberRuleMarker([...new Set(group.members.map((i) => fullSet[i].rule))]);
     const largestBody = Math.max(...["LEFT", "RIGHT"].map((side) => Buffer.byteLength(formatBody(group.finding, side, true), "utf8")));
     if (largestBody + Buffer.byteLength(marker, "utf8") + 2 > THREAD_BODY_BYTES) {

@@ -98,7 +98,7 @@ describe("synthetic bundle regression cases", () => {
     assertCommonCaseContract(testCase, result);
     expect(result.publications[0]).toMatchObject({ path: "review", pr: 17, payload: { comments: [{
       path: "src/legacy.ts", line: 3, side: "LEFT",
-      body: "**warning** [removed-unsafe-branch] The removed legacy branch bypassed validation.",
+      body: "**warning** [removed-unsafe-branch] The removed legacy branch bypassed validation.\n\n<!-- lupa:rules:v1:WyJyZW1vdmVkLXVuc2FmZS1icmFuY2giXQ -->",
     }] } });
   });
 
@@ -169,7 +169,7 @@ describe("synthetic bundle regression cases", () => {
     expect(result.gatewayCalls.filter(({ method }) => method === "findPrsByHead")).toHaveLength(1);
     expect(result.publications[0]).toMatchObject({ path: "review", pr: 17, payload: {
       commit_id: "a".repeat(40),
-      comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**warning** [authorization-missing] " + authzFinding.message }],
+      comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**warning** [authorization-missing] " + authzFinding.message + "\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->" }],
     } });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -263,7 +263,7 @@ describe("synthetic bundle regression cases", () => {
       path: "src/auth.ts",
       line: 2,
       side: "RIGHT",
-      body: "**high** [missing-auth] " + highFinding.message,
+      body: "**high** [missing-auth] " + highFinding.message + "\n\n<!-- lupa:rules:v1:WyJtaXNzaW5nLWF1dGgiXQ -->",
     });
     expect(result.outcome.exitCode).toBe(1);
     expect(fetchMock).not.toHaveBeenCalled();

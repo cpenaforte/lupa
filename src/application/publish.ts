@@ -111,8 +111,9 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
   const identityMarkers = new Map<Finding, string>();
   // If the complete inline body cannot carry every member identity within
   // the byte bound, retain separate findings with their individual markers.
+  // Singletons also need renderer-owned identity: finding prose may resemble
+  // a terminal protocol marker and must never become authoritative metadata.
   const groups = proposedGroups.flatMap((group) => {
-    if (group.members.length === 1) return [group];
     const marker = memberRuleMarker([...new Set(group.members.map((i) => fullSet[i]!.rule))]);
     const largestBody = Math.max(...(["LEFT", "RIGHT"] as const).map((side) => Buffer.byteLength(formatBody(group.finding, side, true), "utf8")));
     if (largestBody + Buffer.byteLength(marker, "utf8") + 2 > THREAD_BODY_BYTES) {

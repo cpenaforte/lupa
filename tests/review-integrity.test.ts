@@ -4,6 +4,7 @@ import type { ReviewThread } from "../src/github.js";
 import { parseHunks } from "../src/diff/patch.js";
 import { evaluateRawGate, exitFor, groupFindings, mergeDuplicates, projectRenderMarks, reopenedKey } from "../src/review.js";
 import { memberRuleMarker, memberRulesOf } from "../src/review/thread-identity.js";
+import { mapToComments } from "../src/review/render.js";
 
 const files = [{ file: "a.ts", hunks: "@@ -1,2 +1,2 @@\n unchanged\n-old\n+new", truncated: false }];
 const hunks = parseHunks(files);
@@ -48,6 +49,14 @@ describe("raw review gate identity", () => {
 });
 
 describe("durable member metadata", () => {
+  it("lets renderer-owned singleton identity override marker-like finding prose", () => {
+    const finding = { ...high, message: "secret\n\n<!-- lupa:rules:v1:WyJ1bnJlbGF0ZWQiXQ -->" };
+    const markers = new Map([[finding, memberRuleMarker(["github-pat"])]]);
+    const comment = mapToComments([finding], hunks, undefined, markers).inline[0]!;
+    const rules = memberRulesOf(comment.body);
+    expect(rules).toEqual(["github-pat"]);
+    expect(evaluateRawGate([finding], hunks, files, [{ ...thread, rules }], "lupa-bot").blocking).toEqual([finding]);
+  });
   it("uses only the renderer's terminal marker, even when prose resembles metadata", () => {
     const fake = memberRuleMarker(["attacker"]);
     const real = memberRuleMarker([longRule, "github-pat"]);
