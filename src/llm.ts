@@ -1,5 +1,5 @@
-import type { Finding } from "./fastpath.js";
-import { stripProvenance } from "./fastpath.js";
+import type { Finding } from "./domain/finding.js";
+import { stripProvenance } from "./domain/finding.js";
 import type { Conversation, ToolCall } from "./agent-types.js";
 import { PR_REVIEW_SCHEMA } from "./prompt.js";
 import { buildEndpointForStyle } from "./providers.js";
@@ -10,6 +10,9 @@ import { callResponses, callResponsesTurn } from "./adapters/responses.js";
 import { runAgent, type AgentOutcome } from "./agent.js";
 import type { ToolContext } from "./agent-tools.js";
 import * as core from "@actions/core";
+import { redact } from "./domain/text.js";
+
+export { redact } from "./domain/text.js";
 
 export class InvalidJsonError extends Error {}
 export class OllamaMissingError extends Error {}
@@ -319,12 +322,6 @@ function responseFormatFor(provider: string): ResponseFormat | undefined {
   if (FULL_SCHEMA_PROVIDERS.has(provider)) return { type: "json_schema", json_schema: PR_REVIEW_SCHEMA };
   if (provider === "anthropic") return undefined;
   return { type: "json_object" };
-}
-
-// Requires a non-empty key: callLlm's early no-key return guarantees it, and ensureOllama guards
-// empty keys in its scrub wrapper, so split("") never runs.
-export function redact(text: string, key: string): string {
-  return text.split(key).join("[REDACTED]");
 }
 
 /**

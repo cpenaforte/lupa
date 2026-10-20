@@ -3,7 +3,7 @@ import type { Conversation, ToolCall } from "./agent-types.js";
 import { executeTool } from "./agent-tools.js";
 import type { ToolContext } from "./agent-tools.js";
 import { parseContent, toFindings } from "./llm.js";
-import { stripProvenance } from "./fastpath.js";
+import { stripProvenance } from "./domain/finding.js";
 import type { AgentReply, LlmResult, LlmUsage } from "./llm.js";
 
 export interface AgentBudget {

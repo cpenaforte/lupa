@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Finding } from "./fastpath.js";
+import type { Finding } from "./domain/finding.js";
 
 export interface L2Tool {
   name: string;

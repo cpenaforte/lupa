@@ -12,10 +12,12 @@ import {
   readPrMeta,
   truncateDiff,
   writePrMeta,
-  type FileDiff,
-  type PrMeta,
 } from "./diff.js";
-import { capText, MSG_CAP, RULE_CAP, runL0, type Finding } from "./fastpath.js";
+import { runL0 } from "./fastpath.js";
+import type { FileDiff, PrMeta } from "./domain/diff.js";
+import type { Finding } from "./domain/finding.js";
+import { sanitizeFinding, unsafePath } from "./domain/finding.js";
+import type { InlineComment, ReviewPayload } from "./domain/review.js";
 import { runL2 } from "./l2.js";
 import { TOOL_DEFS, type ToolContext } from "./agent-tools.js";
 import { AGENT_LIMITS, type Conversation } from "./agent-types.js";
@@ -44,9 +46,11 @@ import {
 } from "./llm.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened, type InlineComment, type ReviewPayload } from "./review.js";
+import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened } from "./review.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 import { readCappedFileSync } from "./artifact-limits.js";
+
+export { sanitizeFinding } from "./domain/finding.js";
 
 /** Everything the run needs from the environment. Built by readRunEnv() in production. */
 export interface RunEnv {
@@ -163,8 +167,6 @@ interface EventFields {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const SEVERITIES: ReadonlySet<string> = new Set(["info", "warning", "high"]);
-const SUGGESTION_CAP = 4000;
-const FILE_CAP = 200;
 /** Emitted in place of L2 execution on fork PRs with secrets in scope. */
 const L2_SKIPPED: Finding = {
   severity: "info",
@@ -391,72 +393,6 @@ export function readFindings(dir: string, maxBytes: number = DEFAULT_MAX_ARTIFAC
 
 function writeFindings(dir: string, findings: Finding[]): void {
   writeFileSync(join(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
-}
-
-// ---------------------------------------------------------------------------
-// Finding sanitizing (R7). LLM output and the privileged artifact are untrusted text.
-// ---------------------------------------------------------------------------
-
-/** C0 and DEL controls except TAB and LF (kept for multi-line messages and suggestions). */
-const CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
-/** Every C0 and DEL control, for single-line fields (file, rule). */
-const CONTROL_ALL = /[\u0000-\u001f\u007f]/g;
-
-/** Absolute, drive-qualified, or parent-traversing paths are never placed on a diff line. */
-function unsafePath(file: string): boolean {
-  return (
-    file.startsWith("/") ||
-    file.startsWith("\\") ||
-    /^[A-Za-z]:[\\/]/.test(file) ||
-    file.split(/[\\/]/).includes("..")
-  );
-}
-
-/**
- * Strips control characters, caps lengths, and turns unsafe paths into repository-level notes
- * (general body). Unsafe-path check runs after the control strip, before the length cap.
- *
- * Paths longer than FILE_CAP (200 chars) are intentionally capped and then fall back to general
- * notes: a truncated path matches no diff line, so mapToComments never places it inline.
- */
-export function sanitizeFinding(f: Finding): Finding {
-  let file = f.file.replace(CONTROL_ALL, "");
-  let message = f.message.replace(CONTROL_KEEP_TEXT, "");
-  let line = f.line;
-  if (file !== "" && unsafePath(file)) {
-    message = `artifact path rejected: ${message}`;
-    file = "";
-    line = undefined;
-  }
-  const out: Finding = {
-    severity: f.severity,
-    file: capText(file, FILE_CAP),
-    rule: capText(f.rule.replace(CONTROL_ALL, ""), RULE_CAP),
-    message: capText(message, MSG_CAP),
-  };
-  if (line !== undefined) out.line = line;
-  if (f.suggestion !== undefined) {
-    out.suggestion = capText(f.suggestion.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
-  }
-  if (f.patch !== undefined) {
-    out.patch = capText(f.patch.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
-  }
-  if (f.source !== undefined) {
-    const stripped = f.source.replace(CONTROL_ALL, "");
-    if (stripped !== "") out.source = capText(stripped, RULE_CAP);
-  }
-  if (f.confidence !== undefined) out.confidence = f.confidence;
-  if (f.evidence !== undefined) {
-    const evidence: NonNullable<Finding["evidence"]> = {};
-    if (f.evidence.analyzer !== undefined) {
-      evidence.analyzer = capText(f.evidence.analyzer.replace(CONTROL_ALL, ""), RULE_CAP);
-    }
-    if (f.evidence.snippet !== undefined) {
-      evidence.snippet = capText(f.evidence.snippet.replace(CONTROL_KEEP_TEXT, ""), MSG_CAP);
-    }
-    out.evidence = evidence;
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------

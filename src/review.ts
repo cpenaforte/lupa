@@ -1,33 +1,12 @@
-import type { Finding } from "./fastpath.js";
-import { MSG_CAP, RULE_CAP, TRUNC_MARK, capText } from "./fastpath.js";
+import type { Finding } from "./domain/finding.js";
+import { MSG_CAP, RULE_CAP, TRUNC_MARK, capText } from "./domain/text.js";
 import type { FailLevel } from "./inputs.js";
 import type { DedupVerdicts } from "./llm.js";
-import type { FileDiff, HunkLine, ParsedHunk } from "./diff.js";
-import { redact } from "./llm.js";
+import type { FileDiff, HunkLine, ParsedHunk } from "./domain/diff.js";
+import { redact } from "./domain/text.js";
+import type { InlineComment, ReviewPayload } from "./domain/review.js";
 
-export interface InlineComment {
-  path: string;
-  line: number;
-  side: "LEFT" | "RIGHT";
-  /** Reserved for v2 multi-line ranges. Never set in v1 (see mapToComments). */
-  start_line?: number;
-  /** Reserved for v2 multi-line ranges. Never set in v1 (see mapToComments). */
-  start_side?: "LEFT" | "RIGHT";
-  body: string;
-  /**
-   * Finding rule, set by mapToComments for fold keys. INTERNAL: main.ts strips
-   * it when building payload.comments, so posted payloads keep today's shape.
-   * Absent (e.g. hand-built comments) means assume blocking in fold marking.
-   */
-  rule?: string;
-}
-
-export interface ReviewPayload {
-  commit_id: string;
-  body: string;
-  event: "COMMENT" | "REQUEST_CHANGES";
-  comments: InlineComment[];
-}
+export type { InlineComment, ReviewPayload } from "./domain/review.js";
 
 function keyOf(side: "LEFT" | "RIGHT", line: number): string {
   return `${side}:${line}`;

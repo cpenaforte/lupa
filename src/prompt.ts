@@ -1,4 +1,4 @@
-import type { Finding } from "./fastpath.js";
+import type { Finding } from "./domain/finding.js";
 
 const SYSTEM = `You are an automated pull request reviewer. Review ONLY the changes in the diff. Three reviewer roles examine the change; report a finding from any of them:
 

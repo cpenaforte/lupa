@@ -24795,6 +24795,8 @@ function readPrMeta(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
 
 // lib/src/fastpath.js
 import { basename as basename2 } from "node:path";
+
+// lib/src/domain/text.js
 var MSG_CAP = 2e3;
 var RULE_CAP = 100;
 var TRUNC_MARK = "\u2026[truncated]";
@@ -24804,15 +24806,71 @@ function capText(s, cap) {
     return s;
   return cps.slice(0, cap - Array.from(TRUNC_MARK).length).join("") + TRUNC_MARK;
 }
-var LARGE_FILE_BYTES = 500 * 1024;
-var TODO_RE = /\b(TODO|FIXME|XXX)\b/;
-var ENV_TEMPLATES = /* @__PURE__ */ new Set([".env.example", ".env.sample", ".env.template"]);
+function redact(text, key) {
+  return text.split(key).join("[REDACTED]");
+}
+
+// lib/src/domain/finding.js
+var SUGGESTION_CAP = 4e3;
+var FILE_CAP = 200;
 function stripProvenance(f) {
   delete f.source;
   delete f.confidence;
   delete f.evidence;
   return f;
 }
+var CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
+var CONTROL_ALL = /[\u0000-\u001f\u007f]/g;
+function unsafePath(file) {
+  return file.startsWith("/") || file.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(file) || file.split(/[\\/]/).includes("..");
+}
+function sanitizeFinding(f) {
+  let file = f.file.replace(CONTROL_ALL, "");
+  let message = f.message.replace(CONTROL_KEEP_TEXT, "");
+  let line = f.line;
+  if (file !== "" && unsafePath(file)) {
+    message = `artifact path rejected: ${message}`;
+    file = "";
+    line = void 0;
+  }
+  const out = {
+    severity: f.severity,
+    file: capText(file, FILE_CAP),
+    rule: capText(f.rule.replace(CONTROL_ALL, ""), RULE_CAP),
+    message: capText(message, MSG_CAP)
+  };
+  if (line !== void 0)
+    out.line = line;
+  if (f.suggestion !== void 0) {
+    out.suggestion = capText(f.suggestion.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
+  }
+  if (f.patch !== void 0) {
+    out.patch = capText(f.patch.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
+  }
+  if (f.source !== void 0) {
+    const stripped = f.source.replace(CONTROL_ALL, "");
+    if (stripped !== "")
+      out.source = capText(stripped, RULE_CAP);
+  }
+  if (f.confidence !== void 0)
+    out.confidence = f.confidence;
+  if (f.evidence !== void 0) {
+    const evidence = {};
+    if (f.evidence.analyzer !== void 0) {
+      evidence.analyzer = capText(f.evidence.analyzer.replace(CONTROL_ALL, ""), RULE_CAP);
+    }
+    if (f.evidence.snippet !== void 0) {
+      evidence.snippet = capText(f.evidence.snippet.replace(CONTROL_KEEP_TEXT, ""), MSG_CAP);
+    }
+    out.evidence = evidence;
+  }
+  return out;
+}
+
+// lib/src/fastpath.js
+var LARGE_FILE_BYTES = 500 * 1024;
+var TODO_RE = /\b(TODO|FIXME|XXX)\b/;
+var ENV_TEMPLATES = /* @__PURE__ */ new Set([".env.example", ".env.sample", ".env.template"]);
 function isSensitivePath(file) {
   const name = basename2(file);
   if (ENV_TEMPLATES.has(name))
@@ -25791,6 +25849,1136 @@ async function executeTool(name, args, ctx, limits) {
     }
   } catch (e) {
     return errorResult(e instanceof Error ? e.message : String(e));
+  }
+}
+
+// lib/src/review.js
+function keyOf(side, line) {
+  return `${side}:${line}`;
+}
+function isValidLine(v) {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1;
+}
+function hasSuggestion(f) {
+  return typeof f.suggestion === "string" && f.suggestion !== "";
+}
+function hasPatch(f) {
+  return typeof f.patch === "string" && f.patch.trim() !== "" && !f.patch.endsWith(TRUNC_MARK);
+}
+function fenceFor(content) {
+  let longest = 0;
+  for (const run2 of content.matchAll(/`+/g))
+    longest = Math.max(longest, run2[0].length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+function provenanceTrailer(f) {
+  const parts = [];
+  if (f.source !== void 0)
+    parts.push(`src:${f.source}`);
+  if (f.confidence !== void 0)
+    parts.push(`conf ${f.confidence}`);
+  return parts.length === 0 ? "" : `
+
+\`${parts.join(" \xB7 ")}\``;
+}
+function formatBody(f, side, reopened = false) {
+  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
+  if (hasPatch(f)) {
+    const fence = fenceFor(f.patch);
+    if (side === "RIGHT") {
+      body += `
+
+${fence}suggestion
+${f.patch}
+${fence}`;
+    } else {
+      body += `
+
+Suggested replacement (advice only):
+${fence}
+${f.patch}
+${fence}`;
+    }
+  }
+  if (hasSuggestion(f)) {
+    body += `
+
+Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+  }
+  return body + provenanceTrailer(f);
+}
+function indexHunks(hunks) {
+  const index = /* @__PURE__ */ new Map();
+  for (const h of hunks) {
+    let byKey = index.get(h.file);
+    if (byKey === void 0) {
+      byKey = /* @__PURE__ */ new Map();
+      index.set(h.file, byKey);
+    }
+    for (const l of h.lines) {
+      const k = keyOf(l.side, l.line);
+      if (!byKey.has(k))
+        byKey.set(k, l);
+    }
+  }
+  return index;
+}
+function hunkHit(index, file, line) {
+  const byKey = file === "" ? void 0 : index.get(file);
+  if (byKey === void 0)
+    return void 0;
+  return byKey.get(keyOf("RIGHT", line)) ?? byKey.get(keyOf("LEFT", line));
+}
+function reopenedKey(f) {
+  return `${f.rule}\0${f.file}\0${String(f.line)}`;
+}
+function normalizeBot(login) {
+  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
+}
+function resolveReopened(findings, threads, selfLogin) {
+  const self = normalizeBot(selfLogin);
+  const kept = threads.filter((t) => t.isResolved && t.rule !== null && t.authorLogin !== null && normalizeBot(t.authorLogin) === self && (t.line ?? t.originalLine ?? null) !== null);
+  const out = /* @__PURE__ */ new Set();
+  for (const f of findings) {
+    if (typeof f.line !== "number")
+      continue;
+    const rules = new Set(f.rule.split("+"));
+    for (const t of kept) {
+      if (t.path !== f.file)
+        continue;
+      if ((t.line ?? t.originalLine) !== f.line)
+        continue;
+      const threadRules = t.rule.split("+");
+      if (threadRules.some((r) => rules.has(r))) {
+        out.add(reopenedKey(f));
+        break;
+      }
+    }
+  }
+  return out;
+}
+function mapToComments(findings, hunks, reopened) {
+  const index = indexHunks(hunks);
+  const inline = [];
+  const general = [];
+  for (const f of findings) {
+    if (!isValidLine(f.line)) {
+      general.push(f);
+      continue;
+    }
+    const line = f.line;
+    const hit = hunkHit(index, f.file, line);
+    if (hit === void 0) {
+      general.push(f);
+      continue;
+    }
+    const isReopened = reopened?.has(reopenedKey(f)) === true;
+    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
+  }
+  return { inline, general };
+}
+function partitionGate(findings, hunks, files) {
+  const index = indexHunks(hunks);
+  const addFiles = /* @__PURE__ */ new Set();
+  for (const h of hunks) {
+    for (const l of h.lines) {
+      if (l.kind === "add") {
+        addFiles.add(h.file);
+        break;
+      }
+    }
+  }
+  const present = /* @__PURE__ */ new Map();
+  for (const f of files) {
+    if (!present.has(f.file))
+      present.set(f.file, f);
+  }
+  const introduced = [];
+  const general = [];
+  for (const f of findings) {
+    if (isValidLine(f.line)) {
+      const hit = hunkHit(index, f.file, f.line);
+      if (hit !== void 0 && hit.side === "RIGHT" && hit.kind === "add")
+        introduced.push(f);
+      else
+        general.push(f);
+      continue;
+    }
+    if (f.file === "") {
+      general.push(f);
+      continue;
+    }
+    const entry = present.get(f.file);
+    if (entry === void 0 || entry.deleted === true) {
+      general.push(f);
+      continue;
+    }
+    if (entry.hunks === "" || addFiles.has(f.file))
+      introduced.push(f);
+    else
+      general.push(f);
+  }
+  return { introduced, general };
+}
+function eventFor(failLevel, findings) {
+  if (failLevel === "high" && findings.some((f) => f.severity === "high"))
+    return "REQUEST_CHANGES";
+  return "COMMENT";
+}
+function exitFor(failLevel, findings) {
+  if (failLevel === "none")
+    return 0;
+  if (failLevel === "warning")
+    return findings.some((f) => f.severity !== "info") ? 2 : 0;
+  return findings.some((f) => f.severity === "high") ? 1 : 0;
+}
+var FALLBACK_SUMMARY = "lupa: review complete.";
+function redactFindings(findings, secrets) {
+  const keys = secrets.filter((s) => s !== "");
+  return findings.map((f) => {
+    let out = f;
+    for (const key of keys) {
+      out = {
+        ...out,
+        message: redact(out.message, key),
+        file: redact(out.file, key),
+        rule: redact(out.rule, key),
+        ...out.suggestion !== void 0 ? { suggestion: redact(out.suggestion, key) } : {},
+        ...out.patch !== void 0 ? { patch: redact(out.patch, key) } : {},
+        ...out.evidence !== void 0 ? {
+          evidence: {
+            ...out.evidence.analyzer !== void 0 ? { analyzer: redact(out.evidence.analyzer, key) } : {},
+            ...out.evidence.snippet !== void 0 ? { snippet: redact(out.evidence.snippet, key) } : {}
+          }
+        } : {}
+      };
+    }
+    if (out.evidence !== void 0 && out.evidence === f.evidence) {
+      out = { ...out, evidence: { ...out.evidence } };
+    }
+    return out;
+  });
+}
+function locate(f) {
+  if (f.file === "")
+    return "(repository)";
+  return isValidLine(f.line) ? `${f.file}:${f.line}` : f.file;
+}
+function buildFallbackReport(findings, options = {}) {
+  const heading = findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
+  const fullRecords = findings.map((f, index) => {
+    const field = (value) => {
+      const fence = fenceFor(value);
+      return `${fence}text
+${value}
+${fence}`;
+    };
+    const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
+    const provenance = [];
+    if (f.source !== void 0)
+      provenance.push(`- Source:
+${field(f.source)}`);
+    if (f.confidence !== void 0)
+      provenance.push(`- Confidence:
+${field(String(f.confidence))}`);
+    if (f.evidence !== void 0 && (f.evidence.analyzer !== void 0 || f.evidence.snippet !== void 0)) {
+      const parts = [];
+      if (f.evidence.analyzer !== void 0)
+        parts.push(field(`analyzer: ${f.evidence.analyzer}`));
+      if (f.evidence.snippet !== void 0)
+        parts.push(field(f.evidence.snippet));
+      provenance.push(`- Evidence:
+${parts.join("\n")}`);
+    }
+    return [
+      `### Finding ${index + 1}`,
+      "",
+      `- Severity: ${f.severity}`,
+      `- Location:
+${field(locate(f))}`,
+      `- Rule:
+${field(f.rule)}`,
+      `- Message/evidence:
+${field(f.message)}`,
+      ...provenance,
+      `- Suggested remediation (advice only):
+${field(suggestion)}`,
+      ...hasPatch(f) ? [`- Proposed patch (advice only):
+${field(f.patch)}`] : []
+    ].join("\n");
+  });
+  const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
+  const prefixBytes = [0];
+  for (const length of recordBytes) {
+    const previous = prefixBytes[prefixBytes.length - 1];
+    prefixBytes.push(previous + (prefixBytes.length > 1 ? 2 : 0) + length);
+  }
+  const headingBytes = Buffer.byteLength(heading, "utf8");
+  const render = (retained2, marker) => {
+    const records = fullRecords.slice(0, retained2).join("\n\n");
+    if (marker === void 0)
+      return retained2 === 0 ? heading : `${heading}
+
+${records}`;
+    return retained2 === 0 ? `${heading}
+
+${marker}` : `${heading}
+
+${records}
+
+${marker}`;
+  };
+  if (options.maxBytes === void 0) {
+    return render(findings.length);
+  }
+  const maxBytes = options.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    throw new RangeError("maxBytes must be a non-negative safe integer");
+  if (findings.length === 0) {
+    if (headingBytes <= maxBytes)
+      return heading;
+    throw new RangeError("maxBytes is too small for the report heading");
+  }
+  if (headingBytes + 2 + prefixBytes[findings.length] <= maxBytes)
+    return render(findings.length);
+  let retained = -1;
+  let omissionMarker = "";
+  for (let candidateRetained = findings.length - 1; candidateRetained >= 0; candidateRetained--) {
+    const omitted = findings.length - candidateRetained;
+    const marker = `> Omitted: ${omitted} finding(s) omitted because the report output limit was reached.`;
+    const candidateBytes = headingBytes + 2 + prefixBytes[candidateRetained] + (candidateRetained > 0 ? 2 : 0) + Buffer.byteLength(marker, "utf8");
+    if (candidateBytes <= maxBytes) {
+      retained = candidateRetained;
+      omissionMarker = marker;
+      break;
+    }
+  }
+  if (retained < 0)
+    throw new RangeError("maxBytes is too small for the report heading and omission marker");
+  return render(retained, omissionMarker);
+}
+function buildBody(general, summary2, marks) {
+  const head = summary2.trim() === "" ? FALLBACK_SUMMARY : summary2.trim();
+  if (general.length === 0)
+    return head;
+  const reopened = marks?.reopened;
+  const blocking = marks?.blocking;
+  const items = general.map((f) => {
+    const key = reopenedKey(f);
+    const marker = reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
+    let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
+    if (hasPatch(f)) {
+      const fence = fenceFor(f.patch);
+      item += `
+  Suggested replacement (advice only):
+  ${fence}
+  ${f.patch.replace(/\n/g, "\n  ")}
+  ${fence}`;
+    }
+    if (hasSuggestion(f))
+      item += `
+  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+    return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
+  });
+  const outside = general.filter((f) => blocking?.has(reopenedKey(f)) !== true).length;
+  const list = `**Findings not placed inline:**
+${items.join("\n")}`;
+  if (outside === 0)
+    return `${head}
+
+${list}`;
+  return `${head}
+
+**Note:** ${outside} finding(s) below are outside the PR diff and do not block.
+
+${list}`;
+}
+var MERGE_SEVERITY_RANK = { info: 0, warning: 1, high: 2 };
+function mergeable(a, b) {
+  if (a.file !== b.file)
+    return false;
+  if (a.line === void 0 || b.line === void 0)
+    return a.line === void 0 && b.line === void 0;
+  return a.line === b.line;
+}
+function survivor(members) {
+  const first = members[0];
+  let line;
+  for (const m of members) {
+    if (m.line !== void 0) {
+      line = m.line;
+      break;
+    }
+  }
+  const rules = [];
+  for (const m of members)
+    if (!rules.includes(m.rule))
+      rules.push(m.rule);
+  let severity = first.severity;
+  for (const m of members) {
+    if (MERGE_SEVERITY_RANK[m.severity] > MERGE_SEVERITY_RANK[severity])
+      severity = m.severity;
+  }
+  const out = {
+    severity,
+    file: first.file,
+    rule: capText(rules.join("+"), RULE_CAP),
+    message: capText(members.map((m) => `[${m.rule}] ${m.message}`).join("\n\n"), MSG_CAP)
+  };
+  if (line !== void 0)
+    out.line = line;
+  for (const m of members) {
+    if (m.suggestion !== void 0) {
+      out.suggestion = m.suggestion;
+      break;
+    }
+  }
+  for (const m of members) {
+    if (hasPatch(m)) {
+      out.patch = m.patch;
+      break;
+    }
+  }
+  const sources = [];
+  for (const m of members) {
+    if (m.source !== void 0 && !sources.includes(m.source))
+      sources.push(m.source);
+  }
+  if (sources.length > 0)
+    out.source = capText(sources.join("+"), RULE_CAP);
+  let confidence;
+  for (const m of members) {
+    if (m.confidence !== void 0 && (confidence === void 0 || m.confidence > confidence)) {
+      confidence = m.confidence;
+    }
+  }
+  if (confidence !== void 0)
+    out.confidence = confidence;
+  let snippet;
+  const analyzers = [];
+  for (const m of members) {
+    if (m.evidence === void 0)
+      continue;
+    if (snippet === void 0 && m.evidence.snippet !== void 0)
+      snippet = m.evidence.snippet;
+    if (m.evidence.analyzer !== void 0 && !analyzers.includes(m.evidence.analyzer)) {
+      analyzers.push(m.evidence.analyzer);
+    }
+  }
+  if (snippet !== void 0 || analyzers.length > 0) {
+    out.evidence = {
+      ...analyzers.length > 0 ? { analyzer: capText(analyzers.join("+"), RULE_CAP) } : {},
+      ...snippet !== void 0 ? { snippet } : {}
+    };
+  }
+  return out;
+}
+function mergeDuplicates(findings, verdicts) {
+  const parent = findings.map((_, i) => i);
+  const root = (x) => parent[x] === x ? x : parent[x] = root(parent[x]);
+  let dropped = 0;
+  const consider = (a, b) => {
+    if (!Number.isInteger(a) || !Number.isInteger(b)) {
+      dropped += 1;
+      return;
+    }
+    const fa = findings[a];
+    const fb = findings[b];
+    if (fa === void 0 || fb === void 0 || !mergeable(fa, fb)) {
+      dropped += 1;
+      return;
+    }
+    const ra = root(a);
+    const rb = root(b);
+    if (ra !== rb)
+      parent[rb] = ra;
+  };
+  for (const [a, b] of verdicts.pairs)
+    consider(a, b);
+  for (const [a, b] of verdicts.links)
+    consider(a, b);
+  const groups = /* @__PURE__ */ new Map();
+  for (let i = 0; i < findings.length; i++) {
+    const r = root(i);
+    const g = groups.get(r);
+    if (g === void 0)
+      groups.set(r, [i]);
+    else
+      g.push(i);
+  }
+  const ordered = [...groups.values()].sort((x, y) => x[0] - y[0]);
+  const merged = ordered.map((members) => members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])));
+  return { merged, dropped };
+}
+var SEVERITY_RANK = { high: 0, warning: 1, info: 2 };
+function prioritizeFindings(findings) {
+  return findings.map((finding, index) => ({ finding, index })).sort((a, b) => SEVERITY_RANK[a.finding.severity] - SEVERITY_RANK[b.finding.severity] || a.index - b.index).map(({ finding }) => finding);
+}
+function omissionMarkerFor(omitted, maxFindings) {
+  return `> Omitted: ${omitted} finding(s) omitted to fit the ${maxFindings}-finding publication limit.`;
+}
+function truncNoteFor(maxChars) {
+  return `> Note: review body truncated to the ${maxChars}-character limit.`;
+}
+var TRUNC_NOTE_RE = /^> Note: review body truncated to the \d+-character limit\.$/;
+function isTruncNoteLine(line) {
+  return TRUNC_NOTE_RE.test(line);
+}
+var codePointsOf = (s) => Array.from(s).length;
+function isFenceLine(line) {
+  return line.trimStart().startsWith("```");
+}
+function wholeLineCut(candidate) {
+  const idx = candidate.lastIndexOf("\n");
+  return idx === -1 ? candidate : candidate.slice(0, idx);
+}
+function fenceBackup(text) {
+  let lines = text.split("\n");
+  for (; ; ) {
+    let count = 0;
+    let last = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (isFenceLine(lines[i])) {
+        count++;
+        last = i;
+      }
+    }
+    if (count % 2 === 0 || last === -1)
+      return lines.join("\n");
+    lines = lines.slice(0, last);
+  }
+}
+function cutContent(content, budget) {
+  if (codePointsOf(content) <= budget)
+    return content;
+  const candidate = Array.from(content).slice(0, Math.max(0, budget)).join("");
+  return fenceBackup(wholeLineCut(candidate));
+}
+function capBody(body, maxChars, markers) {
+  if (markers.length === 0 && codePointsOf(body) <= maxChars) {
+    let stale = false;
+    for (const line of body.split(/\r?\n/)) {
+      if (isTruncNoteLine(line)) {
+        stale = true;
+        break;
+      }
+    }
+    if (!stale)
+      return body;
+  }
+  const note2 = truncNoteFor(maxChars);
+  const contentLines = [];
+  const lifted = [];
+  for (const line of body.split(/\r?\n/)) {
+    if (isTruncNoteLine(line))
+      continue;
+    if (line.startsWith("> Omitted:")) {
+      if (!markers.includes(line) && !lifted.includes(line))
+        lifted.push(line);
+      continue;
+    }
+    contentLines.push(line);
+  }
+  const content = contentLines.join("\n");
+  const tails = [...markers, ...lifted];
+  const tailsBlock = tails.join("\n");
+  if (codePointsOf(tailsBlock) > maxChars) {
+    throw new RangeError(`capBody: markers (${codePointsOf(tailsBlock)} chars) exceed the ${maxChars}-character limit`);
+  }
+  const headed = (head) => head === "" ? tailsBlock : tails.length === 0 ? head : `${head}
+${tailsBlock}`;
+  if (codePointsOf(headed(content)) <= maxChars)
+    return headed(content);
+  const tail = tails.some((m) => isTruncNoteLine(m)) ? tails : [...tails, note2];
+  const tailBlock = tail.join("\n");
+  if (codePointsOf(tailBlock) > maxChars) {
+    if (tails.length > 0)
+      return tailsBlock;
+    return cutContent(content, maxChars);
+  }
+  const cut = cutContent(content, maxChars - codePointsOf(tailBlock) - 1);
+  return cut === "" ? tailBlock : `${cut}
+${tailBlock}`;
+}
+
+// lib/src/github.js
+var ReadonlyTokenError = class extends Error {
+  status;
+  detail;
+  constructor(message, status, detail = "") {
+    super(message);
+    this.name = "ReadonlyTokenError";
+    this.status = status;
+    this.detail = detail;
+  }
+};
+var StaleHeadError = class extends Error {
+  analyzedSha;
+  liveSha;
+  constructor(analyzedSha, liveSha) {
+    super(`review post skipped: PR head moved (analyzed ${analyzedSha}, live ${liveSha})`);
+    this.name = "StaleHeadError";
+    this.analyzedSha = analyzedSha;
+    this.liveSha = liveSha;
+  }
+};
+var OFF_DIFF = /could not be resolved|part of the diff|line.*(diff|resolve)/i;
+var STALE_SHA = /commit[ _-]id|head[- ]commit|not a valid commit/i;
+function statusOf(e) {
+  const s = e?.status;
+  return typeof s === "number" ? s : void 0;
+}
+function messageOf(e) {
+  const m = e?.message;
+  return typeof m === "string" ? m : "";
+}
+function detailOf(e) {
+  const err = e;
+  let data = "";
+  try {
+    data = JSON.stringify(err?.response?.data ?? "");
+  } catch {
+    data = "";
+  }
+  return `${messageOf(e)} ${data}`;
+}
+function apiMessageOf(e) {
+  const data = e?.response?.data;
+  if (typeof data?.message === "string" && data.message !== "")
+    return data.message;
+  return messageOf(e);
+}
+function positiveInt(v) {
+  return typeof v === "number" && Number.isInteger(v) && v > 0;
+}
+function repoOf() {
+  return context2.repo;
+}
+async function getRepoSize(octokit, owner, repo) {
+  try {
+    const r = await octokit.rest.repos.get({ owner, repo });
+    const size = r.data.size;
+    return typeof size === "number" ? size : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function foldComments(body, comments, blocking, commentKeys) {
+  if (comments.length === 0)
+    return body;
+  const items = comments.map((c, i) => {
+    const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
+    const key = commentKeys?.[i] ?? null;
+    const suffix = key !== null && blocking !== void 0 && !blocking.has(key) ? " (non-blocking)" : "";
+    const head = `- ${c.path}:${c.line}${suffix}`;
+    if (text.trim() === "")
+      return head;
+    return `${head}
+  ${text.replace(/\n/g, "\n  ")}`;
+  });
+  return `${body}
+
+**Findings not placed inline:**
+${items.join("\n")}`;
+}
+function recapFoldedBody(folded, maxChars) {
+  const note2 = truncNoteFor(maxChars);
+  let strippedAny = false;
+  const markers = [];
+  const contentLines = [];
+  for (const line of folded.split(/\r?\n/)) {
+    if (isTruncNoteLine(line)) {
+      strippedAny = true;
+      continue;
+    }
+    if (line.startsWith("> Omitted:")) {
+      if (!markers.includes(line))
+        markers.push(line);
+      continue;
+    }
+    contentLines.push(line);
+  }
+  const content = contentLines.join("\n");
+  const tailed = [...markers, note2];
+  const withNote = capBody(content, maxChars, tailed);
+  if (strippedAny)
+    return withNote;
+  const uncut = content === "" ? tailed.join("\n") : `${content}
+${tailed.join("\n")}`;
+  if (withNote !== uncut)
+    return withNote;
+  return capBody(content, maxChars, markers);
+}
+async function postReview(octokit, pr, payload, opts) {
+  if (opts?.canWrite === false) {
+    throw new ReadonlyTokenError("review post skipped: token cannot write reviews (fork PR)");
+  }
+  const { owner, repo } = repoOf();
+  const commitId = payload.commit_id;
+  let body = payload.body;
+  let comments = payload.comments;
+  let degraded = false;
+  for (; ; ) {
+    try {
+      await octokit.rest.pulls.createReview({
+        owner,
+        repo,
+        pull_number: pr,
+        commit_id: commitId,
+        body,
+        event: payload.event,
+        comments
+      });
+      return { degraded };
+    } catch (e) {
+      const status = statusOf(e);
+      if (status === 403 && !/rate limit/i.test(detailOf(e))) {
+        throw new ReadonlyTokenError("review post refused: token cannot write reviews (HTTP 403)", 403, apiMessageOf(e));
+      }
+      if (status !== 422) {
+        throw new Error(`review post failed${status === void 0 ? "" : ` (HTTP ${status})`}`);
+      }
+      const detail = detailOf(e);
+      if (STALE_SHA.test(detail)) {
+        let head;
+        try {
+          const pull = await octokit.rest.pulls.get({ owner, repo, pull_number: pr });
+          head = pull.data.head.sha;
+        } catch (getErr) {
+          const s = statusOf(getErr);
+          throw new Error(`head sha re-resolve failed${s === void 0 ? "" : ` (HTTP ${s})`}`);
+        }
+        throw new StaleHeadError(commitId, head);
+      }
+      if (!degraded && comments.length > 0 && OFF_DIFF.test(detail)) {
+        body = recapFoldedBody(foldComments(body, comments, opts?.blocking, opts?.commentKeys), opts?.maxBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS);
+        comments = [];
+        degraded = true;
+        continue;
+      }
+      throw new Error("review post rejected (HTTP 422)");
+    }
+  }
+}
+var THREAD_RULE_RE = /^\*\*(\w+)\*\* (?:\*\*reopened\*\* )?\[([^[\]]+)\]/;
+function threadRuleOf(body) {
+  if (typeof body !== "string")
+    return null;
+  const m = THREAD_RULE_RE.exec(body);
+  return m === null ? null : m[2];
+}
+function asThread(n) {
+  const first = n.comments?.nodes?.[0];
+  const login = first?.author?.login;
+  const line = typeof n.line === "number" ? n.line : null;
+  const originalLine = typeof n.originalLine === "number" ? n.originalLine : null;
+  return {
+    authorLogin: typeof login === "string" ? login : null,
+    isResolved: n.isResolved === true,
+    path: typeof n.path === "string" ? n.path : "",
+    line,
+    originalLine,
+    rule: threadRuleOf(first?.body)
+  };
+}
+async function listReviewThreads(octokit, owner, repo, pr) {
+  try {
+    const data = await octokit.graphql(`query ($owner: String!, $repo: String!, $pr: Int!) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $pr) {
+            reviewThreads(last: 100) {
+              pageInfo { hasPreviousPage }
+              nodes {
+                isResolved
+                path
+                line
+                originalLine
+                comments(first: 1) { nodes { author { login } body } }
+              }
+            }
+          }
+        }
+      }`, { owner, repo, pr });
+    const threads = data.repository?.pullRequest?.reviewThreads;
+    if (threads === void 0 || !Array.isArray(threads.nodes))
+      throw new Error("reviewThreads missing");
+    if (threads.pageInfo?.hasPreviousPage === true) {
+      warning("lupa: more than 100 review threads; re-checking the newest 100 only");
+    }
+    return threads.nodes.map(asThread);
+  } catch (e) {
+    warning(`lupa: review-thread re-read failed (${e.message}); gating on diff membership only`);
+    return [];
+  }
+}
+var LUPA_BODY_PREFIX = "lupa:";
+async function fetchActor(octokit, owner, repo, pr) {
+  try {
+    const me = await octokit.rest.users.getAuthenticated();
+    const login = me.data.login;
+    if (typeof login === "string" && login !== "")
+      return login;
+  } catch {
+  }
+  try {
+    const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+      owner,
+      repo,
+      pull_number: pr,
+      per_page: 100
+    });
+    let newest;
+    for (const r of reviews) {
+      if (typeof r.body === "string" && r.body.startsWith(LUPA_BODY_PREFIX) && typeof r.user?.login === "string") {
+        newest = r.user.login;
+      }
+    }
+    if (newest !== void 0)
+      return newest;
+  } catch {
+  }
+  warning("lupa: could not determine the review actor; skipping the wrongly-resolved re-check");
+  return void 0;
+}
+async function postIssueFallback(octokit, opts) {
+  if (!opts.enabled)
+    throw new Error("issue fallback disabled");
+  if (!opts.issuesWrite)
+    throw new Error("issue fallback requires issues: write");
+  const { owner, repo } = repoOf();
+  await octokit.rest.issues.createComment({ owner, repo, issue_number: opts.pr, body: opts.body });
+}
+function resolvePrNumber(event, payload) {
+  switch (event) {
+    case "pull_request":
+    case "pull_request_review": {
+      const n = payload.pull_request?.number;
+      return positiveInt(n) ? n : null;
+    }
+    case "issue_comment": {
+      const issue2 = payload.issue;
+      if (issue2 === void 0 || issue2.pull_request === void 0)
+        return null;
+      return positiveInt(issue2.number) ? issue2.number : null;
+    }
+    case "workflow_dispatch": {
+      const n = payload.inputs?.pr_number;
+      return positiveInt(n) ? n : null;
+    }
+    default:
+      return null;
+  }
+}
+var TRIGGER_ASSOCIATIONS = /* @__PURE__ */ new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+var PR_ACTIONS = /* @__PURE__ */ new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
+function shouldTrigger(event, payload) {
+  const trusted = TRIGGER_ASSOCIATIONS.has(payload.authorAssociation ?? "");
+  switch (event) {
+    case "pull_request":
+      return PR_ACTIONS.has(payload.action ?? "");
+    case "issue_comment":
+      return payload.action === "created" && payload.issueHasPR === true && (payload.commentBody ?? "").includes("/review") && trusted;
+    case "pull_request_review":
+      return payload.action === "submitted" && (payload.reviewBody ?? "").trim() !== "" && trusted;
+    case "workflow_dispatch":
+      return positiveInt(payload.prNumber);
+    default:
+      return false;
+  }
+}
+
+// lib/src/linked-repos.js
+import { execFile as execFile2 } from "node:child_process";
+import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync4, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
+var CLONE_TIMEOUT_MS = 6e4;
+function effectiveTimeout(configuredMs, endMs, nowMs = Date.now()) {
+  if (endMs === void 0)
+    return configuredMs;
+  if (endMs - nowMs <= 0)
+    return "expired";
+  return Math.max(1, Math.min(configuredMs, endMs - nowMs));
+}
+function defaultRun(cmd, args, o) {
+  return new Promise((resolve2) => {
+    execFile2(cmd, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs }, (err, stdout, stderr) => {
+      if (!err) {
+        resolve2({ code: 0, stdout, stderr });
+        return;
+      }
+      const e = err;
+      resolve2({
+        code: typeof e.code === "number" ? e.code : null,
+        stdout: typeof e.stdout === "string" ? e.stdout : String(e.stdout ?? ""),
+        stderr: typeof e.stderr === "string" ? e.stderr : String(e.stderr ?? "")
+      });
+    });
+  });
+}
+function cleanAlias(owner, repo) {
+  const trimmedRepo = repo.replace(/[.,;:!?)\]'"]+$/, "").replace(/\.git$/i, "").replace(/[.,;:!?)\]'"]+$/, "");
+  if (!/[A-Za-z0-9]/.test(owner) || !/[A-Za-z0-9]/.test(trimmedRepo))
+    return null;
+  if (trimmedRepo.length === 0)
+    return null;
+  return `${owner}/${trimmedRepo}`;
+}
+function parseLinkedRepos(prBody, selfFullName, cap = 3) {
+  const urlRe = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
+  const bareRe = /(?<![/.\w])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:#\d+)?(?![/.\w])/g;
+  const text = prBody.replace(/```[\s\S]*?```/g, "");
+  const self = selfFullName.toLowerCase();
+  const seen = /* @__PURE__ */ new Set();
+  const urls = [];
+  const bares = [];
+  const push = (list, alias) => {
+    const key = alias.toLowerCase();
+    if (key === self || seen.has(key))
+      return;
+    seen.add(key);
+    list.push(alias);
+  };
+  let m;
+  while ((m = urlRe.exec(text)) !== null) {
+    const alias = cleanAlias(m[1], m[2]);
+    if (alias)
+      push(urls, alias);
+  }
+  while ((m = bareRe.exec(text)) !== null) {
+    const alias = cleanAlias(m[1], m[2]);
+    if (alias)
+      push(bares, alias);
+  }
+  return [...urls, ...bares].slice(0, cap);
+}
+function redactToken(s, token) {
+  if (token === "")
+    return s;
+  const b64 = Buffer.from("x-access-token:" + token, "utf8").toString("base64");
+  return s.split(token).join("[redacted]").split(b64).join("[redacted]");
+}
+function dirBytes(root) {
+  let total = 0;
+  const stack = [root];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync3(cur, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of entries) {
+      if (d.isSymbolicLink())
+        continue;
+      const p = join4(cur, d.name);
+      if (d.isDirectory()) {
+        stack.push(p);
+      } else if (d.isFile()) {
+        try {
+          total += statSync3(p).size;
+        } catch {
+        }
+      }
+    }
+  }
+  return total;
+}
+function removeDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    try {
+      renameSync(dir, `${dir}.broken-${Date.now()}`);
+    } catch {
+    }
+  }
+}
+async function ensureLinkedRepo(alias, o) {
+  const dir = join4(o.baseDir, alias.split("/").join("__"));
+  const deps = o.deps ?? { run: defaultRun, ...o.sizeKb !== void 0 ? { sizeKb: o.sizeKb } : {} };
+  const deadlineExceeded = `repository not accessible: ${alias}: deadline exceeded`;
+  if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
+    return { error: deadlineExceeded };
+  }
+  if (existsSync4(dir)) {
+    const sha = await validateCache(deps, alias, dir, o);
+    if (sha === "expired")
+      return { error: deadlineExceeded };
+    if (sha !== null)
+      return { dir, sha };
+    removeDir(dir);
+  }
+  if (o.maxBytes !== void 0 && deps.sizeKb) {
+    let kb;
+    try {
+      kb = await deps.sizeKb(alias);
+    } catch {
+      kb = void 0;
+    }
+    if (kb !== void 0 && kb > o.maxBytes / 1024) {
+      return { error: "repository too large" };
+    }
+  }
+  mkdirSync(o.baseDir, { recursive: true });
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  if (o.token !== "") {
+    env.GIT_CONFIG_COUNT = "1";
+    env.GIT_CONFIG_KEY_0 = "http.extraHeader";
+    env.GIT_CONFIG_VALUE_0 = "Authorization: Basic " + Buffer.from("x-access-token:" + o.token, "utf8").toString("base64");
+  }
+  const args = ["clone", "--depth", "1", "--single-branch", `https://github.com/${alias}.git`, dir];
+  const cloneTimeout = effectiveTimeout(o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  if (cloneTimeout === "expired") {
+    return { error: deadlineExceeded };
+  }
+  let result;
+  try {
+    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: cloneTimeout });
+  } catch (e) {
+    result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+  }
+  if (result.code !== 0) {
+    removeDir(dir);
+    if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
+      return { error: deadlineExceeded };
+    }
+    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
+    return { error: `repository not accessible: ${alias}: ${detail}` };
+  }
+  if (o.maxBytes !== void 0) {
+    let total;
+    try {
+      total = dirBytes(dir);
+    } catch {
+      removeDir(dir);
+      return { error: `repository not accessible: ${alias}: could not measure checkout size` };
+    }
+    if (total > o.maxBytes) {
+      removeDir(dir);
+      return { error: "repository too large" };
+    }
+  }
+  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  if (head === "expired") {
+    removeDir(dir);
+    return { error: deadlineExceeded };
+  }
+  writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });
+  return { dir, sha: head.sha };
+}
+var MARKER_NAME = ".lupa-clone.json";
+function writeMarker(dir, marker) {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const path = join4(dir, MARKER_NAME);
+    try {
+      const st = lstatSync(path);
+      if (st.isSymbolicLink() || st.isDirectory() || st.isFile() || st.isFIFO() || st.isSocket()) {
+        rmSync(path, { recursive: true, force: true });
+      }
+    } catch {
+    }
+    writeFileSync2(path, JSON.stringify(marker), "utf8");
+  } catch {
+  }
+}
+function readMarker(dir) {
+  let raw;
+  try {
+    raw = readFileSync4(join4(dir, MARKER_NAME), "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.repo !== "string" || typeof parsed.branch !== "string" || typeof parsed.sha !== "string") {
+      return null;
+    }
+    return { repo: parsed.repo, branch: parsed.branch, sha: parsed.sha };
+  } catch {
+    return null;
+  }
+}
+async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  let branch = "";
+  let sha = "";
+  const isExpired = () => deadlineMs !== void 0 && deadlineMs - Date.now() <= 0;
+  try {
+    const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+    if (branchTimeout === "expired")
+      return "expired";
+    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: branchTimeout });
+    if (b.code === 0)
+      branch = b.stdout.trim();
+    const headTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+    if (headTimeout === "expired")
+      return "expired";
+    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
+    if (isExpired())
+      return "expired";
+    if (h.code === 0)
+      sha = h.stdout.trim();
+  } catch {
+    if (isExpired())
+      return "expired";
+  }
+  return { branch, sha };
+}
+async function validateCache(deps, alias, dir, o) {
+  const endMs = o.deadlineMs;
+  const isExpired = () => endMs !== void 0 && endMs - Date.now() <= 0;
+  if (isExpired())
+    return "expired";
+  if (!existsSync4(join4(dir, ".git")))
+    return null;
+  const marker = readMarker(dir);
+  if (marker === null || marker.repo !== alias)
+    return null;
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const configured = o.timeoutMs ?? CLONE_TIMEOUT_MS;
+  try {
+    let timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired")
+      return "expired";
+    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired())
+      return "expired";
+    if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`)
+      return null;
+    timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired")
+      return "expired";
+    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired())
+      return "expired";
+    const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
+    if (resolvedBranch === "" || resolvedBranch !== marker.branch)
+      return null;
+    if (o.maxBytes !== void 0) {
+      let total;
+      try {
+        total = dirBytes(dir);
+      } catch {
+        return null;
+      }
+      if (total > o.maxBytes)
+        return null;
+    }
+    timeout = effectiveTimeout(configured, endMs);
+    if (timeout === "expired")
+      return "expired";
+    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    if (isExpired())
+      return "expired";
+    if (head.code !== 0)
+      return null;
+    return head.stdout.trim();
+  } catch {
+    if (isExpired())
+      return "expired";
+    return null;
   }
 }
 
@@ -26902,7 +28090,7 @@ var NO_TOOLS = { allowTools: false, allowFormat: true };
 var WITH_TOOLS = { allowTools: true, allowFormat: false };
 var MARKER_BYTES = 12;
 var OVER_BUDGET_ENVELOPE = '{"error":"tool result exceeded the byte budget","truncated":true}';
-function statusOf(result) {
+function statusOf2(result) {
   return !result.ok && result.reason === "http-error" ? result.status : void 0;
 }
 function tryParseFinal(text) {
@@ -27016,7 +28204,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     const reply = first.reply;
     accumulateUsage(reply);
     if (!reply.ok) {
-      const status = statusOf(reply.result);
+      const status = statusOf2(reply.result);
       if (turns === 0 && !forced) {
         if (status === 400) {
           const retryExpired = timedOut();
@@ -27029,7 +28217,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           const retry = retried.reply;
           accumulateUsage(retry);
           if (!retry.ok) {
-            const s2 = statusOf(retry.result);
+            const s2 = statusOf2(retry.result);
             toolsUnsupported = true;
             return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
           }
@@ -27346,9 +28534,6 @@ function responseFormatFor(provider) {
   if (provider === "anthropic")
     return void 0;
   return { type: "json_object" };
-}
-function redact(text, key) {
-  return text.split(key).join("[REDACTED]");
 }
 function retryDelayMs(raw) {
   const trimmed = raw?.trim() ?? "";
@@ -27797,1136 +28982,6 @@ async function ensureOllama(baseUrl2, model, o = {}) {
   }
 }
 
-// lib/src/review.js
-function keyOf(side, line) {
-  return `${side}:${line}`;
-}
-function isValidLine(v) {
-  return typeof v === "number" && Number.isInteger(v) && v >= 1;
-}
-function hasSuggestion(f) {
-  return typeof f.suggestion === "string" && f.suggestion !== "";
-}
-function hasPatch(f) {
-  return typeof f.patch === "string" && f.patch.trim() !== "" && !f.patch.endsWith(TRUNC_MARK);
-}
-function fenceFor(content) {
-  let longest = 0;
-  for (const run2 of content.matchAll(/`+/g))
-    longest = Math.max(longest, run2[0].length);
-  return "`".repeat(Math.max(3, longest + 1));
-}
-function provenanceTrailer(f) {
-  const parts = [];
-  if (f.source !== void 0)
-    parts.push(`src:${f.source}`);
-  if (f.confidence !== void 0)
-    parts.push(`conf ${f.confidence}`);
-  return parts.length === 0 ? "" : `
-
-\`${parts.join(" \xB7 ")}\``;
-}
-function formatBody(f, side, reopened = false) {
-  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
-  if (hasPatch(f)) {
-    const fence = fenceFor(f.patch);
-    if (side === "RIGHT") {
-      body += `
-
-${fence}suggestion
-${f.patch}
-${fence}`;
-    } else {
-      body += `
-
-Suggested replacement (advice only):
-${fence}
-${f.patch}
-${fence}`;
-    }
-  }
-  if (hasSuggestion(f)) {
-    body += `
-
-Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
-  }
-  return body + provenanceTrailer(f);
-}
-function indexHunks(hunks) {
-  const index = /* @__PURE__ */ new Map();
-  for (const h of hunks) {
-    let byKey = index.get(h.file);
-    if (byKey === void 0) {
-      byKey = /* @__PURE__ */ new Map();
-      index.set(h.file, byKey);
-    }
-    for (const l of h.lines) {
-      const k = keyOf(l.side, l.line);
-      if (!byKey.has(k))
-        byKey.set(k, l);
-    }
-  }
-  return index;
-}
-function hunkHit(index, file, line) {
-  const byKey = file === "" ? void 0 : index.get(file);
-  if (byKey === void 0)
-    return void 0;
-  return byKey.get(keyOf("RIGHT", line)) ?? byKey.get(keyOf("LEFT", line));
-}
-function reopenedKey(f) {
-  return `${f.rule}\0${f.file}\0${String(f.line)}`;
-}
-function normalizeBot(login) {
-  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
-}
-function resolveReopened(findings, threads, selfLogin) {
-  const self = normalizeBot(selfLogin);
-  const kept = threads.filter((t) => t.isResolved && t.rule !== null && t.authorLogin !== null && normalizeBot(t.authorLogin) === self && (t.line ?? t.originalLine ?? null) !== null);
-  const out = /* @__PURE__ */ new Set();
-  for (const f of findings) {
-    if (typeof f.line !== "number")
-      continue;
-    const rules = new Set(f.rule.split("+"));
-    for (const t of kept) {
-      if (t.path !== f.file)
-        continue;
-      if ((t.line ?? t.originalLine) !== f.line)
-        continue;
-      const threadRules = t.rule.split("+");
-      if (threadRules.some((r) => rules.has(r))) {
-        out.add(reopenedKey(f));
-        break;
-      }
-    }
-  }
-  return out;
-}
-function mapToComments(findings, hunks, reopened) {
-  const index = indexHunks(hunks);
-  const inline = [];
-  const general = [];
-  for (const f of findings) {
-    if (!isValidLine(f.line)) {
-      general.push(f);
-      continue;
-    }
-    const line = f.line;
-    const hit = hunkHit(index, f.file, line);
-    if (hit === void 0) {
-      general.push(f);
-      continue;
-    }
-    const isReopened = reopened?.has(reopenedKey(f)) === true;
-    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
-  }
-  return { inline, general };
-}
-function partitionGate(findings, hunks, files) {
-  const index = indexHunks(hunks);
-  const addFiles = /* @__PURE__ */ new Set();
-  for (const h of hunks) {
-    for (const l of h.lines) {
-      if (l.kind === "add") {
-        addFiles.add(h.file);
-        break;
-      }
-    }
-  }
-  const present = /* @__PURE__ */ new Map();
-  for (const f of files) {
-    if (!present.has(f.file))
-      present.set(f.file, f);
-  }
-  const introduced = [];
-  const general = [];
-  for (const f of findings) {
-    if (isValidLine(f.line)) {
-      const hit = hunkHit(index, f.file, f.line);
-      if (hit !== void 0 && hit.side === "RIGHT" && hit.kind === "add")
-        introduced.push(f);
-      else
-        general.push(f);
-      continue;
-    }
-    if (f.file === "") {
-      general.push(f);
-      continue;
-    }
-    const entry = present.get(f.file);
-    if (entry === void 0 || entry.deleted === true) {
-      general.push(f);
-      continue;
-    }
-    if (entry.hunks === "" || addFiles.has(f.file))
-      introduced.push(f);
-    else
-      general.push(f);
-  }
-  return { introduced, general };
-}
-function eventFor(failLevel, findings) {
-  if (failLevel === "high" && findings.some((f) => f.severity === "high"))
-    return "REQUEST_CHANGES";
-  return "COMMENT";
-}
-function exitFor(failLevel, findings) {
-  if (failLevel === "none")
-    return 0;
-  if (failLevel === "warning")
-    return findings.some((f) => f.severity !== "info") ? 2 : 0;
-  return findings.some((f) => f.severity === "high") ? 1 : 0;
-}
-var FALLBACK_SUMMARY = "lupa: review complete.";
-function redactFindings(findings, secrets) {
-  const keys = secrets.filter((s) => s !== "");
-  return findings.map((f) => {
-    let out = f;
-    for (const key of keys) {
-      out = {
-        ...out,
-        message: redact(out.message, key),
-        file: redact(out.file, key),
-        rule: redact(out.rule, key),
-        ...out.suggestion !== void 0 ? { suggestion: redact(out.suggestion, key) } : {},
-        ...out.patch !== void 0 ? { patch: redact(out.patch, key) } : {},
-        ...out.evidence !== void 0 ? {
-          evidence: {
-            ...out.evidence.analyzer !== void 0 ? { analyzer: redact(out.evidence.analyzer, key) } : {},
-            ...out.evidence.snippet !== void 0 ? { snippet: redact(out.evidence.snippet, key) } : {}
-          }
-        } : {}
-      };
-    }
-    if (out.evidence !== void 0 && out.evidence === f.evidence) {
-      out = { ...out, evidence: { ...out.evidence } };
-    }
-    return out;
-  });
-}
-function locate(f) {
-  if (f.file === "")
-    return "(repository)";
-  return isValidLine(f.line) ? `${f.file}:${f.line}` : f.file;
-}
-function buildFallbackReport(findings, options = {}) {
-  const heading = findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
-  const fullRecords = findings.map((f, index) => {
-    const field = (value) => {
-      const fence = fenceFor(value);
-      return `${fence}text
-${value}
-${fence}`;
-    };
-    const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
-    const provenance = [];
-    if (f.source !== void 0)
-      provenance.push(`- Source:
-${field(f.source)}`);
-    if (f.confidence !== void 0)
-      provenance.push(`- Confidence:
-${field(String(f.confidence))}`);
-    if (f.evidence !== void 0 && (f.evidence.analyzer !== void 0 || f.evidence.snippet !== void 0)) {
-      const parts = [];
-      if (f.evidence.analyzer !== void 0)
-        parts.push(field(`analyzer: ${f.evidence.analyzer}`));
-      if (f.evidence.snippet !== void 0)
-        parts.push(field(f.evidence.snippet));
-      provenance.push(`- Evidence:
-${parts.join("\n")}`);
-    }
-    return [
-      `### Finding ${index + 1}`,
-      "",
-      `- Severity: ${f.severity}`,
-      `- Location:
-${field(locate(f))}`,
-      `- Rule:
-${field(f.rule)}`,
-      `- Message/evidence:
-${field(f.message)}`,
-      ...provenance,
-      `- Suggested remediation (advice only):
-${field(suggestion)}`,
-      ...hasPatch(f) ? [`- Proposed patch (advice only):
-${field(f.patch)}`] : []
-    ].join("\n");
-  });
-  const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
-  const prefixBytes = [0];
-  for (const length of recordBytes) {
-    const previous = prefixBytes[prefixBytes.length - 1];
-    prefixBytes.push(previous + (prefixBytes.length > 1 ? 2 : 0) + length);
-  }
-  const headingBytes = Buffer.byteLength(heading, "utf8");
-  const render = (retained2, marker) => {
-    const records = fullRecords.slice(0, retained2).join("\n\n");
-    if (marker === void 0)
-      return retained2 === 0 ? heading : `${heading}
-
-${records}`;
-    return retained2 === 0 ? `${heading}
-
-${marker}` : `${heading}
-
-${records}
-
-${marker}`;
-  };
-  if (options.maxBytes === void 0) {
-    return render(findings.length);
-  }
-  const maxBytes = options.maxBytes;
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
-    throw new RangeError("maxBytes must be a non-negative safe integer");
-  if (findings.length === 0) {
-    if (headingBytes <= maxBytes)
-      return heading;
-    throw new RangeError("maxBytes is too small for the report heading");
-  }
-  if (headingBytes + 2 + prefixBytes[findings.length] <= maxBytes)
-    return render(findings.length);
-  let retained = -1;
-  let omissionMarker = "";
-  for (let candidateRetained = findings.length - 1; candidateRetained >= 0; candidateRetained--) {
-    const omitted = findings.length - candidateRetained;
-    const marker = `> Omitted: ${omitted} finding(s) omitted because the report output limit was reached.`;
-    const candidateBytes = headingBytes + 2 + prefixBytes[candidateRetained] + (candidateRetained > 0 ? 2 : 0) + Buffer.byteLength(marker, "utf8");
-    if (candidateBytes <= maxBytes) {
-      retained = candidateRetained;
-      omissionMarker = marker;
-      break;
-    }
-  }
-  if (retained < 0)
-    throw new RangeError("maxBytes is too small for the report heading and omission marker");
-  return render(retained, omissionMarker);
-}
-function buildBody(general, summary2, marks) {
-  const head = summary2.trim() === "" ? FALLBACK_SUMMARY : summary2.trim();
-  if (general.length === 0)
-    return head;
-  const reopened = marks?.reopened;
-  const blocking = marks?.blocking;
-  const items = general.map((f) => {
-    const key = reopenedKey(f);
-    const marker = reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
-    let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
-    if (hasPatch(f)) {
-      const fence = fenceFor(f.patch);
-      item += `
-  Suggested replacement (advice only):
-  ${fence}
-  ${f.patch.replace(/\n/g, "\n  ")}
-  ${fence}`;
-    }
-    if (hasSuggestion(f))
-      item += `
-  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
-    return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
-  });
-  const outside = general.filter((f) => blocking?.has(reopenedKey(f)) !== true).length;
-  const list = `**Findings not placed inline:**
-${items.join("\n")}`;
-  if (outside === 0)
-    return `${head}
-
-${list}`;
-  return `${head}
-
-**Note:** ${outside} finding(s) below are outside the PR diff and do not block.
-
-${list}`;
-}
-var MERGE_SEVERITY_RANK = { info: 0, warning: 1, high: 2 };
-function mergeable(a, b) {
-  if (a.file !== b.file)
-    return false;
-  if (a.line === void 0 || b.line === void 0)
-    return a.line === void 0 && b.line === void 0;
-  return a.line === b.line;
-}
-function survivor(members) {
-  const first = members[0];
-  let line;
-  for (const m of members) {
-    if (m.line !== void 0) {
-      line = m.line;
-      break;
-    }
-  }
-  const rules = [];
-  for (const m of members)
-    if (!rules.includes(m.rule))
-      rules.push(m.rule);
-  let severity = first.severity;
-  for (const m of members) {
-    if (MERGE_SEVERITY_RANK[m.severity] > MERGE_SEVERITY_RANK[severity])
-      severity = m.severity;
-  }
-  const out = {
-    severity,
-    file: first.file,
-    rule: capText(rules.join("+"), RULE_CAP),
-    message: capText(members.map((m) => `[${m.rule}] ${m.message}`).join("\n\n"), MSG_CAP)
-  };
-  if (line !== void 0)
-    out.line = line;
-  for (const m of members) {
-    if (m.suggestion !== void 0) {
-      out.suggestion = m.suggestion;
-      break;
-    }
-  }
-  for (const m of members) {
-    if (hasPatch(m)) {
-      out.patch = m.patch;
-      break;
-    }
-  }
-  const sources = [];
-  for (const m of members) {
-    if (m.source !== void 0 && !sources.includes(m.source))
-      sources.push(m.source);
-  }
-  if (sources.length > 0)
-    out.source = capText(sources.join("+"), RULE_CAP);
-  let confidence;
-  for (const m of members) {
-    if (m.confidence !== void 0 && (confidence === void 0 || m.confidence > confidence)) {
-      confidence = m.confidence;
-    }
-  }
-  if (confidence !== void 0)
-    out.confidence = confidence;
-  let snippet;
-  const analyzers = [];
-  for (const m of members) {
-    if (m.evidence === void 0)
-      continue;
-    if (snippet === void 0 && m.evidence.snippet !== void 0)
-      snippet = m.evidence.snippet;
-    if (m.evidence.analyzer !== void 0 && !analyzers.includes(m.evidence.analyzer)) {
-      analyzers.push(m.evidence.analyzer);
-    }
-  }
-  if (snippet !== void 0 || analyzers.length > 0) {
-    out.evidence = {
-      ...analyzers.length > 0 ? { analyzer: capText(analyzers.join("+"), RULE_CAP) } : {},
-      ...snippet !== void 0 ? { snippet } : {}
-    };
-  }
-  return out;
-}
-function mergeDuplicates(findings, verdicts) {
-  const parent = findings.map((_, i) => i);
-  const root = (x) => parent[x] === x ? x : parent[x] = root(parent[x]);
-  let dropped = 0;
-  const consider = (a, b) => {
-    if (!Number.isInteger(a) || !Number.isInteger(b)) {
-      dropped += 1;
-      return;
-    }
-    const fa = findings[a];
-    const fb = findings[b];
-    if (fa === void 0 || fb === void 0 || !mergeable(fa, fb)) {
-      dropped += 1;
-      return;
-    }
-    const ra = root(a);
-    const rb = root(b);
-    if (ra !== rb)
-      parent[rb] = ra;
-  };
-  for (const [a, b] of verdicts.pairs)
-    consider(a, b);
-  for (const [a, b] of verdicts.links)
-    consider(a, b);
-  const groups = /* @__PURE__ */ new Map();
-  for (let i = 0; i < findings.length; i++) {
-    const r = root(i);
-    const g = groups.get(r);
-    if (g === void 0)
-      groups.set(r, [i]);
-    else
-      g.push(i);
-  }
-  const ordered = [...groups.values()].sort((x, y) => x[0] - y[0]);
-  const merged = ordered.map((members) => members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])));
-  return { merged, dropped };
-}
-var SEVERITY_RANK = { high: 0, warning: 1, info: 2 };
-function prioritizeFindings(findings) {
-  return findings.map((finding, index) => ({ finding, index })).sort((a, b) => SEVERITY_RANK[a.finding.severity] - SEVERITY_RANK[b.finding.severity] || a.index - b.index).map(({ finding }) => finding);
-}
-function omissionMarkerFor(omitted, maxFindings) {
-  return `> Omitted: ${omitted} finding(s) omitted to fit the ${maxFindings}-finding publication limit.`;
-}
-function truncNoteFor(maxChars) {
-  return `> Note: review body truncated to the ${maxChars}-character limit.`;
-}
-var TRUNC_NOTE_RE = /^> Note: review body truncated to the \d+-character limit\.$/;
-function isTruncNoteLine(line) {
-  return TRUNC_NOTE_RE.test(line);
-}
-var codePointsOf = (s) => Array.from(s).length;
-function isFenceLine(line) {
-  return line.trimStart().startsWith("```");
-}
-function wholeLineCut(candidate) {
-  const idx = candidate.lastIndexOf("\n");
-  return idx === -1 ? candidate : candidate.slice(0, idx);
-}
-function fenceBackup(text) {
-  let lines = text.split("\n");
-  for (; ; ) {
-    let count = 0;
-    let last = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (isFenceLine(lines[i])) {
-        count++;
-        last = i;
-      }
-    }
-    if (count % 2 === 0 || last === -1)
-      return lines.join("\n");
-    lines = lines.slice(0, last);
-  }
-}
-function cutContent(content, budget) {
-  if (codePointsOf(content) <= budget)
-    return content;
-  const candidate = Array.from(content).slice(0, Math.max(0, budget)).join("");
-  return fenceBackup(wholeLineCut(candidate));
-}
-function capBody(body, maxChars, markers) {
-  if (markers.length === 0 && codePointsOf(body) <= maxChars) {
-    let stale = false;
-    for (const line of body.split(/\r?\n/)) {
-      if (isTruncNoteLine(line)) {
-        stale = true;
-        break;
-      }
-    }
-    if (!stale)
-      return body;
-  }
-  const note2 = truncNoteFor(maxChars);
-  const contentLines = [];
-  const lifted = [];
-  for (const line of body.split(/\r?\n/)) {
-    if (isTruncNoteLine(line))
-      continue;
-    if (line.startsWith("> Omitted:")) {
-      if (!markers.includes(line) && !lifted.includes(line))
-        lifted.push(line);
-      continue;
-    }
-    contentLines.push(line);
-  }
-  const content = contentLines.join("\n");
-  const tails = [...markers, ...lifted];
-  const tailsBlock = tails.join("\n");
-  if (codePointsOf(tailsBlock) > maxChars) {
-    throw new RangeError(`capBody: markers (${codePointsOf(tailsBlock)} chars) exceed the ${maxChars}-character limit`);
-  }
-  const headed = (head) => head === "" ? tailsBlock : tails.length === 0 ? head : `${head}
-${tailsBlock}`;
-  if (codePointsOf(headed(content)) <= maxChars)
-    return headed(content);
-  const tail = tails.some((m) => isTruncNoteLine(m)) ? tails : [...tails, note2];
-  const tailBlock = tail.join("\n");
-  if (codePointsOf(tailBlock) > maxChars) {
-    if (tails.length > 0)
-      return tailsBlock;
-    return cutContent(content, maxChars);
-  }
-  const cut = cutContent(content, maxChars - codePointsOf(tailBlock) - 1);
-  return cut === "" ? tailBlock : `${cut}
-${tailBlock}`;
-}
-
-// lib/src/github.js
-var ReadonlyTokenError = class extends Error {
-  status;
-  detail;
-  constructor(message, status, detail = "") {
-    super(message);
-    this.name = "ReadonlyTokenError";
-    this.status = status;
-    this.detail = detail;
-  }
-};
-var StaleHeadError = class extends Error {
-  analyzedSha;
-  liveSha;
-  constructor(analyzedSha, liveSha) {
-    super(`review post skipped: PR head moved (analyzed ${analyzedSha}, live ${liveSha})`);
-    this.name = "StaleHeadError";
-    this.analyzedSha = analyzedSha;
-    this.liveSha = liveSha;
-  }
-};
-var OFF_DIFF = /could not be resolved|part of the diff|line.*(diff|resolve)/i;
-var STALE_SHA = /commit[ _-]id|head[- ]commit|not a valid commit/i;
-function statusOf2(e) {
-  const s = e?.status;
-  return typeof s === "number" ? s : void 0;
-}
-function messageOf(e) {
-  const m = e?.message;
-  return typeof m === "string" ? m : "";
-}
-function detailOf(e) {
-  const err = e;
-  let data = "";
-  try {
-    data = JSON.stringify(err?.response?.data ?? "");
-  } catch {
-    data = "";
-  }
-  return `${messageOf(e)} ${data}`;
-}
-function apiMessageOf(e) {
-  const data = e?.response?.data;
-  if (typeof data?.message === "string" && data.message !== "")
-    return data.message;
-  return messageOf(e);
-}
-function positiveInt(v) {
-  return typeof v === "number" && Number.isInteger(v) && v > 0;
-}
-function repoOf() {
-  return context2.repo;
-}
-async function getRepoSize(octokit, owner, repo) {
-  try {
-    const r = await octokit.rest.repos.get({ owner, repo });
-    const size = r.data.size;
-    return typeof size === "number" ? size : void 0;
-  } catch {
-    return void 0;
-  }
-}
-function foldComments(body, comments, blocking, commentKeys) {
-  if (comments.length === 0)
-    return body;
-  const items = comments.map((c, i) => {
-    const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
-    const key = commentKeys?.[i] ?? null;
-    const suffix = key !== null && blocking !== void 0 && !blocking.has(key) ? " (non-blocking)" : "";
-    const head = `- ${c.path}:${c.line}${suffix}`;
-    if (text.trim() === "")
-      return head;
-    return `${head}
-  ${text.replace(/\n/g, "\n  ")}`;
-  });
-  return `${body}
-
-**Findings not placed inline:**
-${items.join("\n")}`;
-}
-function recapFoldedBody(folded, maxChars) {
-  const note2 = truncNoteFor(maxChars);
-  let strippedAny = false;
-  const markers = [];
-  const contentLines = [];
-  for (const line of folded.split(/\r?\n/)) {
-    if (isTruncNoteLine(line)) {
-      strippedAny = true;
-      continue;
-    }
-    if (line.startsWith("> Omitted:")) {
-      if (!markers.includes(line))
-        markers.push(line);
-      continue;
-    }
-    contentLines.push(line);
-  }
-  const content = contentLines.join("\n");
-  const tailed = [...markers, note2];
-  const withNote = capBody(content, maxChars, tailed);
-  if (strippedAny)
-    return withNote;
-  const uncut = content === "" ? tailed.join("\n") : `${content}
-${tailed.join("\n")}`;
-  if (withNote !== uncut)
-    return withNote;
-  return capBody(content, maxChars, markers);
-}
-async function postReview(octokit, pr, payload, opts) {
-  if (opts?.canWrite === false) {
-    throw new ReadonlyTokenError("review post skipped: token cannot write reviews (fork PR)");
-  }
-  const { owner, repo } = repoOf();
-  const commitId = payload.commit_id;
-  let body = payload.body;
-  let comments = payload.comments;
-  let degraded = false;
-  for (; ; ) {
-    try {
-      await octokit.rest.pulls.createReview({
-        owner,
-        repo,
-        pull_number: pr,
-        commit_id: commitId,
-        body,
-        event: payload.event,
-        comments
-      });
-      return { degraded };
-    } catch (e) {
-      const status = statusOf2(e);
-      if (status === 403 && !/rate limit/i.test(detailOf(e))) {
-        throw new ReadonlyTokenError("review post refused: token cannot write reviews (HTTP 403)", 403, apiMessageOf(e));
-      }
-      if (status !== 422) {
-        throw new Error(`review post failed${status === void 0 ? "" : ` (HTTP ${status})`}`);
-      }
-      const detail = detailOf(e);
-      if (STALE_SHA.test(detail)) {
-        let head;
-        try {
-          const pull = await octokit.rest.pulls.get({ owner, repo, pull_number: pr });
-          head = pull.data.head.sha;
-        } catch (getErr) {
-          const s = statusOf2(getErr);
-          throw new Error(`head sha re-resolve failed${s === void 0 ? "" : ` (HTTP ${s})`}`);
-        }
-        throw new StaleHeadError(commitId, head);
-      }
-      if (!degraded && comments.length > 0 && OFF_DIFF.test(detail)) {
-        body = recapFoldedBody(foldComments(body, comments, opts?.blocking, opts?.commentKeys), opts?.maxBodyChars ?? DEFAULT_MAX_REVIEW_BODY_CHARS);
-        comments = [];
-        degraded = true;
-        continue;
-      }
-      throw new Error("review post rejected (HTTP 422)");
-    }
-  }
-}
-var THREAD_RULE_RE = /^\*\*(\w+)\*\* (?:\*\*reopened\*\* )?\[([^[\]]+)\]/;
-function threadRuleOf(body) {
-  if (typeof body !== "string")
-    return null;
-  const m = THREAD_RULE_RE.exec(body);
-  return m === null ? null : m[2];
-}
-function asThread(n) {
-  const first = n.comments?.nodes?.[0];
-  const login = first?.author?.login;
-  const line = typeof n.line === "number" ? n.line : null;
-  const originalLine = typeof n.originalLine === "number" ? n.originalLine : null;
-  return {
-    authorLogin: typeof login === "string" ? login : null,
-    isResolved: n.isResolved === true,
-    path: typeof n.path === "string" ? n.path : "",
-    line,
-    originalLine,
-    rule: threadRuleOf(first?.body)
-  };
-}
-async function listReviewThreads(octokit, owner, repo, pr) {
-  try {
-    const data = await octokit.graphql(`query ($owner: String!, $repo: String!, $pr: Int!) {
-        repository(owner: $owner, name: $repo) {
-          pullRequest(number: $pr) {
-            reviewThreads(last: 100) {
-              pageInfo { hasPreviousPage }
-              nodes {
-                isResolved
-                path
-                line
-                originalLine
-                comments(first: 1) { nodes { author { login } body } }
-              }
-            }
-          }
-        }
-      }`, { owner, repo, pr });
-    const threads = data.repository?.pullRequest?.reviewThreads;
-    if (threads === void 0 || !Array.isArray(threads.nodes))
-      throw new Error("reviewThreads missing");
-    if (threads.pageInfo?.hasPreviousPage === true) {
-      warning("lupa: more than 100 review threads; re-checking the newest 100 only");
-    }
-    return threads.nodes.map(asThread);
-  } catch (e) {
-    warning(`lupa: review-thread re-read failed (${e.message}); gating on diff membership only`);
-    return [];
-  }
-}
-var LUPA_BODY_PREFIX = "lupa:";
-async function fetchActor(octokit, owner, repo, pr) {
-  try {
-    const me = await octokit.rest.users.getAuthenticated();
-    const login = me.data.login;
-    if (typeof login === "string" && login !== "")
-      return login;
-  } catch {
-  }
-  try {
-    const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
-      owner,
-      repo,
-      pull_number: pr,
-      per_page: 100
-    });
-    let newest;
-    for (const r of reviews) {
-      if (typeof r.body === "string" && r.body.startsWith(LUPA_BODY_PREFIX) && typeof r.user?.login === "string") {
-        newest = r.user.login;
-      }
-    }
-    if (newest !== void 0)
-      return newest;
-  } catch {
-  }
-  warning("lupa: could not determine the review actor; skipping the wrongly-resolved re-check");
-  return void 0;
-}
-async function postIssueFallback(octokit, opts) {
-  if (!opts.enabled)
-    throw new Error("issue fallback disabled");
-  if (!opts.issuesWrite)
-    throw new Error("issue fallback requires issues: write");
-  const { owner, repo } = repoOf();
-  await octokit.rest.issues.createComment({ owner, repo, issue_number: opts.pr, body: opts.body });
-}
-function resolvePrNumber(event, payload) {
-  switch (event) {
-    case "pull_request":
-    case "pull_request_review": {
-      const n = payload.pull_request?.number;
-      return positiveInt(n) ? n : null;
-    }
-    case "issue_comment": {
-      const issue2 = payload.issue;
-      if (issue2 === void 0 || issue2.pull_request === void 0)
-        return null;
-      return positiveInt(issue2.number) ? issue2.number : null;
-    }
-    case "workflow_dispatch": {
-      const n = payload.inputs?.pr_number;
-      return positiveInt(n) ? n : null;
-    }
-    default:
-      return null;
-  }
-}
-var TRIGGER_ASSOCIATIONS = /* @__PURE__ */ new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-var PR_ACTIONS = /* @__PURE__ */ new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
-function shouldTrigger(event, payload) {
-  const trusted = TRIGGER_ASSOCIATIONS.has(payload.authorAssociation ?? "");
-  switch (event) {
-    case "pull_request":
-      return PR_ACTIONS.has(payload.action ?? "");
-    case "issue_comment":
-      return payload.action === "created" && payload.issueHasPR === true && (payload.commentBody ?? "").includes("/review") && trusted;
-    case "pull_request_review":
-      return payload.action === "submitted" && (payload.reviewBody ?? "").trim() !== "" && trusted;
-    case "workflow_dispatch":
-      return positiveInt(payload.prNumber);
-    default:
-      return false;
-  }
-}
-
-// lib/src/linked-repos.js
-import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync3, readFileSync as readFileSync4, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
-var CLONE_TIMEOUT_MS = 6e4;
-function effectiveTimeout(configuredMs, endMs, nowMs = Date.now()) {
-  if (endMs === void 0)
-    return configuredMs;
-  if (endMs - nowMs <= 0)
-    return "expired";
-  return Math.max(1, Math.min(configuredMs, endMs - nowMs));
-}
-function defaultRun(cmd, args, o) {
-  return new Promise((resolve2) => {
-    execFile2(cmd, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs }, (err, stdout, stderr) => {
-      if (!err) {
-        resolve2({ code: 0, stdout, stderr });
-        return;
-      }
-      const e = err;
-      resolve2({
-        code: typeof e.code === "number" ? e.code : null,
-        stdout: typeof e.stdout === "string" ? e.stdout : String(e.stdout ?? ""),
-        stderr: typeof e.stderr === "string" ? e.stderr : String(e.stderr ?? "")
-      });
-    });
-  });
-}
-function cleanAlias(owner, repo) {
-  const trimmedRepo = repo.replace(/[.,;:!?)\]'"]+$/, "").replace(/\.git$/i, "").replace(/[.,;:!?)\]'"]+$/, "");
-  if (!/[A-Za-z0-9]/.test(owner) || !/[A-Za-z0-9]/.test(trimmedRepo))
-    return null;
-  if (trimmedRepo.length === 0)
-    return null;
-  return `${owner}/${trimmedRepo}`;
-}
-function parseLinkedRepos(prBody, selfFullName, cap = 3) {
-  const urlRe = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
-  const bareRe = /(?<![/.\w])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:#\d+)?(?![/.\w])/g;
-  const text = prBody.replace(/```[\s\S]*?```/g, "");
-  const self = selfFullName.toLowerCase();
-  const seen = /* @__PURE__ */ new Set();
-  const urls = [];
-  const bares = [];
-  const push = (list, alias) => {
-    const key = alias.toLowerCase();
-    if (key === self || seen.has(key))
-      return;
-    seen.add(key);
-    list.push(alias);
-  };
-  let m;
-  while ((m = urlRe.exec(text)) !== null) {
-    const alias = cleanAlias(m[1], m[2]);
-    if (alias)
-      push(urls, alias);
-  }
-  while ((m = bareRe.exec(text)) !== null) {
-    const alias = cleanAlias(m[1], m[2]);
-    if (alias)
-      push(bares, alias);
-  }
-  return [...urls, ...bares].slice(0, cap);
-}
-function redactToken(s, token) {
-  if (token === "")
-    return s;
-  const b64 = Buffer.from("x-access-token:" + token, "utf8").toString("base64");
-  return s.split(token).join("[redacted]").split(b64).join("[redacted]");
-}
-function dirBytes(root) {
-  let total = 0;
-  const stack = [root];
-  while (stack.length > 0) {
-    const cur = stack.pop();
-    let entries;
-    try {
-      entries = readdirSync3(cur, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const d of entries) {
-      if (d.isSymbolicLink())
-        continue;
-      const p = join4(cur, d.name);
-      if (d.isDirectory()) {
-        stack.push(p);
-      } else if (d.isFile()) {
-        try {
-          total += statSync3(p).size;
-        } catch {
-        }
-      }
-    }
-  }
-  return total;
-}
-function removeDir(dir) {
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    try {
-      renameSync(dir, `${dir}.broken-${Date.now()}`);
-    } catch {
-    }
-  }
-}
-async function ensureLinkedRepo(alias, o) {
-  const dir = join4(o.baseDir, alias.split("/").join("__"));
-  const deps = o.deps ?? { run: defaultRun, ...o.sizeKb !== void 0 ? { sizeKb: o.sizeKb } : {} };
-  const deadlineExceeded = `repository not accessible: ${alias}: deadline exceeded`;
-  if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
-    return { error: deadlineExceeded };
-  }
-  if (existsSync4(dir)) {
-    const sha = await validateCache(deps, alias, dir, o);
-    if (sha === "expired")
-      return { error: deadlineExceeded };
-    if (sha !== null)
-      return { dir, sha };
-    removeDir(dir);
-  }
-  if (o.maxBytes !== void 0 && deps.sizeKb) {
-    let kb;
-    try {
-      kb = await deps.sizeKb(alias);
-    } catch {
-      kb = void 0;
-    }
-    if (kb !== void 0 && kb > o.maxBytes / 1024) {
-      return { error: "repository too large" };
-    }
-  }
-  mkdirSync(o.baseDir, { recursive: true });
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  if (o.token !== "") {
-    env.GIT_CONFIG_COUNT = "1";
-    env.GIT_CONFIG_KEY_0 = "http.extraHeader";
-    env.GIT_CONFIG_VALUE_0 = "Authorization: Basic " + Buffer.from("x-access-token:" + o.token, "utf8").toString("base64");
-  }
-  const args = ["clone", "--depth", "1", "--single-branch", `https://github.com/${alias}.git`, dir];
-  const cloneTimeout = effectiveTimeout(o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
-  if (cloneTimeout === "expired") {
-    return { error: deadlineExceeded };
-  }
-  let result;
-  try {
-    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: cloneTimeout });
-  } catch (e) {
-    result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
-  }
-  if (result.code !== 0) {
-    removeDir(dir);
-    if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
-      return { error: deadlineExceeded };
-    }
-    const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
-    return { error: `repository not accessible: ${alias}: ${detail}` };
-  }
-  if (o.maxBytes !== void 0) {
-    let total;
-    try {
-      total = dirBytes(dir);
-    } catch {
-      removeDir(dir);
-      return { error: `repository not accessible: ${alias}: could not measure checkout size` };
-    }
-    if (total > o.maxBytes) {
-      removeDir(dir);
-      return { error: "repository too large" };
-    }
-  }
-  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
-  if (head === "expired") {
-    removeDir(dir);
-    return { error: deadlineExceeded };
-  }
-  writeMarker(dir, { repo: alias, branch: head.branch, sha: head.sha });
-  return { dir, sha: head.sha };
-}
-var MARKER_NAME = ".lupa-clone.json";
-function writeMarker(dir, marker) {
-  try {
-    mkdirSync(dir, { recursive: true });
-    const path = join4(dir, MARKER_NAME);
-    try {
-      const st = lstatSync(path);
-      if (st.isSymbolicLink() || st.isDirectory() || st.isFile() || st.isFIFO() || st.isSocket()) {
-        rmSync(path, { recursive: true, force: true });
-      }
-    } catch {
-    }
-    writeFileSync2(path, JSON.stringify(marker), "utf8");
-  } catch {
-  }
-}
-function readMarker(dir) {
-  let raw;
-  try {
-    raw = readFileSync4(join4(dir, MARKER_NAME), "utf8");
-  } catch {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.repo !== "string" || typeof parsed.branch !== "string" || typeof parsed.sha !== "string") {
-      return null;
-    }
-    return { repo: parsed.repo, branch: parsed.branch, sha: parsed.sha };
-  } catch {
-    return null;
-  }
-}
-async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  let branch = "";
-  let sha = "";
-  const isExpired = () => deadlineMs !== void 0 && deadlineMs - Date.now() <= 0;
-  try {
-    const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
-    if (branchTimeout === "expired")
-      return "expired";
-    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: branchTimeout });
-    if (b.code === 0)
-      branch = b.stdout.trim();
-    const headTimeout = effectiveTimeout(timeoutMs, deadlineMs);
-    if (headTimeout === "expired")
-      return "expired";
-    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
-    if (isExpired())
-      return "expired";
-    if (h.code === 0)
-      sha = h.stdout.trim();
-  } catch {
-    if (isExpired())
-      return "expired";
-  }
-  return { branch, sha };
-}
-async function validateCache(deps, alias, dir, o) {
-  const endMs = o.deadlineMs;
-  const isExpired = () => endMs !== void 0 && endMs - Date.now() <= 0;
-  if (isExpired())
-    return "expired";
-  if (!existsSync4(join4(dir, ".git")))
-    return null;
-  const marker = readMarker(dir);
-  if (marker === null || marker.repo !== alias)
-    return null;
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  const configured = o.timeoutMs ?? CLONE_TIMEOUT_MS;
-  try {
-    let timeout = effectiveTimeout(configured, endMs);
-    if (timeout === "expired")
-      return "expired";
-    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs: timeout });
-    if (isExpired())
-      return "expired";
-    if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`)
-      return null;
-    timeout = effectiveTimeout(configured, endMs);
-    if (timeout === "expired")
-      return "expired";
-    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
-    if (isExpired())
-      return "expired";
-    const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
-    if (resolvedBranch === "" || resolvedBranch !== marker.branch)
-      return null;
-    if (o.maxBytes !== void 0) {
-      let total;
-      try {
-        total = dirBytes(dir);
-      } catch {
-        return null;
-      }
-      if (total > o.maxBytes)
-        return null;
-    }
-    timeout = effectiveTimeout(configured, endMs);
-    if (timeout === "expired")
-      return "expired";
-    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
-    if (isExpired())
-      return "expired";
-    if (head.code !== 0)
-      return null;
-    return head.stdout.trim();
-  } catch {
-    if (isExpired())
-      return "expired";
-    return null;
-  }
-}
-
 // lib/src/scanners.js
 import os5 from "node:os";
 import { execFile as execFile3 } from "node:child_process";
@@ -29216,8 +29271,6 @@ async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFAULT_
 // lib/src/main.js
 var SHA_RE = /^[0-9a-f]{40}$/;
 var SEVERITIES2 = /* @__PURE__ */ new Set(["info", "warning", "high"]);
-var SUGGESTION_CAP = 4e3;
-var FILE_CAP = 200;
 var L2_SKIPPED = {
   severity: "info",
   file: "",
@@ -29396,53 +29449,6 @@ function readFindings(dir, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
 }
 function writeFindings(dir, findings) {
   writeFileSync3(join6(dir, "findings.json"), JSON.stringify(findings, null, 2) + "\n", "utf8");
-}
-var CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
-var CONTROL_ALL = /[\u0000-\u001f\u007f]/g;
-function unsafePath(file) {
-  return file.startsWith("/") || file.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(file) || file.split(/[\\/]/).includes("..");
-}
-function sanitizeFinding(f) {
-  let file = f.file.replace(CONTROL_ALL, "");
-  let message = f.message.replace(CONTROL_KEEP_TEXT, "");
-  let line = f.line;
-  if (file !== "" && unsafePath(file)) {
-    message = `artifact path rejected: ${message}`;
-    file = "";
-    line = void 0;
-  }
-  const out = {
-    severity: f.severity,
-    file: capText(file, FILE_CAP),
-    rule: capText(f.rule.replace(CONTROL_ALL, ""), RULE_CAP),
-    message: capText(message, MSG_CAP)
-  };
-  if (line !== void 0)
-    out.line = line;
-  if (f.suggestion !== void 0) {
-    out.suggestion = capText(f.suggestion.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
-  }
-  if (f.patch !== void 0) {
-    out.patch = capText(f.patch.replace(CONTROL_KEEP_TEXT, ""), SUGGESTION_CAP);
-  }
-  if (f.source !== void 0) {
-    const stripped = f.source.replace(CONTROL_ALL, "");
-    if (stripped !== "")
-      out.source = capText(stripped, RULE_CAP);
-  }
-  if (f.confidence !== void 0)
-    out.confidence = f.confidence;
-  if (f.evidence !== void 0) {
-    const evidence = {};
-    if (f.evidence.analyzer !== void 0) {
-      evidence.analyzer = capText(f.evidence.analyzer.replace(CONTROL_ALL, ""), RULE_CAP);
-    }
-    if (f.evidence.snippet !== void 0) {
-      evidence.snippet = capText(f.evidence.snippet.replace(CONTROL_KEEP_TEXT, ""), MSG_CAP);
-    }
-    out.evidence = evidence;
-  }
-  return out;
 }
 function cutToBytes(s, maxBytes) {
   let bytes = 0;

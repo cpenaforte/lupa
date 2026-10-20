@@ -2,8 +2,8 @@ import os from "node:os";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
-import type { Finding } from "./fastpath.js";
-import type { PrMeta } from "./diff.js";
+import type { Finding } from "./domain/finding.js";
+import type { PrMeta } from "./domain/diff.js";
 import { byteCheck, oversizeMessage, readCappedFileSync, sourceForLabel } from "./artifact-limits.js";
 import { DEFAULT_MAX_ARTIFACT_BYTES } from "./inputs.js";
 

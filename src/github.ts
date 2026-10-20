@@ -1,6 +1,6 @@
 import { context, getOctokit } from "@actions/github";
 import * as core from "@actions/core";
-import type { InlineComment, ReviewPayload } from "./review.js";
+import type { InlineComment, ReviewPayload } from "./domain/review.js";
 import { capBody, isTruncNoteLine, truncNoteFor } from "./review.js";
 import { DEFAULT_MAX_REVIEW_BODY_CHARS } from "./inputs.js";
 
