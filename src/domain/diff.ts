@@ -1,4 +1,4 @@
-import type { DedupVerdicts } from "../llm.js";
+import type { DedupVerdicts } from "../llm/types.js";
 
 export interface FileDiff {
   file: string;

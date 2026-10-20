@@ -90,40 +90,7 @@ export function buildMessages(
   return { system, user: parts.join("\n\n") };
 }
 
-export const PR_REVIEW_SCHEMA = {
-  name: "pr_review",
-  strict: true,
-  schema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["findings", "duplicates"],
-    properties: {
-      findings: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"],
-          properties: {
-            severity: { type: "string", enum: ["info", "warning", "high"] },
-            file: { type: "string" },
-            line: { type: ["integer", "null"] },
-            rule: { type: "string" },
-            message: { type: "string" },
-            suggestion: { type: ["string", "null"] },
-            duplicateOf: { type: ["integer", "null"] },
-            confidence: { type: ["integer", "null"] },
-            patch: { type: ["string", "null"] },
-          },
-        },
-      },
-      duplicates: {
-        type: ["array", "null"],
-        items: { type: "array", items: { type: "integer" }, minItems: 2, maxItems: 2 },
-      },
-    },
-  },
-};
+export { PR_REVIEW_SCHEMA } from "./llm/schema.js";
 
 // Leading \b rejects "prefix #5" / "disclosed #3" / "unfixed #1".
 // Trailing (?!\w) rejects "Fixes #12abc" (no digit-only lookahead, so alpha tails fail too).

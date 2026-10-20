@@ -1,21 +1,11 @@
-import { PR_REVIEW_SCHEMA } from "../prompt.js";
 import type { ResolvedEndpoint } from "../providers.js";
 import type { Conversation, ToolCall } from "../agent-types.js";
-import {
-  attempt,
-  errMessage,
-  extractUsage,
-  parseContent,
-  parseVerdicts,
-  redact,
-  retryDelayMs,
-  sleep,
-  toFindings,
-  validateSampling,
-  SNIPPET_CHARS,
-  type AgentReply,
-  type LlmResult,
-} from "../llm.js";
+import { PR_REVIEW_SCHEMA } from "../llm/schema.js";
+import { attempt, errMessage, retryDelayMs, sleep, SNIPPET_CHARS } from "../llm/transport.js";
+import { extractUsage, parseContent, parseVerdicts, toFindings } from "../llm/schema.js";
+import { validateSampling } from "../llm/sampling.js";
+import { redact } from "../domain/text.js";
+import type { AgentReply, LlmResult } from "../llm/types.js";
 
 /** candidates[0] as an object, when present. */
 function firstCandidate(json: unknown): Record<string, unknown> | undefined {

@@ -2,9 +2,9 @@ import { AGENT_LIMITS } from "./agent-types.js";
 import type { Conversation, ToolCall } from "./agent-types.js";
 import { executeTool } from "./agent-tools.js";
 import type { ToolContext } from "./agent-tools.js";
-import { parseContent, toFindings } from "./llm.js";
+import { parseContent, toFindings } from "./llm/schema.js";
 import { stripProvenance } from "./domain/finding.js";
-import type { AgentReply, LlmResult, LlmUsage } from "./llm.js";
+import type { AgentReply, LlmResult, LlmUsage } from "./llm/types.js";
 
 export interface AgentBudget {
   maxTurns: number;
