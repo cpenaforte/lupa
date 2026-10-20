@@ -41,12 +41,14 @@ import {
   callWithProbe,
   callWithProbeAgent as runProbeAgent,
   ensureOllama,
-  type DedupVerdicts,
-  type LlmResult,
 } from "./llm.js";
+import type { DedupVerdicts, LlmResult } from "./llm/types.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, linkedIssueNumber, neutralise } from "./prompt.js";
 import { catalogProtocolFor, checkModelListed, resolveEndpoint, type CatalogProtocol, type ResolvedEndpoint } from "./providers.js";
-import { buildBody, buildFallbackReport, capBody, eventFor, exitFor, mapToComments, mergeDuplicates, omissionMarkerFor, partitionGate, prioritizeFindings, redactFindings, reopenedKey, resolveReopened } from "./review.js";
+import { buildBody, buildFallbackReport, mapToComments, redactFindings } from "./review/render.js";
+import { eventFor, exitFor, partitionGate, reopenedKey, resolveReopened } from "./review/policy.js";
+import { mergeDuplicates } from "./review/grouping.js";
+import { capBody, omissionMarkerFor, prioritizeFindings } from "./review/limits.js";
 import { runScanners, type ScannerResult } from "./scanners.js";
 import { readCappedFileSync } from "./artifact-limits.js";
 

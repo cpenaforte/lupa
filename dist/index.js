@@ -25852,463 +25852,9 @@ async function executeTool(name, args, ctx, limits) {
   }
 }
 
-// lib/src/review.js
-function keyOf(side, line) {
-  return `${side}:${line}`;
-}
-function isValidLine(v) {
-  return typeof v === "number" && Number.isInteger(v) && v >= 1;
-}
-function hasSuggestion(f) {
-  return typeof f.suggestion === "string" && f.suggestion !== "";
-}
+// lib/src/review/limits.js
 function hasPatch(f) {
   return typeof f.patch === "string" && f.patch.trim() !== "" && !f.patch.endsWith(TRUNC_MARK);
-}
-function fenceFor(content) {
-  let longest = 0;
-  for (const run2 of content.matchAll(/`+/g))
-    longest = Math.max(longest, run2[0].length);
-  return "`".repeat(Math.max(3, longest + 1));
-}
-function provenanceTrailer(f) {
-  const parts = [];
-  if (f.source !== void 0)
-    parts.push(`src:${f.source}`);
-  if (f.confidence !== void 0)
-    parts.push(`conf ${f.confidence}`);
-  return parts.length === 0 ? "" : `
-
-\`${parts.join(" \xB7 ")}\``;
-}
-function formatBody(f, side, reopened = false) {
-  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
-  if (hasPatch(f)) {
-    const fence = fenceFor(f.patch);
-    if (side === "RIGHT") {
-      body += `
-
-${fence}suggestion
-${f.patch}
-${fence}`;
-    } else {
-      body += `
-
-Suggested replacement (advice only):
-${fence}
-${f.patch}
-${fence}`;
-    }
-  }
-  if (hasSuggestion(f)) {
-    body += `
-
-Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
-  }
-  return body + provenanceTrailer(f);
-}
-function indexHunks(hunks) {
-  const index = /* @__PURE__ */ new Map();
-  for (const h of hunks) {
-    let byKey = index.get(h.file);
-    if (byKey === void 0) {
-      byKey = /* @__PURE__ */ new Map();
-      index.set(h.file, byKey);
-    }
-    for (const l of h.lines) {
-      const k = keyOf(l.side, l.line);
-      if (!byKey.has(k))
-        byKey.set(k, l);
-    }
-  }
-  return index;
-}
-function hunkHit(index, file, line) {
-  const byKey = file === "" ? void 0 : index.get(file);
-  if (byKey === void 0)
-    return void 0;
-  return byKey.get(keyOf("RIGHT", line)) ?? byKey.get(keyOf("LEFT", line));
-}
-function reopenedKey(f) {
-  return `${f.rule}\0${f.file}\0${String(f.line)}`;
-}
-function normalizeBot(login) {
-  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
-}
-function resolveReopened(findings, threads, selfLogin) {
-  const self = normalizeBot(selfLogin);
-  const kept = threads.filter((t) => t.isResolved && t.rule !== null && t.authorLogin !== null && normalizeBot(t.authorLogin) === self && (t.line ?? t.originalLine ?? null) !== null);
-  const out = /* @__PURE__ */ new Set();
-  for (const f of findings) {
-    if (typeof f.line !== "number")
-      continue;
-    const rules = new Set(f.rule.split("+"));
-    for (const t of kept) {
-      if (t.path !== f.file)
-        continue;
-      if ((t.line ?? t.originalLine) !== f.line)
-        continue;
-      const threadRules = t.rule.split("+");
-      if (threadRules.some((r) => rules.has(r))) {
-        out.add(reopenedKey(f));
-        break;
-      }
-    }
-  }
-  return out;
-}
-function mapToComments(findings, hunks, reopened) {
-  const index = indexHunks(hunks);
-  const inline = [];
-  const general = [];
-  for (const f of findings) {
-    if (!isValidLine(f.line)) {
-      general.push(f);
-      continue;
-    }
-    const line = f.line;
-    const hit = hunkHit(index, f.file, line);
-    if (hit === void 0) {
-      general.push(f);
-      continue;
-    }
-    const isReopened = reopened?.has(reopenedKey(f)) === true;
-    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
-  }
-  return { inline, general };
-}
-function partitionGate(findings, hunks, files) {
-  const index = indexHunks(hunks);
-  const addFiles = /* @__PURE__ */ new Set();
-  for (const h of hunks) {
-    for (const l of h.lines) {
-      if (l.kind === "add") {
-        addFiles.add(h.file);
-        break;
-      }
-    }
-  }
-  const present = /* @__PURE__ */ new Map();
-  for (const f of files) {
-    if (!present.has(f.file))
-      present.set(f.file, f);
-  }
-  const introduced = [];
-  const general = [];
-  for (const f of findings) {
-    if (isValidLine(f.line)) {
-      const hit = hunkHit(index, f.file, f.line);
-      if (hit !== void 0 && hit.side === "RIGHT" && hit.kind === "add")
-        introduced.push(f);
-      else
-        general.push(f);
-      continue;
-    }
-    if (f.file === "") {
-      general.push(f);
-      continue;
-    }
-    const entry = present.get(f.file);
-    if (entry === void 0 || entry.deleted === true) {
-      general.push(f);
-      continue;
-    }
-    if (entry.hunks === "" || addFiles.has(f.file))
-      introduced.push(f);
-    else
-      general.push(f);
-  }
-  return { introduced, general };
-}
-function eventFor(failLevel, findings) {
-  if (failLevel === "high" && findings.some((f) => f.severity === "high"))
-    return "REQUEST_CHANGES";
-  return "COMMENT";
-}
-function exitFor(failLevel, findings) {
-  if (failLevel === "none")
-    return 0;
-  if (failLevel === "warning")
-    return findings.some((f) => f.severity !== "info") ? 2 : 0;
-  return findings.some((f) => f.severity === "high") ? 1 : 0;
-}
-var FALLBACK_SUMMARY = "lupa: review complete.";
-function redactFindings(findings, secrets) {
-  const keys = secrets.filter((s) => s !== "");
-  return findings.map((f) => {
-    let out = f;
-    for (const key of keys) {
-      out = {
-        ...out,
-        message: redact(out.message, key),
-        file: redact(out.file, key),
-        rule: redact(out.rule, key),
-        ...out.suggestion !== void 0 ? { suggestion: redact(out.suggestion, key) } : {},
-        ...out.patch !== void 0 ? { patch: redact(out.patch, key) } : {},
-        ...out.evidence !== void 0 ? {
-          evidence: {
-            ...out.evidence.analyzer !== void 0 ? { analyzer: redact(out.evidence.analyzer, key) } : {},
-            ...out.evidence.snippet !== void 0 ? { snippet: redact(out.evidence.snippet, key) } : {}
-          }
-        } : {}
-      };
-    }
-    if (out.evidence !== void 0 && out.evidence === f.evidence) {
-      out = { ...out, evidence: { ...out.evidence } };
-    }
-    return out;
-  });
-}
-function locate(f) {
-  if (f.file === "")
-    return "(repository)";
-  return isValidLine(f.line) ? `${f.file}:${f.line}` : f.file;
-}
-function buildFallbackReport(findings, options = {}) {
-  const heading = findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
-  const fullRecords = findings.map((f, index) => {
-    const field = (value) => {
-      const fence = fenceFor(value);
-      return `${fence}text
-${value}
-${fence}`;
-    };
-    const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
-    const provenance = [];
-    if (f.source !== void 0)
-      provenance.push(`- Source:
-${field(f.source)}`);
-    if (f.confidence !== void 0)
-      provenance.push(`- Confidence:
-${field(String(f.confidence))}`);
-    if (f.evidence !== void 0 && (f.evidence.analyzer !== void 0 || f.evidence.snippet !== void 0)) {
-      const parts = [];
-      if (f.evidence.analyzer !== void 0)
-        parts.push(field(`analyzer: ${f.evidence.analyzer}`));
-      if (f.evidence.snippet !== void 0)
-        parts.push(field(f.evidence.snippet));
-      provenance.push(`- Evidence:
-${parts.join("\n")}`);
-    }
-    return [
-      `### Finding ${index + 1}`,
-      "",
-      `- Severity: ${f.severity}`,
-      `- Location:
-${field(locate(f))}`,
-      `- Rule:
-${field(f.rule)}`,
-      `- Message/evidence:
-${field(f.message)}`,
-      ...provenance,
-      `- Suggested remediation (advice only):
-${field(suggestion)}`,
-      ...hasPatch(f) ? [`- Proposed patch (advice only):
-${field(f.patch)}`] : []
-    ].join("\n");
-  });
-  const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
-  const prefixBytes = [0];
-  for (const length of recordBytes) {
-    const previous = prefixBytes[prefixBytes.length - 1];
-    prefixBytes.push(previous + (prefixBytes.length > 1 ? 2 : 0) + length);
-  }
-  const headingBytes = Buffer.byteLength(heading, "utf8");
-  const render = (retained2, marker) => {
-    const records = fullRecords.slice(0, retained2).join("\n\n");
-    if (marker === void 0)
-      return retained2 === 0 ? heading : `${heading}
-
-${records}`;
-    return retained2 === 0 ? `${heading}
-
-${marker}` : `${heading}
-
-${records}
-
-${marker}`;
-  };
-  if (options.maxBytes === void 0) {
-    return render(findings.length);
-  }
-  const maxBytes = options.maxBytes;
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
-    throw new RangeError("maxBytes must be a non-negative safe integer");
-  if (findings.length === 0) {
-    if (headingBytes <= maxBytes)
-      return heading;
-    throw new RangeError("maxBytes is too small for the report heading");
-  }
-  if (headingBytes + 2 + prefixBytes[findings.length] <= maxBytes)
-    return render(findings.length);
-  let retained = -1;
-  let omissionMarker = "";
-  for (let candidateRetained = findings.length - 1; candidateRetained >= 0; candidateRetained--) {
-    const omitted = findings.length - candidateRetained;
-    const marker = `> Omitted: ${omitted} finding(s) omitted because the report output limit was reached.`;
-    const candidateBytes = headingBytes + 2 + prefixBytes[candidateRetained] + (candidateRetained > 0 ? 2 : 0) + Buffer.byteLength(marker, "utf8");
-    if (candidateBytes <= maxBytes) {
-      retained = candidateRetained;
-      omissionMarker = marker;
-      break;
-    }
-  }
-  if (retained < 0)
-    throw new RangeError("maxBytes is too small for the report heading and omission marker");
-  return render(retained, omissionMarker);
-}
-function buildBody(general, summary2, marks) {
-  const head = summary2.trim() === "" ? FALLBACK_SUMMARY : summary2.trim();
-  if (general.length === 0)
-    return head;
-  const reopened = marks?.reopened;
-  const blocking = marks?.blocking;
-  const items = general.map((f) => {
-    const key = reopenedKey(f);
-    const marker = reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
-    let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
-    if (hasPatch(f)) {
-      const fence = fenceFor(f.patch);
-      item += `
-  Suggested replacement (advice only):
-  ${fence}
-  ${f.patch.replace(/\n/g, "\n  ")}
-  ${fence}`;
-    }
-    if (hasSuggestion(f))
-      item += `
-  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
-    return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
-  });
-  const outside = general.filter((f) => blocking?.has(reopenedKey(f)) !== true).length;
-  const list = `**Findings not placed inline:**
-${items.join("\n")}`;
-  if (outside === 0)
-    return `${head}
-
-${list}`;
-  return `${head}
-
-**Note:** ${outside} finding(s) below are outside the PR diff and do not block.
-
-${list}`;
-}
-var MERGE_SEVERITY_RANK = { info: 0, warning: 1, high: 2 };
-function mergeable(a, b) {
-  if (a.file !== b.file)
-    return false;
-  if (a.line === void 0 || b.line === void 0)
-    return a.line === void 0 && b.line === void 0;
-  return a.line === b.line;
-}
-function survivor(members) {
-  const first = members[0];
-  let line;
-  for (const m of members) {
-    if (m.line !== void 0) {
-      line = m.line;
-      break;
-    }
-  }
-  const rules = [];
-  for (const m of members)
-    if (!rules.includes(m.rule))
-      rules.push(m.rule);
-  let severity = first.severity;
-  for (const m of members) {
-    if (MERGE_SEVERITY_RANK[m.severity] > MERGE_SEVERITY_RANK[severity])
-      severity = m.severity;
-  }
-  const out = {
-    severity,
-    file: first.file,
-    rule: capText(rules.join("+"), RULE_CAP),
-    message: capText(members.map((m) => `[${m.rule}] ${m.message}`).join("\n\n"), MSG_CAP)
-  };
-  if (line !== void 0)
-    out.line = line;
-  for (const m of members) {
-    if (m.suggestion !== void 0) {
-      out.suggestion = m.suggestion;
-      break;
-    }
-  }
-  for (const m of members) {
-    if (hasPatch(m)) {
-      out.patch = m.patch;
-      break;
-    }
-  }
-  const sources = [];
-  for (const m of members) {
-    if (m.source !== void 0 && !sources.includes(m.source))
-      sources.push(m.source);
-  }
-  if (sources.length > 0)
-    out.source = capText(sources.join("+"), RULE_CAP);
-  let confidence;
-  for (const m of members) {
-    if (m.confidence !== void 0 && (confidence === void 0 || m.confidence > confidence)) {
-      confidence = m.confidence;
-    }
-  }
-  if (confidence !== void 0)
-    out.confidence = confidence;
-  let snippet;
-  const analyzers = [];
-  for (const m of members) {
-    if (m.evidence === void 0)
-      continue;
-    if (snippet === void 0 && m.evidence.snippet !== void 0)
-      snippet = m.evidence.snippet;
-    if (m.evidence.analyzer !== void 0 && !analyzers.includes(m.evidence.analyzer)) {
-      analyzers.push(m.evidence.analyzer);
-    }
-  }
-  if (snippet !== void 0 || analyzers.length > 0) {
-    out.evidence = {
-      ...analyzers.length > 0 ? { analyzer: capText(analyzers.join("+"), RULE_CAP) } : {},
-      ...snippet !== void 0 ? { snippet } : {}
-    };
-  }
-  return out;
-}
-function mergeDuplicates(findings, verdicts) {
-  const parent = findings.map((_, i) => i);
-  const root = (x) => parent[x] === x ? x : parent[x] = root(parent[x]);
-  let dropped = 0;
-  const consider = (a, b) => {
-    if (!Number.isInteger(a) || !Number.isInteger(b)) {
-      dropped += 1;
-      return;
-    }
-    const fa = findings[a];
-    const fb = findings[b];
-    if (fa === void 0 || fb === void 0 || !mergeable(fa, fb)) {
-      dropped += 1;
-      return;
-    }
-    const ra = root(a);
-    const rb = root(b);
-    if (ra !== rb)
-      parent[rb] = ra;
-  };
-  for (const [a, b] of verdicts.pairs)
-    consider(a, b);
-  for (const [a, b] of verdicts.links)
-    consider(a, b);
-  const groups = /* @__PURE__ */ new Map();
-  for (let i = 0; i < findings.length; i++) {
-    const r = root(i);
-    const g = groups.get(r);
-    if (g === void 0)
-      groups.set(r, [i]);
-    else
-      g.push(i);
-  }
-  const ordered = [...groups.values()].sort((x, y) => x[0] - y[0]);
-  const merged = ordered.map((members) => members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])));
-  return { merged, dropped };
 }
 var SEVERITY_RANK = { high: 0, warning: 1, info: 2 };
 function prioritizeFindings(findings) {
@@ -28988,6 +28534,466 @@ function linkedIssueNumber(prBody) {
     return null;
   const m = CLOSING_REF.exec(prBody);
   return m ? Number(m[1]) : null;
+}
+
+// lib/src/review/policy.js
+function keyOf(side, line) {
+  return `${side}:${line}`;
+}
+function isValidLine(v) {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1;
+}
+function indexHunks(hunks) {
+  const index = /* @__PURE__ */ new Map();
+  for (const h of hunks) {
+    let byKey = index.get(h.file);
+    if (byKey === void 0) {
+      byKey = /* @__PURE__ */ new Map();
+      index.set(h.file, byKey);
+    }
+    for (const l of h.lines) {
+      const k = keyOf(l.side, l.line);
+      if (!byKey.has(k))
+        byKey.set(k, l);
+    }
+  }
+  return index;
+}
+function hunkHit(index, file, line) {
+  const byKey = file === "" ? void 0 : index.get(file);
+  if (byKey === void 0)
+    return void 0;
+  return byKey.get(keyOf("RIGHT", line)) ?? byKey.get(keyOf("LEFT", line));
+}
+function reopenedKey(f) {
+  return `${f.rule}\0${f.file}\0${String(f.line)}`;
+}
+function normalizeBot(login) {
+  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
+}
+function resolveReopened(findings, threads, selfLogin) {
+  const self = normalizeBot(selfLogin);
+  const kept = threads.filter((t) => t.isResolved && t.rule !== null && t.authorLogin !== null && normalizeBot(t.authorLogin) === self && (t.line ?? t.originalLine ?? null) !== null);
+  const out = /* @__PURE__ */ new Set();
+  for (const f of findings) {
+    if (typeof f.line !== "number")
+      continue;
+    const rules = new Set(f.rule.split("+"));
+    for (const t of kept) {
+      if (t.path !== f.file)
+        continue;
+      if ((t.line ?? t.originalLine) !== f.line)
+        continue;
+      const threadRules = t.rule.split("+");
+      if (threadRules.some((r) => rules.has(r))) {
+        out.add(reopenedKey(f));
+        break;
+      }
+    }
+  }
+  return out;
+}
+function partitionGate(findings, hunks, files) {
+  const index = indexHunks(hunks);
+  const addFiles = /* @__PURE__ */ new Set();
+  for (const h of hunks) {
+    for (const l of h.lines) {
+      if (l.kind === "add") {
+        addFiles.add(h.file);
+        break;
+      }
+    }
+  }
+  const present = /* @__PURE__ */ new Map();
+  for (const f of files) {
+    if (!present.has(f.file))
+      present.set(f.file, f);
+  }
+  const introduced = [];
+  const general = [];
+  for (const f of findings) {
+    if (isValidLine(f.line)) {
+      const hit = hunkHit(index, f.file, f.line);
+      if (hit !== void 0 && hit.side === "RIGHT" && hit.kind === "add")
+        introduced.push(f);
+      else
+        general.push(f);
+      continue;
+    }
+    if (f.file === "") {
+      general.push(f);
+      continue;
+    }
+    const entry = present.get(f.file);
+    if (entry === void 0 || entry.deleted === true) {
+      general.push(f);
+      continue;
+    }
+    if (entry.hunks === "" || addFiles.has(f.file))
+      introduced.push(f);
+    else
+      general.push(f);
+  }
+  return { introduced, general };
+}
+function eventFor(failLevel, findings) {
+  if (failLevel === "high" && findings.some((f) => f.severity === "high"))
+    return "REQUEST_CHANGES";
+  return "COMMENT";
+}
+function exitFor(failLevel, findings) {
+  if (failLevel === "none")
+    return 0;
+  if (failLevel === "warning")
+    return findings.some((f) => f.severity !== "info") ? 2 : 0;
+  return findings.some((f) => f.severity === "high") ? 1 : 0;
+}
+
+// lib/src/review/render.js
+function hasSuggestion(f) {
+  return typeof f.suggestion === "string" && f.suggestion !== "";
+}
+function fenceFor(content) {
+  let longest = 0;
+  for (const run2 of content.matchAll(/`+/g))
+    longest = Math.max(longest, run2[0].length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+function provenanceTrailer(f) {
+  const parts = [];
+  if (f.source !== void 0)
+    parts.push(`src:${f.source}`);
+  if (f.confidence !== void 0)
+    parts.push(`conf ${f.confidence}`);
+  return parts.length === 0 ? "" : `
+
+\`${parts.join(" \xB7 ")}\``;
+}
+function formatBody(f, side, reopened = false) {
+  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
+  if (hasPatch(f)) {
+    const fence = fenceFor(f.patch);
+    if (side === "RIGHT") {
+      body += `
+
+${fence}suggestion
+${f.patch}
+${fence}`;
+    } else {
+      body += `
+
+Suggested replacement (advice only):
+${fence}
+${f.patch}
+${fence}`;
+    }
+  }
+  if (hasSuggestion(f)) {
+    body += `
+
+Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+  }
+  return body + provenanceTrailer(f);
+}
+function mapToComments(findings, hunks, reopened) {
+  const index = indexHunks(hunks);
+  const inline = [];
+  const general = [];
+  for (const f of findings) {
+    if (!isValidLine(f.line)) {
+      general.push(f);
+      continue;
+    }
+    const line = f.line;
+    const hit = hunkHit(index, f.file, line);
+    if (hit === void 0) {
+      general.push(f);
+      continue;
+    }
+    const isReopened = reopened?.has(reopenedKey(f)) === true;
+    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
+  }
+  return { inline, general };
+}
+var FALLBACK_SUMMARY = "lupa: review complete.";
+function redactFindings(findings, secrets) {
+  const keys = secrets.filter((s) => s !== "");
+  return findings.map((f) => {
+    let out = f;
+    for (const key of keys) {
+      out = {
+        ...out,
+        message: redact(out.message, key),
+        file: redact(out.file, key),
+        rule: redact(out.rule, key),
+        ...out.suggestion !== void 0 ? { suggestion: redact(out.suggestion, key) } : {},
+        ...out.patch !== void 0 ? { patch: redact(out.patch, key) } : {},
+        ...out.evidence !== void 0 ? {
+          evidence: {
+            ...out.evidence.analyzer !== void 0 ? { analyzer: redact(out.evidence.analyzer, key) } : {},
+            ...out.evidence.snippet !== void 0 ? { snippet: redact(out.evidence.snippet, key) } : {}
+          }
+        } : {}
+      };
+    }
+    if (out.evidence !== void 0 && out.evidence === f.evidence) {
+      out = { ...out, evidence: { ...out.evidence } };
+    }
+    return out;
+  });
+}
+function locate(f) {
+  if (f.file === "")
+    return "(repository)";
+  return isValidLine(f.line) ? `${f.file}:${f.line}` : f.file;
+}
+function buildFallbackReport(findings, options = {}) {
+  const heading = findings.length === 0 ? "lupa: no findings." : `lupa: ${findings.length} finding(s).`;
+  const fullRecords = findings.map((f, index) => {
+    const field = (value) => {
+      const fence = fenceFor(value);
+      return `${fence}text
+${value}
+${fence}`;
+    };
+    const suggestion = hasSuggestion(f) ? f.suggestion : "No remediation supplied";
+    const provenance = [];
+    if (f.source !== void 0)
+      provenance.push(`- Source:
+${field(f.source)}`);
+    if (f.confidence !== void 0)
+      provenance.push(`- Confidence:
+${field(String(f.confidence))}`);
+    if (f.evidence !== void 0 && (f.evidence.analyzer !== void 0 || f.evidence.snippet !== void 0)) {
+      const parts = [];
+      if (f.evidence.analyzer !== void 0)
+        parts.push(field(`analyzer: ${f.evidence.analyzer}`));
+      if (f.evidence.snippet !== void 0)
+        parts.push(field(f.evidence.snippet));
+      provenance.push(`- Evidence:
+${parts.join("\n")}`);
+    }
+    return [
+      `### Finding ${index + 1}`,
+      "",
+      `- Severity: ${f.severity}`,
+      `- Location:
+${field(locate(f))}`,
+      `- Rule:
+${field(f.rule)}`,
+      `- Message/evidence:
+${field(f.message)}`,
+      ...provenance,
+      `- Suggested remediation (advice only):
+${field(suggestion)}`,
+      ...hasPatch(f) ? [`- Proposed patch (advice only):
+${field(f.patch)}`] : []
+    ].join("\n");
+  });
+  const recordBytes = fullRecords.map((record) => Buffer.byteLength(record, "utf8"));
+  const prefixBytes = [0];
+  for (const length of recordBytes) {
+    const previous = prefixBytes[prefixBytes.length - 1];
+    prefixBytes.push(previous + (prefixBytes.length > 1 ? 2 : 0) + length);
+  }
+  const headingBytes = Buffer.byteLength(heading, "utf8");
+  const render = (retained2, marker) => {
+    const records = fullRecords.slice(0, retained2).join("\n\n");
+    if (marker === void 0)
+      return retained2 === 0 ? heading : `${heading}
+
+${records}`;
+    return retained2 === 0 ? `${heading}
+
+${marker}` : `${heading}
+
+${records}
+
+${marker}`;
+  };
+  if (options.maxBytes === void 0) {
+    return render(findings.length);
+  }
+  const maxBytes = options.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    throw new RangeError("maxBytes must be a non-negative safe integer");
+  if (findings.length === 0) {
+    if (headingBytes <= maxBytes)
+      return heading;
+    throw new RangeError("maxBytes is too small for the report heading");
+  }
+  if (headingBytes + 2 + prefixBytes[findings.length] <= maxBytes)
+    return render(findings.length);
+  let retained = -1;
+  let omissionMarker = "";
+  for (let candidateRetained = findings.length - 1; candidateRetained >= 0; candidateRetained--) {
+    const omitted = findings.length - candidateRetained;
+    const marker = `> Omitted: ${omitted} finding(s) omitted because the report output limit was reached.`;
+    const candidateBytes = headingBytes + 2 + prefixBytes[candidateRetained] + (candidateRetained > 0 ? 2 : 0) + Buffer.byteLength(marker, "utf8");
+    if (candidateBytes <= maxBytes) {
+      retained = candidateRetained;
+      omissionMarker = marker;
+      break;
+    }
+  }
+  if (retained < 0)
+    throw new RangeError("maxBytes is too small for the report heading and omission marker");
+  return render(retained, omissionMarker);
+}
+function buildBody(general, summary2, marks) {
+  const head = summary2.trim() === "" ? FALLBACK_SUMMARY : summary2.trim();
+  if (general.length === 0)
+    return head;
+  const reopened = marks?.reopened;
+  const blocking = marks?.blocking;
+  const items = general.map((f) => {
+    const key = reopenedKey(f);
+    const marker = reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
+    let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
+    if (hasPatch(f)) {
+      const fence = fenceFor(f.patch);
+      item += `
+  Suggested replacement (advice only):
+  ${fence}
+  ${f.patch.replace(/\n/g, "\n  ")}
+  ${fence}`;
+    }
+    if (hasSuggestion(f))
+      item += `
+  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+    return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
+  });
+  const outside = general.filter((f) => blocking?.has(reopenedKey(f)) !== true).length;
+  const list = `**Findings not placed inline:**
+${items.join("\n")}`;
+  if (outside === 0)
+    return `${head}
+
+${list}`;
+  return `${head}
+
+**Note:** ${outside} finding(s) below are outside the PR diff and do not block.
+
+${list}`;
+}
+
+// lib/src/review/grouping.js
+var MERGE_SEVERITY_RANK = { info: 0, warning: 1, high: 2 };
+function mergeable(a, b) {
+  if (a.file !== b.file)
+    return false;
+  if (a.line === void 0 || b.line === void 0)
+    return a.line === void 0 && b.line === void 0;
+  return a.line === b.line;
+}
+function survivor(members) {
+  const first = members[0];
+  let line;
+  for (const m of members) {
+    if (m.line !== void 0) {
+      line = m.line;
+      break;
+    }
+  }
+  const rules = [];
+  for (const m of members)
+    if (!rules.includes(m.rule))
+      rules.push(m.rule);
+  let severity = first.severity;
+  for (const m of members) {
+    if (MERGE_SEVERITY_RANK[m.severity] > MERGE_SEVERITY_RANK[severity])
+      severity = m.severity;
+  }
+  const out = {
+    severity,
+    file: first.file,
+    rule: capText(rules.join("+"), RULE_CAP),
+    message: capText(members.map((m) => `[${m.rule}] ${m.message}`).join("\n\n"), MSG_CAP)
+  };
+  if (line !== void 0)
+    out.line = line;
+  for (const m of members) {
+    if (m.suggestion !== void 0) {
+      out.suggestion = m.suggestion;
+      break;
+    }
+  }
+  for (const m of members) {
+    if (hasPatch(m)) {
+      out.patch = m.patch;
+      break;
+    }
+  }
+  const sources = [];
+  for (const m of members) {
+    if (m.source !== void 0 && !sources.includes(m.source))
+      sources.push(m.source);
+  }
+  if (sources.length > 0)
+    out.source = capText(sources.join("+"), RULE_CAP);
+  let confidence;
+  for (const m of members) {
+    if (m.confidence !== void 0 && (confidence === void 0 || m.confidence > confidence)) {
+      confidence = m.confidence;
+    }
+  }
+  if (confidence !== void 0)
+    out.confidence = confidence;
+  let snippet;
+  const analyzers = [];
+  for (const m of members) {
+    if (m.evidence === void 0)
+      continue;
+    if (snippet === void 0 && m.evidence.snippet !== void 0)
+      snippet = m.evidence.snippet;
+    if (m.evidence.analyzer !== void 0 && !analyzers.includes(m.evidence.analyzer)) {
+      analyzers.push(m.evidence.analyzer);
+    }
+  }
+  if (snippet !== void 0 || analyzers.length > 0) {
+    out.evidence = {
+      ...analyzers.length > 0 ? { analyzer: capText(analyzers.join("+"), RULE_CAP) } : {},
+      ...snippet !== void 0 ? { snippet } : {}
+    };
+  }
+  return out;
+}
+function mergeDuplicates(findings, verdicts) {
+  const parent = findings.map((_, i) => i);
+  const root = (x) => parent[x] === x ? x : parent[x] = root(parent[x]);
+  let dropped = 0;
+  const consider = (a, b) => {
+    if (!Number.isInteger(a) || !Number.isInteger(b)) {
+      dropped += 1;
+      return;
+    }
+    const fa = findings[a];
+    const fb = findings[b];
+    if (fa === void 0 || fb === void 0 || !mergeable(fa, fb)) {
+      dropped += 1;
+      return;
+    }
+    const ra = root(a);
+    const rb = root(b);
+    if (ra !== rb)
+      parent[rb] = ra;
+  };
+  for (const [a, b] of verdicts.pairs)
+    consider(a, b);
+  for (const [a, b] of verdicts.links)
+    consider(a, b);
+  const groups = /* @__PURE__ */ new Map();
+  for (let i = 0; i < findings.length; i++) {
+    const r = root(i);
+    const g = groups.get(r);
+    if (g === void 0)
+      groups.set(r, [i]);
+    else
+      g.push(i);
+  }
+  const ordered = [...groups.values()].sort((x, y) => x[0] - y[0]);
+  const merged = ordered.map((members) => members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])));
+  return { merged, dropped };
 }
 
 // lib/src/scanners.js
