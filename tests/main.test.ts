@@ -23,11 +23,12 @@ import {
   DEFAULT_MAX_REVIEW_BODY_CHARS,
 } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
-import { ReadonlyTokenError, StaleHeadError, type ReviewThread } from "../src/github.js";
+import { listReviewThreads, ReadonlyTokenError, StaleHeadError, type Octokit, type ReviewThread } from "../src/github.js";
 import { buildFallbackReport, redactFindings, type ReviewPayload } from "../src/review.js";
 import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
+import { memberRulesOf } from "../src/review/thread-identity.js";
 
 const SHA_HEAD = "a".repeat(40);
 const SHA_OTHER = "c".repeat(40);
@@ -567,7 +568,7 @@ async function runPrivileged(o: PrivOpts = {}) {
     },
   };
   const out = await run(env, deps);
-  return { ...out, reviews: rec.reviews, payloads: rec.reviews, reviewAttempts: rec.reviewAttempts, summaryPath };
+  return { ...out, reviews: rec.reviews, payloads: rec.reviews, reviewAttempts: rec.reviewAttempts, summaryPath, artifactDir };
 }
 
 describe("run() orchestration", () => {
@@ -2313,6 +2314,55 @@ ${FUNNEL_DIFF_LINES.join("\n")}
 });
 
 describe("dedup merge and flow wiring", () => {
+  it("keeps oversized identity groups separate without losing any retained rule", async () => {
+    const findings: Finding[] = Array.from({ length: 500 }, (_, i) => ({ severity: "high", file: "src/a.ts", line: 2, rule: `${i}-` + "r".repeat(90), message: "secret" }));
+    const pairs: Array<[number, number]> = findings.slice(1).map((_, i) => [i, i + 1]);
+    const r = await runPrivileged({ findings, metaVerdicts: { pairs, links: [], malformed: 0 }, maxFindings: 500, maxInlineComments: 500, maxReviewBodyChars: 1000, failLevel: "high" });
+    const comments = r.payloads[0]!.comments;
+    expect(comments).toHaveLength(500);
+    expect(comments.map((comment) => memberRulesOf(comment.body))).toEqual(findings.map((f) => [f.rule]));
+    expect(comments.every((comment) => Buffer.byteLength(comment.body) <= 60000)).toBe(true);
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(readFileSync(join(r.artifactDir, "findings.json"), "utf8"))).toEqual(findings);
+  });
+  it.each([false, true])("preserves raw member identities through rendering and a resolved thread on the next run (reverse=%s)", async (reverse) => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: "secret " + "x".repeat(1800), patch: "fixed" };
+    const low: Finding = { ...high, severity: "info", rule: "r".repeat(99) };
+    const scan = reverse ? [high, low] : [low, high];
+    const first = await runWithMocks({ scan, llm: [], maxReviewBodyChars: 1000, failLevel: "high", llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    const comment = first.reviews[0]!.comments[0]!;
+    expect(comment.body.length).toBeGreaterThan(1000);
+    expect(comment.body).toContain("```suggestion\nfixed\n```");
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "TEST-ACTOR[bot]" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const threads = await listReviewThreads(octokit, "o", "r", 7);
+    expect(threads[0]!.rules).toEqual(reverse ? ["github-pat", "r".repeat(99)] : ["r".repeat(99), "github-pat"]);
+    const second = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
+    expect(second.exitCode).toBe(1);
+    expect(second.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+    const attacker = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads: threads.map((t) => ({ ...t, authorLogin: "attacker" })) });
+    expect(attacker.exitCode).toBe(0);
+  });
+  it.each([false, true])("gates raw resolved context findings before rule truncation (reverse=%s)", async (reverse) => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 3, rule: "github-pat", message: "secret" };
+    const first: Finding = { ...high, rule: "r".repeat(99) };
+    const threads: ReviewThread[] = [{ authorLogin: "TEST-ACTOR[bot]", isResolved: true, path: high.file, line: 3, rule: high.rule }];
+    const scan = reverse ? [high, first] : [first, high];
+    const plain = await runWithMocks({ scan, llm: [], failLevel: "high", threads });
+    const grouped = await runWithMocks({ scan, llm: [], failLevel: "high", threads, llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    expect(plain.exitCode).toBe(1);
+    expect(grouped.exitCode).toBe(1);
+    expect(grouped.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(grouped.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+  });
+
+  it("does not promote a high duplicate merely because a low member was resolved", async () => {
+    const low: Finding = { severity: "info", file: "src/a.ts", line: 3, rule: "low", message: "low" };
+    const high: Finding = { ...low, severity: "high", rule: "high" };
+    const r = await runWithMocks({ scan: [low, high], llm: [], failLevel: "high", threads: [{ authorLogin: "test-actor", isResolved: true, path: low.file, line: 3, rule: "low" }], llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    expect(r.exitCode).toBe(0);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+  });
   const CUT_DIFF = [
     "diff --git a/f.ts b/f.ts",
     "index 111..222 100644",

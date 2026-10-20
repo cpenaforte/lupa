@@ -20928,6 +20928,14 @@ function parseFailLevel(v) {
     return v;
   throw new Error(`Invalid fail_level "${v}": expected none, warning, or high`);
 }
+function parseReviewActor(raw) {
+  if (raw === "")
+    return void 0;
+  if (!/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?(?:\[bot\])?$/i.test(raw) || raw.includes("--")) {
+    throw new Error("Invalid review_actor: expected a GitHub login, optionally ending in [bot]");
+  }
+  return raw;
+}
 function readString(name, fallback = "") {
   const v = getInput(name);
   return v === "" ? fallback : v;
@@ -20977,8 +20985,10 @@ function getInputs() {
   const llmTemperature = readOptionalDecimal("llm_temperature");
   const llmTopP = readOptionalDecimal("llm_top_p");
   const prNumber = readOptionalInt("pr_number", 1);
+  const reviewActor = parseReviewActor(getInput("review_actor", { trimWhitespace: false }));
   return {
     githubToken: readString("github_token"),
+    ...reviewActor !== void 0 ? { reviewActor } : {},
     llmProvider: readEnum("llm_provider", LLM_PROVIDERS, "openai"),
     llmBaseUrl: readString("llm_base_url"),
     llmApiStyle: readEnum("llm_api_style", LLM_API_STYLES, "auto"),
@@ -25384,6 +25394,32 @@ ${tailsBlock}`;
 ${tailBlock}`;
 }
 
+// lib/src/review/thread-identity.js
+var THREAD_BODY_BYTES = 6e4;
+var PREFIX = "<!-- lupa:rules:v1:";
+function memberRuleMarker(rules) {
+  return `${PREFIX}${Buffer.from(JSON.stringify(rules), "utf8").toString("base64url")} -->`;
+}
+function memberRulesOf(body) {
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > THREAD_BODY_BYTES)
+    return void 0;
+  const match = /\n\n<!-- lupa:rules:v1:([A-Za-z0-9_-]+) -->$/.exec(body);
+  if (match === null)
+    return void 0;
+  const encoded = match[1];
+  try {
+    const decoded = Buffer.from(encoded, "base64url");
+    if (decoded.toString("base64url") !== encoded)
+      return void 0;
+    const rules = JSON.parse(decoded.toString("utf8"));
+    if (!Array.isArray(rules) || rules.length === 0 || rules.some((rule) => typeof rule !== "string"))
+      return void 0;
+    return rules;
+  } catch {
+    return void 0;
+  }
+}
+
 // lib/src/github.js
 var ReadonlyTokenError = class extends Error {
   status;
@@ -25555,13 +25591,15 @@ function asThread(n) {
   const login = first?.author?.login;
   const line = typeof n.line === "number" ? n.line : null;
   const originalLine = typeof n.originalLine === "number" ? n.originalLine : null;
+  const rules = memberRulesOf(first?.body);
   return {
     authorLogin: typeof login === "string" ? login : null,
     isResolved: n.isResolved === true,
     path: typeof n.path === "string" ? n.path : "",
     line,
     originalLine,
-    rule: threadRuleOf(first?.body)
+    rule: threadRuleOf(first?.body),
+    ...rules === void 0 ? {} : { rules }
   };
 }
 async function listReviewThreads(octokit, owner, repo, pr) {
@@ -25594,32 +25632,20 @@ async function listReviewThreads(octokit, owner, repo, pr) {
     return [];
   }
 }
-var LUPA_BODY_PREFIX = "lupa:";
-async function fetchActor(octokit, owner, repo, pr) {
+async function fetchActor(octokit, owner, repo, pr, options) {
+  const trusted = parseReviewActor(options?.trustedLogin ?? "");
   try {
     const me = await octokit.rest.users.getAuthenticated();
     const login = me.data.login;
-    if (typeof login === "string" && login !== "")
-      return login;
-  } catch {
-  }
-  try {
-    const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
-      owner,
-      repo,
-      pull_number: pr,
-      per_page: 100
-    });
-    let newest;
-    for (const r of reviews) {
-      if (typeof r.body === "string" && r.body.startsWith(LUPA_BODY_PREFIX) && typeof r.user?.login === "string") {
-        newest = r.user.login;
-      }
+    if (typeof login === "string") {
+      const authenticated = parseReviewActor(login);
+      if (authenticated !== void 0)
+        return authenticated;
     }
-    if (newest !== void 0)
-      return newest;
   } catch {
   }
+  if (trusted !== void 0)
+    return trusted;
   warning("lupa: could not determine the review actor; skipping the wrongly-resolved re-check");
   return void 0;
 }
@@ -25944,11 +25970,11 @@ function reopenedKey(f) {
   return `${f.rule}\0${f.file}\0${String(f.line)}`;
 }
 function normalizeBot(login) {
-  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
+  return login.toLowerCase().replace(/\[bot\]$/, "");
 }
 function resolveReopened(findings, threads, selfLogin) {
   const self = normalizeBot(selfLogin);
-  const kept = threads.filter((t) => t.isResolved && t.rule !== null && t.authorLogin !== null && normalizeBot(t.authorLogin) === self && (t.line ?? t.originalLine ?? null) !== null);
+  const kept = threads.filter((t) => t.isResolved && (t.rules !== void 0 || t.rule !== null) && t.authorLogin !== null && normalizeBot(t.authorLogin) === self && (t.line ?? t.originalLine ?? null) !== null);
   const out = /* @__PURE__ */ new Set();
   for (const f of findings) {
     if (typeof f.line !== "number")
@@ -25959,8 +25985,8 @@ function resolveReopened(findings, threads, selfLogin) {
         continue;
       if ((t.line ?? t.originalLine) !== f.line)
         continue;
-      const threadRules = t.rule.split("+");
-      if (threadRules.some((r) => rules.has(r))) {
+      const matches = t.rules === void 0 ? t.rule.split("+").some((r) => rules.has(r)) : t.rules.includes(f.rule);
+      if (matches) {
         out.add(reopenedKey(f));
         break;
       }
@@ -26010,6 +26036,27 @@ function partitionGate(findings, hunks, files) {
       general.push(f);
   }
   return { introduced, general };
+}
+function evaluateRawGate(findings, hunks, files, threads, actor) {
+  const introduced = new Set(partitionGate(findings, hunks, files).introduced.map(reopenedKey));
+  const reopenedKeys = actor === void 0 ? /* @__PURE__ */ new Set() : resolveReopened(findings, threads, actor);
+  const blocking = findings.filter((f) => introduced.has(reopenedKey(f)) || reopenedKeys.has(reopenedKey(f)));
+  return { blocking, blockingKeys: new Set(blocking.map(reopenedKey)), reopenedKeys };
+}
+function projectRenderMarks(groups, findings, decision) {
+  const blocking = /* @__PURE__ */ new Set();
+  const reopened = /* @__PURE__ */ new Set();
+  for (const group of groups) {
+    const key = reopenedKey(group.finding);
+    for (const i of group.members) {
+      const memberKey = reopenedKey(findings[i]);
+      if (decision.blockingKeys.has(memberKey))
+        blocking.add(key);
+      if (decision.reopenedKeys.has(memberKey))
+        reopened.add(key);
+    }
+  }
+  return { blocking, reopened };
 }
 function eventFor(failLevel, findings) {
   if (failLevel === "high" && findings.some((f) => f.severity === "high"))
@@ -26070,7 +26117,7 @@ Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
   }
   return body + provenanceTrailer(f);
 }
-function mapToComments(findings, hunks, reopened) {
+function mapToComments(findings, hunks, reopened, identityMarkers) {
   const index = indexHunks(hunks);
   const inline = [];
   const general = [];
@@ -26086,7 +26133,11 @@ function mapToComments(findings, hunks, reopened) {
       continue;
     }
     const isReopened = reopened?.has(reopenedKey(f)) === true;
-    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
+    const marker = identityMarkers?.get(f);
+    const body = formatBody(f, hit.side, isReopened) + (marker === void 0 ? "" : `
+
+${marker}`);
+    inline.push({ path: f.file, line, side: hit.side, body, rule: f.rule });
   }
   return { inline, general };
 }
@@ -26362,7 +26413,7 @@ function survivor(members) {
   }
   return out;
 }
-function mergeDuplicates(findings, verdicts) {
+function groupFindings(findings, verdicts) {
   const parent = findings.map((_, i) => i);
   const root = (x) => parent[x] === x ? x : parent[x] = root(parent[x]);
   let dropped = 0;
@@ -26396,8 +26447,14 @@ function mergeDuplicates(findings, verdicts) {
       g.push(i);
   }
   const ordered = [...groups.values()].sort((x, y) => x[0] - y[0]);
-  const merged = ordered.map((members) => members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])));
-  return { merged, dropped };
+  return {
+    groups: ordered.map((members) => ({ members, finding: members.length === 1 ? findings[members[0]] : survivor(members.map((i) => findings[i])) })),
+    dropped
+  };
+}
+function mergeDuplicates(findings, verdicts) {
+  const { groups, dropped } = groupFindings(findings, verdicts);
+  return { merged: groups.map((g) => g.finding), dropped };
 }
 
 // lib/src/application/slow-path.js
@@ -27578,33 +27635,51 @@ ${items.join("\n")}`;
 async function publishReview(a) {
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
-  const { merged, dropped } = a.verdicts === void 0 ? { merged: fullSet, dropped: 0 } : mergeDuplicates(fullSet, a.verdicts);
-  if (dropped > 0)
-    warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
   const parsed = parseHunks(a.hunks);
-  const { introduced } = partitionGate(merged, parsed, a.hunks);
-  const introducedKeys = new Set(introduced.map(reopenedKey));
-  let reopened = /* @__PURE__ */ new Set();
-  if (introduced.length < merged.length && a.env.inputs.githubToken !== "") {
+  const { introduced } = partitionGate(fullSet, parsed, a.hunks);
+  let actor;
+  let threads = [];
+  if (introduced.length < fullSet.length && a.env.inputs.githubToken !== "") {
     try {
-      const self = await a.deps.gh.getActor(a.pr);
-      if (self === void 0) {
+      actor = await a.deps.gh.getActor(a.pr);
+      if (actor === void 0) {
         warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
       } else {
-        reopened = resolveReopened(merged, await a.deps.gh.listReviewThreads(a.pr), self);
+        threads = await a.deps.gh.listReviewThreads(a.pr);
       }
     } catch {
       warning("lupa: review-thread re-read failed; gating on diff membership only");
-      reopened = /* @__PURE__ */ new Set();
+      threads = [];
     }
   }
-  const blocking = merged.filter((f) => introducedKeys.has(reopenedKey(f)) || reopened.has(reopenedKey(f)));
-  const blockingKeys = new Set(blocking.map(reopenedKey));
+  const decision = evaluateRawGate(fullSet, parsed, a.hunks, threads, actor);
+  const blocking = decision.blocking;
+  const { groups: proposedGroups, dropped } = groupFindings(fullSet, a.verdicts ?? { pairs: [], links: [], malformed: 0 });
+  if (dropped > 0)
+    warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
+  const identityMarkers = /* @__PURE__ */ new Map();
+  const groups = proposedGroups.flatMap((group) => {
+    if (group.members.length === 1)
+      return [group];
+    const marker = memberRuleMarker([...new Set(group.members.map((i) => fullSet[i].rule))]);
+    const largestBody = Math.max(...["LEFT", "RIGHT"].map((side) => Buffer.byteLength(formatBody(group.finding, side, true), "utf8")));
+    if (largestBody + Buffer.byteLength(marker, "utf8") + 2 > THREAD_BODY_BYTES) {
+      return group.members.map((i) => {
+        const finding = fullSet[i];
+        identityMarkers.set(finding, memberRuleMarker([finding.rule]));
+        return { finding, members: [i] };
+      });
+    }
+    identityMarkers.set(group.finding, marker);
+    return [group];
+  });
+  const merged = groups.map((g) => g.finding);
+  const { blocking: blockingKeys, reopened } = projectRenderMarks(groups, fullSet, decision);
   const ordered = prioritizeFindings(merged);
   const retained = ordered.slice(0, inputs.maxFindings);
   const omitted = merged.length - retained.length;
   const omissionMarker = omitted > 0 ? omissionMarkerFor(omitted, inputs.maxFindings) : void 0;
-  const { inline, general } = mapToComments(retained, parsed, reopened);
+  const { inline, general } = mapToComments(retained, parsed, reopened, identityMarkers);
   const postedInline = inline.slice(0, inputs.maxInlineComments);
   const excessInline = inline.slice(inputs.maxInlineComments);
   let body = buildBody(general, summaryFor(fullSet), { reopened, blocking: blockingKeys });
@@ -27635,7 +27710,7 @@ async function publishReview(a) {
   }
   if (!a.env.inputs.postComment) {
     const high = fullSet.filter((f) => f.severity === "high").length;
-    info(`post_comment is false: dry-run, nothing posted (would post event=${payload.event}, inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${blocking.length}, omitted=${omitted})`);
+    info(`post_comment is false: dry-run, nothing posted (would post event=${payload.event}, inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${merged.filter((f) => blockingKeys.has(reopenedKey(f))).length}, omitted=${omitted})`);
     return { blocking };
   }
   const canWrite = !a.isFork || a.env.tokenType === "app" || a.env.tokenType === "workflow-run";
@@ -28117,7 +28192,7 @@ function readRunEnv() {
 }
 
 // lib/src/platform/github-gateway.js
-function createGateway(token) {
+function createGateway(token, options) {
   let client;
   const octokit = () => client ??= getOctokit(token);
   return {
@@ -28161,7 +28236,7 @@ function createGateway(token) {
       if (token === "")
         return void 0;
       const { owner, repo } = context2.repo;
-      return fetchActor(octokit(), owner, repo, pr);
+      return fetchActor(octokit(), owner, repo, pr, options);
     },
     createReview: (pr, payload, opts) => postReview(octokit(), pr, payload, { canWrite: opts.canWrite, maxBodyChars: opts.maxBodyChars, blocking: opts.blocking, commentKeys: opts.commentKeys }).then(() => void 0),
     createIssueComment: (pr, body, opts) => postIssueFallback(octokit(), { pr, body, ...opts })
@@ -30213,7 +30288,7 @@ function createAnalysis() {
 // lib/src/main.js
 async function main() {
   const env = readRunEnv();
-  const out = await run(env, { gh: createGateway(env.inputs.githubToken), analysis: createAnalysis() });
+  const out = await run(env, { gh: createGateway(env.inputs.githubToken, { trustedLogin: env.inputs.reviewActor }), analysis: createAnalysis() });
   setOutput("exit-code", String(out.exitCode));
   process.exitCode = out.exitCode;
 }

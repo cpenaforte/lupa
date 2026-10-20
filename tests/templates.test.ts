@@ -2,6 +2,12 @@ import * as fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("workflow templates", () => {
+  it("passes only the trusted Actions actor variable, empty when unset", () => {
+    for (const file of ["docs/workflow-template.yml", "docs/workflow-template-privileged.yml"]) {
+      const text = fs.readFileSync(file, "utf8");
+      expect(text.match(/^\s+review_actor: (.+)$/gm)?.map((line) => line.trim())).toEqual(["review_actor: ${{ vars.PR_REVIEWER_ACTOR }}"]);
+    }
+  });
   it("both templates pin the v0.9.0 release SHA", () => {
     for (const file of [
       "docs/workflow-template.yml",

@@ -17,7 +17,7 @@ export { toSarif } from "./review/render.js";
 
 export async function main(): Promise<void> {
   const env = readRunEnv();
-  const out = await run(env, { gh: createGateway(env.inputs.githubToken), analysis: createAnalysis() });
+  const out = await run(env, { gh: createGateway(env.inputs.githubToken, { trustedLogin: env.inputs.reviewActor }), analysis: createAnalysis() });
   core.setOutput("exit-code", String(out.exitCode));
   process.exitCode = out.exitCode;
 }

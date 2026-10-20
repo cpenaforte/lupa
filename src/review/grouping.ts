@@ -109,10 +109,15 @@ function survivor(members: Finding[]): Finding {
  * counted in `dropped` — every finding is still represented exactly once in
  * `merged`, so the worst case is duplicates staying.
  */
-export function mergeDuplicates(
+export interface FindingGroup {
+  finding: Finding;
+  members: readonly number[];
+}
+
+export function groupFindings(
   findings: Finding[],
   verdicts: DedupVerdicts,
-): { merged: Finding[]; dropped: number } {
+): { groups: FindingGroup[]; dropped: number } {
   const parent = findings.map((_, i) => i);
   const root = (x: number): number => (parent[x] === x ? x : (parent[x] = root(parent[x]!)));
   let dropped = 0;
@@ -141,8 +146,14 @@ export function mergeDuplicates(
     else g.push(i);
   }
   const ordered = [...groups.values()].sort((x, y) => x[0]! - y[0]!);
-  const merged = ordered.map((members) =>
-    members.length === 1 ? findings[members[0]!]! : survivor(members.map((i) => findings[i]!)),
-  );
-  return { merged, dropped };
+  return {
+    groups: ordered.map((members) => ({ members, finding: members.length === 1 ? findings[members[0]!]! : survivor(members.map((i) => findings[i]!)) })),
+    dropped,
+  };
+}
+
+/** Compatibility projection; policy uses the original members instead. */
+export function mergeDuplicates(findings: Finding[], verdicts: DedupVerdicts): { merged: Finding[]; dropped: number } {
+  const { groups, dropped } = groupFindings(findings, verdicts);
+  return { merged: groups.map((g) => g.finding), dropped };
 }

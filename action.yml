@@ -9,6 +9,10 @@ inputs:
     description: "LLM provider identifier"
     required: false
     default: "openai"
+  review_actor:
+    description: "Trusted review author's GitHub login (optional fallback when authenticated identity is unavailable)"
+    required: false
+    default: ""
   llm_base_url:
     description: "Base URL of the LLM API (empty = provider default)"
     required: false

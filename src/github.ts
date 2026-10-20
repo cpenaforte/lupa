@@ -2,7 +2,8 @@ import { context, getOctokit } from "@actions/github";
 import * as core from "@actions/core";
 import type { InlineComment, ReviewPayload } from "./domain/review.js";
 import { capBody, isTruncNoteLine, truncNoteFor } from "./review/limits.js";
-import { DEFAULT_MAX_REVIEW_BODY_CHARS } from "./inputs.js";
+import { DEFAULT_MAX_REVIEW_BODY_CHARS, parseReviewActor } from "./inputs.js";
+import { memberRulesOf } from "./review/thread-identity.js";
 
 export type Octokit = ReturnType<typeof getOctokit>;
 
@@ -286,6 +287,8 @@ export interface ReviewThread {
   line?: number | null;
   originalLine?: number | null;
   rule: string | null;
+  /** Valid versioned raw member identities, when posted by a newer renderer. */
+  rules?: readonly string[];
 }
 
 /** `formatBody` head shape, tolerating our own inline reopened marker. */
@@ -310,6 +313,7 @@ function asThread(n: ThreadNode): ReviewThread {
   const login = first?.author?.login;
   const line = typeof n.line === "number" ? n.line : null;
   const originalLine = typeof n.originalLine === "number" ? n.originalLine : null;
+  const rules = memberRulesOf(first?.body);
   return {
     authorLogin: typeof login === "string" ? login : null,
     isResolved: n.isResolved === true,
@@ -317,6 +321,7 @@ function asThread(n: ThreadNode): ReviewThread {
     line,
     originalLine,
     rule: threadRuleOf(first?.body),
+    ...(rules === undefined ? {} : { rules }),
   };
 }
 
@@ -364,46 +369,29 @@ export async function listReviewThreads(
   }
 }
 
-/** Prefix every posted review body opens with (the summary head). */
-const LUPA_BODY_PREFIX = "lupa:";
-
 /**
- * Identity for the reopen match. Primary: the authenticated login on the same
- * token that posts. Fallback (e.g. installation tokens that 403 on the user
- * route): the login of the newest review on this PR whose body opens with the
- * lupa summary prefix (paginated, per_page 100 — newest match wins). Both
- * failing yields undefined (caller skips the reopen check with a warning).
+ * Identity for the reopen match: authenticated login, then workflow-owned
+ * configuration. Review prose never authenticates an actor.
  */
 export async function fetchActor(
   octokit: Octokit,
   owner: string,
   repo: string,
   pr: number,
+  options?: { trustedLogin?: string },
 ): Promise<string | undefined> {
+  const trusted = parseReviewActor(options?.trustedLogin ?? "");
   try {
     const me = await octokit.rest.users.getAuthenticated();
     const login = (me.data as { login?: unknown }).login;
-    if (typeof login === "string" && login !== "") return login;
-  } catch {
-    // Fall through to the review-body fallback below.
-  }
-  try {
-    const reviews = (await octokit.paginate(octokit.rest.pulls.listReviews, {
-      owner,
-      repo,
-      pull_number: pr,
-      per_page: 100,
-    })) as Array<{ body?: unknown; user?: { login?: unknown } | null }>;
-    let newest: string | undefined;
-    for (const r of reviews) {
-      if (typeof r.body === "string" && r.body.startsWith(LUPA_BODY_PREFIX) && typeof r.user?.login === "string") {
-        newest = r.user.login;
-      }
+    if (typeof login === "string") {
+      const authenticated = parseReviewActor(login);
+      if (authenticated !== undefined) return authenticated;
     }
-    if (newest !== undefined) return newest;
   } catch {
-    // Both paths failed; warn below.
+    // Installation tokens may not support the authenticated-user endpoint.
   }
+  if (trusted !== undefined) return trusted;
   core.warning("lupa: could not determine the review actor; skipping the wrongly-resolved re-check");
   return undefined;
 }

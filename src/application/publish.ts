@@ -6,10 +6,11 @@ import type { FileDiff } from "../domain/diff.js";
 import type { InlineComment, ReviewPayload } from "../domain/review.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { parseHunks } from "../diff/patch.js";
-import { ReadonlyTokenError, StaleHeadError } from "../github.js";
-import { buildBody, buildFallbackReport, mapToComments, redactFindings } from "../review/render.js";
-import { eventFor, partitionGate, reopenedKey, resolveReopened } from "../review/policy.js";
-import { mergeDuplicates } from "../review/grouping.js";
+import { ReadonlyTokenError, StaleHeadError, type ReviewThread } from "../github.js";
+import { buildBody, buildFallbackReport, formatBody, mapToComments, redactFindings } from "../review/render.js";
+import { evaluateRawGate, eventFor, partitionGate, projectRenderMarks, reopenedKey } from "../review/policy.js";
+import { groupFindings } from "../review/grouping.js";
+import { memberRuleMarker, THREAD_BODY_BYTES } from "../review/thread-identity.js";
 import { capBody, omissionMarkerFor, prioritizeFindings } from "../review/limits.js";
 
 /** Logs a line and, when a summary file exists, appends it there (skip paths must leave evidence).
@@ -78,7 +79,7 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
  * The blocking set (PR-touched findings plus wrongly-resolved reopened ones) is
  * computed BEFORE all early returns (dry-run, fork-readonly, stale-head) and
  * returned for the flow exits, so every exit path gates on it. The reopen read
- * (getActor + listReviewThreads) is short-circuited when every merged finding
+ * (getActor + listReviewThreads) is short-circuited when every raw finding
  * is already introduced — reopen can add nothing — or when no token is
  * configured (empty token: no call, no warn), and any thread/infra
  * failure falls back to diff-only gating without throwing.
@@ -86,40 +87,53 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
 export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
-  // Dedup merge before the funnel. Gate inputs keep the full pre-merge set (provably
-  // identical outcomes); the funnel — top-N, inline, body — runs on the merged set, and
-  // omission counts reflect the post-merge cut (merged-away findings are represented, never omitted).
-  const { merged, dropped } =
-    a.verdicts === undefined ? { merged: fullSet, dropped: 0 } : mergeDuplicates(fullSet, a.verdicts);
-  if (dropped > 0) core.warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
   const parsed = parseHunks(a.hunks);
-  const { introduced } = partitionGate(merged, parsed, a.hunks);
-  const introducedKeys = new Set(introduced.map(reopenedKey));
-  let reopened = new Set<string>();
-  if (introduced.length < merged.length && a.env.inputs.githubToken !== "") {
+  const { introduced } = partitionGate(fullSet, parsed, a.hunks);
+  let actor: string | undefined;
+  let threads: ReviewThread[] = [];
+  if (introduced.length < fullSet.length && a.env.inputs.githubToken !== "") {
     try {
-      const self = await a.deps.gh.getActor(a.pr);
-      if (self === undefined) {
+      actor = await a.deps.gh.getActor(a.pr);
+      if (actor === undefined) {
         core.warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
       } else {
-        reopened = resolveReopened(merged, await a.deps.gh.listReviewThreads(a.pr), self);
+        threads = await a.deps.gh.listReviewThreads(a.pr);
       }
     } catch {
       core.warning("lupa: review-thread re-read failed; gating on diff membership only");
-      reopened = new Set<string>();
+      threads = [];
     }
   }
-  // Single filter over merged in merged order: introduced or reopened. A
-  // finding that is both is counted once (never concatenated).
-  const blocking = merged.filter((f) => introducedKeys.has(reopenedKey(f)) || reopened.has(reopenedKey(f)));
-  const blockingKeys = new Set(blocking.map(reopenedKey));
+  const decision = evaluateRawGate(fullSet, parsed, a.hunks, threads, actor);
+  const blocking = decision.blocking;
+  const { groups: proposedGroups, dropped } = groupFindings(fullSet, a.verdicts ?? { pairs: [], links: [], malformed: 0 });
+  if (dropped > 0) core.warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);
+  const identityMarkers = new Map<Finding, string>();
+  // If the complete inline body cannot carry every member identity within
+  // the byte bound, retain separate findings with their individual markers.
+  const groups = proposedGroups.flatMap((group) => {
+    if (group.members.length === 1) return [group];
+    const marker = memberRuleMarker([...new Set(group.members.map((i) => fullSet[i]!.rule))]);
+    const largestBody = Math.max(...(["LEFT", "RIGHT"] as const).map((side) => Buffer.byteLength(formatBody(group.finding, side, true), "utf8")));
+    if (largestBody + Buffer.byteLength(marker, "utf8") + 2 > THREAD_BODY_BYTES) {
+      return group.members.map((i) => {
+        const finding = fullSet[i]!;
+        identityMarkers.set(finding, memberRuleMarker([finding.rule]));
+        return { finding, members: [i] };
+      });
+    }
+    identityMarkers.set(group.finding, marker);
+    return [group];
+  });
+  const merged = groups.map((g) => g.finding);
+  const { blocking: blockingKeys, reopened } = projectRenderMarks(groups, fullSet, decision);
   // Publication funnel: top-N by severity, then the inline cap (excess folds
   // to the body), then the body char cap. Gates keep the blocking set.
   const ordered = prioritizeFindings(merged);
   const retained = ordered.slice(0, inputs.maxFindings);
   const omitted = merged.length - retained.length;
   const omissionMarker = omitted > 0 ? omissionMarkerFor(omitted, inputs.maxFindings) : undefined;
-  const { inline, general } = mapToComments(retained, parsed, reopened);
+  const { inline, general } = mapToComments(retained, parsed, reopened, identityMarkers);
   const postedInline = inline.slice(0, inputs.maxInlineComments);
   const excessInline = inline.slice(inputs.maxInlineComments);
   let body = buildBody(general, summaryFor(fullSet), { reopened, blocking: blockingKeys });
@@ -155,7 +169,7 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
     const high = fullSet.filter((f) => f.severity === "high").length;
     core.info(
       `post_comment is false: dry-run, nothing posted (would post event=${payload.event}, ` +
-        `inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${blocking.length}, omitted=${omitted})`,
+        `inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${merged.filter((f) => blockingKeys.has(reopenedKey(f))).length}, omitted=${omitted})`,
     );
     return { blocking };
   }

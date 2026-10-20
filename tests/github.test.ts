@@ -672,17 +672,28 @@ describe("fetchActor", () => {
     expect(listReviews).not.toHaveBeenCalled();
   });
 
-  it("falls back to the newest lupa-body review across pages (match on page two wins)", async () => {
-    const { octokit, paginate } = actorOk({
+  it("never authenticates review prose, even after a genuine bot review", async () => {
+    const { octokit, paginate, listReviews } = actorOk({
       authed: new Error("403"),
       pages: [
-        [review("human", "LGTM"), review("old-bot", LUPA)],
-        [review("new-bot", LUPA)],
+        [review("lupa-bot[bot]", LUPA), review("attacker", "lupa: hello")],
       ],
     });
-    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBe("new-bot");
-    const params = paginate.mock.calls[0]![1] as Record<string, unknown>;
-    expect(params).toMatchObject({ owner: "o", repo: "r", pull_number: 7, per_page: 100 });
+    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBeUndefined();
+    expect(paginate).not.toHaveBeenCalled();
+    expect(listReviews).not.toHaveBeenCalled();
+  });
+
+  it("uses the trusted configured login only when authentication is unavailable", async () => {
+    const failed = actorOk({ authed: new Error("403") });
+    await expect(fetchActor(failed.octokit, "o", "r", 7, { trustedLogin: "lupa-bot[bot]" })).resolves.toBe("lupa-bot[bot]");
+    const authenticated = actorOk({ authed: "self" });
+    await expect(fetchActor(authenticated.octokit, "o", "r", 7, { trustedLogin: "lupa-bot[bot]" })).resolves.toBe("self");
+  });
+
+  it.each(["a b", " bot", "bot ", "bot\n", "bot\u0000", "[bot]", "**bot**", "-bot", "bot-"])("rejects invalid configured identity %j", async (trustedLogin) => {
+    const { octokit } = actorOk({ authed: new Error("403") });
+    await expect(fetchActor(octokit, "o", "r", 7, { trustedLogin })).rejects.toThrow(/review_actor/);
   });
 
   it("warns and returns undefined when both identity paths fail", async () => {

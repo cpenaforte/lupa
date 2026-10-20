@@ -8,6 +8,7 @@ import {
 
 const INPUT_NAMES = [
   "github_token",
+  "review_actor",
   "llm_provider",
   "llm_base_url",
   "llm_api_style",
@@ -61,6 +62,7 @@ afterEach(() => {
 describe("getInputs defaults", () => {
   it("defaults match spec", () => {
     const i = getInputs();
+    expect(i.reviewActor).toBeUndefined();
     expect(i.llmProvider).toBe("openai");
     expect(i.llmApiStyle).toBe("auto");
     expect(i.failLevel).toBe("warning");
@@ -79,6 +81,18 @@ describe("getInputs defaults", () => {
     expect(i.maxInlineComments).toBe(30);
     expect(i.maxReviewBodyChars).toBe(60000);
     expect(i.maxArtifactBytes).toBe(8388608);
+  });
+});
+
+describe("getInputs review_actor", () => {
+  it("accepts a trusted bot login", () => {
+    setInputs({ review_actor: "Lupa-Bot[bot]" });
+    expect(getInputs().reviewActor).toBe("Lupa-Bot[bot]");
+  });
+
+  it.each([" bot", "bot ", "bot\n", "a b", "bot\u0001", "[bot]", "**bot**"])("rejects unsafe actor %j without trimming", (review_actor) => {
+    setInputs({ review_actor });
+    expect(() => getInputs()).toThrow(/review_actor/);
   });
 });
 

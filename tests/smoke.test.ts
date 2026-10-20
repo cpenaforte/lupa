@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
 describe("scaffolding", () => {
   it("action.yml targets node24 dist and declares all consumed inputs", () => {
+    expect(fs.readFileSync("action.yml", "utf8")).toContain("review_actor:");
     const yml = fs.readFileSync("action.yml", "utf8");
     expect(yml).toContain("using: node24");
     expect(yml).toContain("main: dist/index.js");

@@ -130,6 +130,7 @@ jobs:
           PR_REVIEWER_ISSUE_FALLBACK: "false"
         with:
           github_token: ${{ github.token }}
+          review_actor: ${{ vars.PR_REVIEWER_ACTOR }}
           pr_number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
           # llm_api_style is optional. Values:
           #   auto (default)      error-driven probe (no model map): tries openai-chat, openai-responses,

@@ -1,6 +1,8 @@
 import type { Finding } from "../domain/finding.js";
 import type { FileDiff, HunkLine, ParsedHunk } from "../domain/diff.js";
 import type { FailLevel } from "../inputs.js";
+import type { ReviewThread } from "../github.js";
+import type { FindingGroup } from "./grouping.js";
 
 
 function keyOf(side: "LEFT" | "RIGHT", line: number): string {
@@ -52,16 +54,15 @@ export function reopenedKey(f: Finding): string {
  * Compared on both sides, so `x[bot]` and `x` are identical.
  */
 export function normalizeBot(login: string): string {
-  return login.endsWith("[bot]") ? login.slice(0, -"[bot]".length) : login;
+  return login.toLowerCase().replace(/\[bot\]$/, "");
 }
 
 /**
- * Pure reopen match over the MERGED set, in ANY position: a resolved thread whose
+ * Pure reopen match over raw findings, in ANY position: a resolved thread whose
  * line drifted to context/LEFT must still re-block while the issue persists.
  * Keeps a thread iff it is resolved, its author normalizes to the review actor
- * (null authors never match), and its rule INTERSECTS the finding's rule
- * (`+`-split on both sides — the posted thread rule is the joined survivor while
- * the next run may see unmerged members). File is exact; the thread line is
+ * (null authors never match), and its member metadata contains the raw rule.
+ * Legacy threads use rule intersection (`+`-split on both sides). File is exact; the thread line is
  * `line ?? originalLine` (both absent → no match). Returns the reopened keys.
  */
 export function resolveReopened(
@@ -73,7 +74,7 @@ export function resolveReopened(
   const kept = threads.filter(
     (t) =>
       t.isResolved &&
-      t.rule !== null &&
+      (t.rules !== undefined || t.rule !== null) &&
       t.authorLogin !== null &&
       normalizeBot(t.authorLogin) === self &&
       (t.line ?? t.originalLine ?? null) !== null,
@@ -85,8 +86,10 @@ export function resolveReopened(
     for (const t of kept) {
       if (t.path !== f.file) continue;
       if ((t.line ?? t.originalLine) !== f.line) continue;
-      const threadRules = (t.rule as string).split("+");
-      if (threadRules.some((r) => rules.has(r))) {
+      const matches = t.rules === undefined
+        ? (t.rule as string).split("+").some((r) => rules.has(r))
+        : t.rules.includes(f.rule);
+      if (matches) {
         out.add(reopenedKey(f));
         break;
       }
@@ -96,7 +99,7 @@ export function resolveReopened(
 }
 
 /**
- * Gate partition over the merged set (input order preserved in both outputs).
+ * Gate partition over raw findings (input order preserved in both outputs).
  * Introduced = TOUCHED lines only: a lined finding whose file+line hits a
  * RIGHT-side hunk line with kind "add" (context and LEFT/deletion hits keep
  * their inline display but never gate), plus lineless findings whose file is
@@ -147,6 +150,35 @@ export function partitionGate(
     else general.push(f);
   }
   return { introduced, general };
+}
+
+export interface GateDecision {
+  blocking: Finding[];
+  blockingKeys: ReadonlySet<string>;
+  reopenedKeys: ReadonlySet<string>;
+}
+
+/** Policy always uses raw findings, before any display grouping or caps. */
+export function evaluateRawGate(findings: Finding[], hunks: ParsedHunk[], files: FileDiff[], threads: ReviewThread[], actor?: string): GateDecision {
+  const introduced = new Set(partitionGate(findings, hunks, files).introduced.map(reopenedKey));
+  const reopenedKeys = actor === undefined ? new Set<string>() : resolveReopened(findings, threads, actor);
+  const blocking = findings.filter((f) => introduced.has(reopenedKey(f)) || reopenedKeys.has(reopenedKey(f)));
+  return { blocking, blockingKeys: new Set(blocking.map(reopenedKey)), reopenedKeys };
+}
+
+/** Display survivors inherit marks when any original member has that mark. */
+export function projectRenderMarks(groups: FindingGroup[], findings: Finding[], decision: GateDecision): { blocking: ReadonlySet<string>; reopened: ReadonlySet<string> } {
+  const blocking = new Set<string>();
+  const reopened = new Set<string>();
+  for (const group of groups) {
+    const key = reopenedKey(group.finding);
+    for (const i of group.members) {
+      const memberKey = reopenedKey(findings[i]!);
+      if (decision.blockingKeys.has(memberKey)) blocking.add(key);
+      if (decision.reopenedKeys.has(memberKey)) reopened.add(key);
+    }
+  }
+  return { blocking, reopened };
 }
 
 /** `high` requests changes only on high-severity evidence; `none` and `warning` never do. */

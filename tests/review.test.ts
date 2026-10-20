@@ -1255,6 +1255,7 @@ describe("normalizeBot", () => {
     expect(normalizeBot("lupa[bot]")).toBe("lupa");
     expect(normalizeBot("lupa")).toBe("lupa");
     expect(normalizeBot("github-actions[bot]")).toBe("github-actions");
+    expect(normalizeBot("LUPA[BOT]")).toBe("lupa");
   });
 
   it("leaves plain logins unchanged", () => {
@@ -1302,6 +1303,7 @@ describe("resolveReopened", () => {
   });
 
   it("matches across [bot] conventions on either side", () => {
+    expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: "SELF[BOT]" })], "Self")).toHaveLength(1);
     expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: "self[bot]" })], "self")).toHaveLength(1);
     expect(resolveReopened([F("r", "a.ts", 10)], [T({ authorLogin: "self" })], "self[bot]")).toHaveLength(1);
   });

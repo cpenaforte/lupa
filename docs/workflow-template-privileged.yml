@@ -80,5 +80,6 @@ jobs:
           PR_REVIEWER_ISSUE_FALLBACK: "false"
         with:
           github_token: ${{ steps.app.outputs.token || github.token }}
+          review_actor: ${{ vars.PR_REVIEWER_ACTOR }}
           post_comment: "true"
           fail_level: warning

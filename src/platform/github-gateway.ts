@@ -5,7 +5,7 @@ import {
   postIssueFallback, postReview,
 } from "../github.js";
 
-export function createGateway(token: string): Gateway {
+export function createGateway(token: string, options?: { trustedLogin?: string }): Gateway {
   // Lazy (M12): the client is built on first use, so a non-triggering run never needs a token.
   let client: ReturnType<typeof getOctokit> | undefined;
   const octokit = (): ReturnType<typeof getOctokit> => (client ??= getOctokit(token));
@@ -54,7 +54,7 @@ export function createGateway(token: string): Gateway {
     getActor: async (pr) => {
       if (token === "") return undefined;
       const { owner, repo } = context.repo;
-      return fetchReviewActor(octokit(), owner, repo, pr);
+      return fetchReviewActor(octokit(), owner, repo, pr, options);
     },
     createReview: (pr, payload, opts) =>
       postReview(octokit(), pr, payload, { canWrite: opts.canWrite, maxBodyChars: opts.maxBodyChars, blocking: opts.blocking, commentKeys: opts.commentKeys }).then(() => undefined),

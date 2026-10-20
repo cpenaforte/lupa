@@ -29,6 +29,7 @@ export type LlmApiStyle = (typeof LLM_API_STYLES)[number];
 
 export interface ActionInputs {
   githubToken: string;
+  reviewActor?: string;
   llmProvider: LlmProvider;
   llmBaseUrl: string;
   llmApiStyle: LlmApiStyle;
@@ -61,6 +62,15 @@ export const DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
 export function parseFailLevel(v: string): FailLevel {
   if (v === "none" || v === "warning" || v === "high") return v;
   throw new Error(`Invalid fail_level "${v}": expected none, warning, or high`);
+}
+
+/** A workflow-owned GitHub login, optionally using the documented bot suffix. */
+export function parseReviewActor(raw: string): string | undefined {
+  if (raw === "") return undefined;
+  if (!/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?(?:\[bot\])?$/i.test(raw) || raw.includes("--")) {
+    throw new Error("Invalid review_actor: expected a GitHub login, optionally ending in [bot]");
+  }
+  return raw;
 }
 
 // core.getInput already trims whitespace (trimWhitespace defaults to true).
@@ -112,9 +122,11 @@ export function getInputs(): ActionInputs {
   const llmTemperature = readOptionalDecimal("llm_temperature");
   const llmTopP = readOptionalDecimal("llm_top_p");
   const prNumber = readOptionalInt("pr_number", 1);
+  const reviewActor = parseReviewActor(core.getInput("review_actor", { trimWhitespace: false }));
 
   return {
     githubToken: readString("github_token"),
+    ...(reviewActor !== undefined ? { reviewActor } : {}),
     llmProvider: readEnum("llm_provider", LLM_PROVIDERS, "openai"),
     llmBaseUrl: readString("llm_base_url"),
     llmApiStyle: readEnum("llm_api_style", LLM_API_STYLES, "auto"),

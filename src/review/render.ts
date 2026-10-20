@@ -86,6 +86,7 @@ export function mapToComments(
   findings: Finding[],
   hunks: ParsedHunk[],
   reopened?: ReadonlySet<string>,
+  identityMarkers?: ReadonlyMap<Finding, string>,
 ): { inline: InlineComment[]; general: Finding[] } {
   const index = indexHunks(hunks);
   const inline: InlineComment[] = [];
@@ -102,7 +103,9 @@ export function mapToComments(
       continue;
     }
     const isReopened = reopened?.has(reopenedKey(f)) === true;
-    inline.push({ path: f.file, line, side: hit.side, body: formatBody(f, hit.side, isReopened), rule: f.rule });
+    const marker = identityMarkers?.get(f);
+    const body = formatBody(f, hit.side, isReopened) + (marker === undefined ? "" : `\n\n${marker}`);
+    inline.push({ path: f.file, line, side: hit.side, body, rule: f.rule });
   }
   return { inline, general };
 }
