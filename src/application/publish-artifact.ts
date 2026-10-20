@@ -1,7 +1,8 @@
+import * as core from "@actions/core";
 import type { RunEnv, Deps, Outcome, EventFields } from "./contracts.js";
 import { sanitizeFinding } from "../domain/finding.js";
 import { readDiff, readFindings, readPrMeta } from "../artifacts/review-store.js";
-import { parseDiffFiles } from "../diff/patch.js";
+import { parsePatch } from "../diff/patch.js";
 import { exitFor } from "../review/policy.js";
 import { publishReview } from "./publish.js";
 
@@ -57,7 +58,14 @@ export async function runArtifactFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
     throw new Error("lupa: PR head branch does not match workflow_run.head_branch; refusing to post");
   }
   const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
-  const hunks = parseDiffFiles(readDiff(env.artifactDir));
+  const { files: hunks, issues } = parsePatch(readDiff(env.artifactDir));
+  if (issues.length > 0) {
+    const message = `${issues.length} patch section(s) could not be attributed to a file; review coverage is incomplete.`;
+    core.warning(`diff-unparsed: ${message}`);
+    if (!findings.some((f) => f.rule === "diff-unparsed" && f.file === "")) {
+      findings.push({ severity: "warning", file: "", rule: "diff-unparsed", message });
+    }
+  }
   // A missing verdicts key means no judge ran: silent no-merge. Out-of-range indices
   // range-check inside the publishReview merge (dropped with the count).
   const { blocking } = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });

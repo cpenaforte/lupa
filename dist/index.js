@@ -20424,71 +20424,149 @@ function sizeOf(workDir, file) {
     return 0;
   }
 }
-function unquoteGitPath(s) {
-  if (s.length < 2 || !s.startsWith('"') || !s.endsWith('"'))
-    return s;
+function decodeGitPath(s) {
+  if (!s.startsWith('"'))
+    return s !== "" && !/["\x00\t\r\n]/.test(s) ? s : void 0;
+  if (!/^"(?:[^"\\]|\\.)*"$/.test(s))
+    return void 0;
   const body = s.slice(1, -1);
   const simple = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, '"': 34, "\\": 92 };
   const bytes = [];
   for (let i = 0; i < body.length; i++) {
-    const c = body[i];
+    const c = String.fromCodePoint(body.codePointAt(i));
     if (c !== "\\") {
       bytes.push(...Buffer.from(c, "utf8"));
+      i += c.length - 1;
       continue;
     }
     const octal = body.slice(i + 1, i + 4);
     if (/^[0-7]{3}$/.test(octal)) {
-      bytes.push(parseInt(octal, 8));
+      const byte = parseInt(octal, 8);
+      if (byte > 255)
+        return void 0;
+      bytes.push(byte);
       i += 3;
       continue;
     }
     const next = body[i + 1];
-    if (next === void 0)
-      break;
-    bytes.push(simple[next] ?? Buffer.from(next, "utf8")[0]);
+    if (next === void 0 || simple[next] === void 0)
+      return void 0;
+    bytes.push(simple[next]);
     i += 1;
   }
-  return Buffer.from(bytes).toString("utf8");
-}
-function headerFile(line) {
-  const quoted = /^diff --git ("(?:[^"\\]|\\.)*"|\S+) ("(?:[^"\\]|\\.)*"|\S+)$/.exec(line);
-  if (quoted) {
-    const b = unquoteGitPath(quoted[2]);
-    return b.startsWith("b/") ? b.slice(2) : void 0;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Uint8Array.from(bytes));
+    return decoded !== "" && !decoded.includes("\0") ? decoded : void 0;
+  } catch {
+    return void 0;
   }
-  const plain = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-  return plain ? plain[2] : void 0;
 }
-function parseDiffFiles(text, workDir) {
+function unquoteGitPath(s) {
+  return s.startsWith('"') ? decodeGitPath(s) ?? s : s;
+}
+function prefixedPath(text, prefix) {
+  const path = decodeGitPath(text.endsWith("	") ? text.slice(0, -1) : text);
+  if (path === "/dev/null")
+    return null;
+  return path?.startsWith(prefix) && path.length > 2 ? path.slice(2) : void 0;
+}
+function headerPaths(header) {
+  const body = header.slice("diff --git ".length);
+  const paths = [];
+  for (let at = body.indexOf(" "); at !== -1; at = body.indexOf(" ", at + 1)) {
+    const old = prefixedPath(body.slice(0, at), "a/");
+    const current = prefixedPath(body.slice(at + 1), "b/");
+    if (typeof old === "string" && typeof current === "string")
+      paths.push({ old, current });
+  }
+  return paths;
+}
+function parsePatch(text, workDir) {
+  const result = { files: [], issues: [] };
   const sections = [];
   let cur;
   for (const line of text.split("\n")) {
     if (line.startsWith("diff --git ")) {
-      const file = headerFile(line);
-      cur = file === void 0 ? void 0 : { file, lines: [], binary: false, deleted: false };
-      if (cur !== void 0)
-        sections.push(cur);
+      cur = { header: line, lines: [] };
+      sections.push(cur);
       continue;
     }
-    if (cur === void 0)
-      continue;
-    if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch"))
-      cur.binary = true;
-    if (line.startsWith("deleted file mode"))
-      cur.deleted = true;
-    cur.lines.push(line);
+    cur?.lines.push(line);
   }
-  return sections.map((s) => {
+  sections.forEach((s, index) => {
+    const issue2 = (code) => result.issues.push({
+      section: index + 1,
+      code,
+      message: code === "ambiguous-path" ? "Patch section has no unambiguous file identity." : "Patch section has invalid or incomplete path metadata."
+    });
     const at = s.lines.findIndex((l) => l.startsWith("@@"));
+    const metadata = at === -1 ? s.lines : s.lines.slice(0, at);
+    const binary = metadata.some((l) => l.startsWith("Binary files ") || l === "GIT binary patch");
+    const deleted = metadata.some((l) => l.startsWith("deleted file mode "));
+    const values = (prefix) => metadata.filter((l) => l.startsWith(prefix)).map((l) => l.slice(prefix.length));
+    const before = values("--- "), after = values("+++ ");
+    const from = values("rename from "), to = values("rename to ");
+    let paths;
+    if (before.length || after.length) {
+      if (before.length !== 1 || after.length !== 1) {
+        issue2("malformed-section");
+        return;
+      }
+      const old = prefixedPath(before[0], "a/"), current = prefixedPath(after[0], "b/");
+      if (old === void 0 || current === void 0 || old === null && current === null) {
+        issue2("malformed-section");
+        return;
+      }
+      paths = { old, current };
+    }
+    if (from.length || to.length) {
+      if (from.length !== 1 || to.length !== 1) {
+        issue2("malformed-section");
+        return;
+      }
+      const old = decodeGitPath(from[0]), current = decodeGitPath(to[0]);
+      if (old === void 0 || current === void 0 || paths && (paths.old !== old || paths.current !== current)) {
+        issue2("malformed-section");
+        return;
+      }
+      paths = { old, current };
+    }
+    if (paths === void 0) {
+      const options = headerPaths(s.header);
+      let candidates = options;
+      if (candidates.length > 1 && (binary || metadata.some((l) => l.startsWith("old mode ")))) {
+        candidates = candidates.filter((p) => p.old === p.current);
+      }
+      if (candidates.length !== 1) {
+        issue2(options.length > 0 ? "ambiguous-path" : "malformed-section");
+        return;
+      }
+      paths = candidates[0];
+    }
+    if (deleted && paths.current !== null && paths.old !== paths.current) {
+      issue2("malformed-section");
+      return;
+    }
+    const file = paths.current ?? paths.old;
+    if (file === null) {
+      issue2("malformed-section");
+      return;
+    }
     const hunks = at === -1 ? "" : s.lines.slice(at).join("\n").replace(/\n+$/, "");
-    const size = hunks === "" && !s.binary ? 0 : sizeOf(workDir, s.file);
-    const f = { file: s.file, hunks, truncated: false, size };
-    if (s.binary)
+    const size = hunks === "" && !binary ? 0 : sizeOf(workDir, file);
+    const f = { file, hunks, truncated: false, size };
+    if (paths.old !== null && paths.old !== file)
+      f.oldFile = paths.old;
+    if (binary)
       f.binary = true;
-    if (s.deleted)
+    if (deleted || paths.current === null)
       f.deleted = true;
-    return f;
+    result.files.push(f);
   });
+  return result;
+}
+function parseDiffFiles(text, workDir) {
+  return parsePatch(text, workDir).files;
 }
 var HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 function parseHunks(files) {
@@ -27865,7 +27943,15 @@ async function runAnalysisFlow(env, deps, out) {
   }
   requireSha("PR_REVIEWER_BASE_SHA", env.baseSha);
   requireSha("PR_REVIEWER_HEAD_SHA", env.headSha);
-  const files = parseDiffFiles(readDiff(env.artifactDir), env.workDir);
+  const { files, issues } = parsePatch(readDiff(env.artifactDir), env.workDir);
+  const patchWarnings = issues.length === 0 ? [] : [{
+    severity: "warning",
+    file: "",
+    rule: "diff-unparsed",
+    message: `${issues.length} patch section(s) could not be attributed to a file; review coverage is incomplete.`
+  }];
+  for (const warning3 of patchWarnings)
+    warning(`${warning3.rule}: ${warning3.message}`);
   const pull = await deps.gh.getPr(pr);
   const meta = {
     pr_number: pr,
@@ -27910,7 +27996,7 @@ async function runAnalysisFlow(env, deps, out) {
       rmSync2(dirname2(scan.sbomPath), { recursive: true, force: true });
     }
   }
-  const fast = [...l0, ...scan.findings, ...l2];
+  const fast = [...patchWarnings, ...l0, ...scan.findings, ...l2];
   writeFindings(env.artifactDir, redactFindings(fast, runtimeSecrets(env)));
   const prompt = truncateDiff(filterForPrompt(files), env.inputs.maxDiffChars, PER_FILE_CAP);
   let issueBody;
@@ -27980,7 +28066,14 @@ async function runArtifactFlow(env, deps, out) {
     throw new Error("lupa: PR head branch does not match workflow_run.head_branch; refusing to post");
   }
   const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
-  const hunks = parseDiffFiles(readDiff(env.artifactDir));
+  const { files: hunks, issues } = parsePatch(readDiff(env.artifactDir));
+  if (issues.length > 0) {
+    const message = `${issues.length} patch section(s) could not be attributed to a file; review coverage is incomplete.`;
+    warning(`diff-unparsed: ${message}`);
+    if (!findings.some((f) => f.rule === "diff-unparsed" && f.file === "")) {
+      findings.push({ severity: "warning", file: "", rule: "diff-unparsed", message });
+    }
+  }
   const { blocking } = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
   if (!out.staleSkipped)
     out.exitCode = exitFor(env.inputs.failLevel, blocking);

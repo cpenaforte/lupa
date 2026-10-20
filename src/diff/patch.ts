@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { FileDiff, ParsedHunk } from "../domain/diff.js";
+import type { FileDiff, ParsedHunk, ParsedPatch, PatchIssue } from "../domain/diff.js";
+export type { ParsedPatch, PatchIssue } from "../domain/diff.js";
 
 function sizeOf(workDir: string | undefined, file: string): number {
   if (workDir === undefined) return 0;
@@ -15,74 +16,133 @@ function sizeOf(workDir: string | undefined, file: string): number {
  * Decodes a git C-style quoted path (`"caf\303\251.txt"`). Unquoted input is returned as-is.
  * `core.quotePath=false` avoids most quoting; this covers residual quoted names defensively.
  */
-export function unquoteGitPath(s: string): string {
-  if (s.length < 2 || !s.startsWith('"') || !s.endsWith('"')) return s;
+function decodeGitPath(s: string): string | undefined {
+  if (!s.startsWith('"')) return s !== "" && !/["\x00\t\r\n]/.test(s) ? s : undefined;
+  if (!/^"(?:[^"\\]|\\.)*"$/.test(s)) return undefined;
   const body = s.slice(1, -1);
   const simple: Record<string, number> = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, '"': 34, "\\": 92 };
   const bytes: number[] = [];
   for (let i = 0; i < body.length; i++) {
-    const c = body[i];
+    const c = String.fromCodePoint(body.codePointAt(i)!);
     if (c !== "\\") {
       bytes.push(...Buffer.from(c, "utf8"));
+      i += c.length - 1;
       continue;
     }
     const octal = body.slice(i + 1, i + 4);
     if (/^[0-7]{3}$/.test(octal)) {
-      bytes.push(parseInt(octal, 8));
+      const byte = parseInt(octal, 8);
+      if (byte > 255) return undefined;
+      bytes.push(byte);
       i += 3;
       continue;
     }
     const next = body[i + 1];
-    if (next === undefined) break;
-    bytes.push(simple[next] ?? Buffer.from(next, "utf8")[0]);
+    if (next === undefined || simple[next] === undefined) return undefined;
+    bytes.push(simple[next]);
     i += 1;
   }
-  return Buffer.from(bytes).toString("utf8");
-}
-
-/** The b-side path of a `diff --git` header, or undefined when the header is not recognized. */
-function headerFile(line: string): string | undefined {
-  const quoted = /^diff --git ("(?:[^"\\]|\\.)*"|\S+) ("(?:[^"\\]|\\.)*"|\S+)$/.exec(line);
-  if (quoted) {
-    const b = unquoteGitPath(quoted[2]);
-    return b.startsWith("b/") ? b.slice(2) : undefined;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Uint8Array.from(bytes));
+    return decoded !== "" && !decoded.includes("\0") ? decoded : undefined;
+  } catch {
+    return undefined;
   }
-  const plain = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-  return plain ? plain[2] : undefined;
 }
 
-/**
- * Splits `git diff -U3` output into per-file sections. `hunks` starts at the first `@@`, so
- * file headers never reach the hunk parsers. Binary sections are flagged from git's own text,
- * and deleted-file sections from the `deleted file mode` header.
- */
-export function parseDiffFiles(text: string, workDir?: string): FileDiff[] {
-  type Section = { file: string; lines: string[]; binary: boolean; deleted: boolean };
-  const sections: Section[] = [];
-  let cur: Section | undefined;
+export function unquoteGitPath(s: string): string {
+  return s.startsWith('"') ? decodeGitPath(s) ?? s : s;
+}
+
+type Paths = { old: string | null; current: string | null };
+
+function prefixedPath(text: string, prefix: "a/" | "b/"): string | null | undefined {
+  // Git terminates unquoted ---/+++ paths containing spaces with a tab.
+  const path = decodeGitPath(text.endsWith("\t") ? text.slice(0, -1) : text);
+  if (path === "/dev/null") return null;
+  return path?.startsWith(prefix) && path.length > 2 ? path.slice(2) : undefined;
+}
+
+/** Enumerate possible separators instead of greedily choosing one in an unquoted path. */
+function headerPaths(header: string): Paths[] {
+  const body = header.slice("diff --git ".length);
+  const paths: Paths[] = [];
+  for (let at = body.indexOf(" "); at !== -1; at = body.indexOf(" ", at + 1)) {
+    const old = prefixedPath(body.slice(0, at), "a/");
+    const current = prefixedPath(body.slice(at + 1), "b/");
+    if (typeof old === "string" && typeof current === "string") paths.push({ old, current });
+  }
+  return paths;
+}
+
+/** Read whole sections: only pre-hunk metadata can establish identity or section flags. */
+export function parsePatch(text: string, workDir?: string): ParsedPatch {
+  const result: ParsedPatch = { files: [], issues: [] };
+  const sections: { header: string; lines: string[] }[] = [];
+  let cur: (typeof sections)[number] | undefined;
   for (const line of text.split("\n")) {
     if (line.startsWith("diff --git ")) {
-      const file = headerFile(line);
-      cur = file === undefined ? undefined : { file, lines: [], binary: false, deleted: false };
-      if (cur !== undefined) sections.push(cur);
+      cur = { header: line, lines: [] };
+      sections.push(cur);
       continue;
     }
-    if (cur === undefined) continue;
-    if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) cur.binary = true;
-    if (line.startsWith("deleted file mode")) cur.deleted = true;
-    cur.lines.push(line);
+    cur?.lines.push(line);
   }
-  return sections.map((s) => {
+  sections.forEach((s, index) => {
+    const issue = (code: PatchIssue["code"]) => result.issues.push({
+      section: index + 1, code,
+      message: code === "ambiguous-path" ? "Patch section has no unambiguous file identity." : "Patch section has invalid or incomplete path metadata.",
+    });
     const at = s.lines.findIndex((l) => l.startsWith("@@"));
+    const metadata = at === -1 ? s.lines : s.lines.slice(0, at);
+    const binary = metadata.some((l) => l.startsWith("Binary files ") || l === "GIT binary patch");
+    const deleted = metadata.some((l) => l.startsWith("deleted file mode "));
+    const values = (prefix: string) => metadata.filter((l) => l.startsWith(prefix)).map((l) => l.slice(prefix.length));
+    const before = values("--- "), after = values("+++ ");
+    const from = values("rename from "), to = values("rename to ");
+    let paths: Paths | undefined;
+    if (before.length || after.length) {
+      if (before.length !== 1 || after.length !== 1) { issue("malformed-section"); return; }
+      const old = prefixedPath(before[0], "a/"), current = prefixedPath(after[0], "b/");
+      if (old === undefined || current === undefined || (old === null && current === null)) { issue("malformed-section"); return; }
+      paths = { old, current };
+    }
+    if (from.length || to.length) {
+      if (from.length !== 1 || to.length !== 1) { issue("malformed-section"); return; }
+      const old = decodeGitPath(from[0]), current = decodeGitPath(to[0]);
+      if (old === undefined || current === undefined || (paths && (paths.old !== old || paths.current !== current))) { issue("malformed-section"); return; }
+      paths = { old, current };
+    }
+    if (paths === undefined) {
+      const options = headerPaths(s.header);
+      let candidates = options;
+      // Mode-only changes cannot rename. For binary changes the same-path header also
+      // identifies an unchanged name; a real rename has authoritative rename metadata.
+      if (candidates.length > 1 && (binary || metadata.some((l) => l.startsWith("old mode ")))) {
+        candidates = candidates.filter((p) => p.old === p.current);
+      }
+      if (candidates.length !== 1) { issue(options.length > 0 ? "ambiguous-path" : "malformed-section"); return; }
+      paths = candidates[0];
+    }
+    if (deleted && paths.current !== null && paths.old !== paths.current) { issue("malformed-section"); return; }
+    const file = paths.current ?? paths.old;
+    if (file === null) { issue("malformed-section"); return; }
     const hunks = at === -1 ? "" : s.lines.slice(at).join("\n").replace(/\n+$/, "");
     // Real on-disk size, so the large-file rule fires for binaries over 500 KB. A hunk-less text entry
     // (mode-only change) reports 0: L0 would otherwise read it as a binary-note.
-    const size = hunks === "" && !s.binary ? 0 : sizeOf(workDir, s.file);
-    const f: FileDiff = { file: s.file, hunks, truncated: false, size };
-    if (s.binary) f.binary = true;
-    if (s.deleted) f.deleted = true;
-    return f;
+    const size = hunks === "" && !binary ? 0 : sizeOf(workDir, file);
+    const f: FileDiff = { file, hunks, truncated: false, size };
+    if (paths.old !== null && paths.old !== file) f.oldFile = paths.old;
+    if (binary) f.binary = true;
+    if (deleted || paths.current === null) f.deleted = true;
+    result.files.push(f);
   });
+  return result;
+}
+
+/** Compatibility projection for callers that only need successfully attributed files. */
+export function parseDiffFiles(text: string, workDir?: string): FileDiff[] {
+  return parsePatch(text, workDir).files;
 }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;

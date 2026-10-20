@@ -869,6 +869,30 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
   });
 
+  it("blocks a high scanner finding on the actual spaced Git path in both flows", async () => {
+    const diff = "diff --git a/src b/code.ts b/src b/code.ts\n--- a/src b/code.ts\n+++ b/src b/code.ts\n@@ -0,0 +1 @@\n+danger();\n";
+    const high: Finding = { severity: "high", file: "src b/code.ts", line: 1, rule: "sec", message: "bad" };
+    const analysis = await runWithMocks({ failLevel: "high", llm: [], scan: [high], diff });
+    const privileged = await runPrivileged({ failLevel: "high", findings: [high], diff });
+    for (const result of [analysis, privileged]) {
+      expect(result.exitCode).toBe(1);
+      expect(result.reviews[0]).toMatchObject({ event: "REQUEST_CHANGES", comments: [{ path: "src b/code.ts", line: 1 }] });
+    }
+    expect(analysis.l2Changed).toEqual(new Set(["src b/code.ts"]));
+  });
+
+  it("surfaces unresolved patch sections as safe repository warnings in both flows", async () => {
+    const diff = 'diff --git a/a b/b b/c b/d\nBinary files a/a b/b and b/c b/d differ\n' + DIFF;
+    for (const execute of [() => runWithMocks({ diff, llm: [] }), () => runPrivileged({ diff, findings: [] })]) {
+      vi.mocked(core.warning).mockClear();
+      const result = await execute();
+      expect(vi.mocked(core.warning).mock.calls.some(([message]) => String(message).includes("diff-unparsed"))).toBe(true);
+      expect(result.reviews[0]?.body).toContain("diff-unparsed");
+      expect(result.reviews[0]?.body).not.toContain("a/a b/b");
+      expect(result.exitCode).toBe(0);
+    }
+  });
+
   it("fail_level warning exits 2 on warning findings through run()", async () => {
     const r = await runWithMocks({ failLevel: "warning" });
     expect(r.exitCode).toBe(2);

@@ -7,7 +7,7 @@ import { sanitizeFinding } from "../domain/finding.js";
 import type { PrMeta } from "../domain/diff.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { runL0 } from "../fastpath.js";
-import { filterForPrompt, isLockfile, parseDiffFiles, PER_FILE_CAP, truncateDiff } from "../diff/patch.js";
+import { filterForPrompt, isLockfile, parsePatch, PER_FILE_CAP, truncateDiff } from "../diff/patch.js";
 import { readDiff, writeFindings, writePrMeta } from "../artifacts/review-store.js";
 import { resolvePrNumber, shouldTrigger } from "../github.js";
 import { linkedIssueNumber } from "../prompt.js";
@@ -140,7 +140,12 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   requireSha("PR_REVIEWER_HEAD_SHA", env.headSha);
 
   // Unfiltered list: L0 needs lockfiles and binaries (Task 4 contract).
-  const files = parseDiffFiles(readDiff(env.artifactDir), env.workDir);
+  const { files, issues } = parsePatch(readDiff(env.artifactDir), env.workDir);
+  const patchWarnings: Finding[] = issues.length === 0 ? [] : [{
+    severity: "warning", file: "", rule: "diff-unparsed",
+    message: `${issues.length} patch section(s) could not be attributed to a file; review coverage is incomplete.`,
+  }];
+  for (const warning of patchWarnings) core.warning(`${warning.rule}: ${warning.message}`);
   const pull = await deps.gh.getPr(pr);
   const meta: PrMeta = {
     pr_number: pr,
@@ -193,7 +198,7 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
       rmSync(dirname(scan.sbomPath), { recursive: true, force: true });
     }
   }
-  const fast = [...l0, ...scan.findings, ...l2];
+  const fast = [...patchWarnings, ...l0, ...scan.findings, ...l2];
   // Written before the LLM call so a later failure still leaves the fast results uploadable.
   writeFindings(env.artifactDir, redactFindings(fast, runtimeSecrets(env)));
 

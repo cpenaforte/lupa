@@ -2,6 +2,8 @@ import type { DedupVerdicts } from "../llm/types.js";
 
 export interface FileDiff {
   file: string;
+  /** Previous path when it differs from the canonical current path. */
+  oldFile?: string;
   hunks: string;
   truncated: boolean;
   /** Decided by git (binary diff). Never guess from extension. */
@@ -10,6 +12,17 @@ export interface FileDiff {
   deleted?: boolean;
   /** Bytes on disk (stat). The large-file rule uses this, never hunks.length. */
   size?: number;
+}
+
+export interface PatchIssue {
+  section: number;
+  code: "ambiguous-path" | "malformed-section";
+  message: string;
+}
+
+export interface ParsedPatch {
+  files: FileDiff[];
+  issues: PatchIssue[];
 }
 
 /** One commentable diff line. LEFT = old-file line number (deletion); RIGHT = new-file line number. */

@@ -61,6 +61,14 @@ function promptDiff(result: EvalRun): string {
 }
 
 describe("synthetic bundle regression cases", () => {
+  it("blocks scanner evidence on the real Git path with spaces through the committed bundle", async () => {
+    const baseline = evalCases.find(({ id }) => id === "synthetic-unchanged-baseline-not-in-diff")!;
+    const finding = { severity: "high" as const, file: "src b/code.ts", line: 1, rule: "path-security", message: "Unsafe call." };
+    const result = await runBundleEval({ ...baseline, patchFixture: "../patch/paths.patch", scannerFindings: [finding], llmFindings: [], inputOverrides: { failLevel: "high" } });
+    expect(result.outcome.exitCode).toBe(1);
+    expect(result.publications[0]?.payload).toMatchObject({ event: "REQUEST_CHANGES", comments: [expect.objectContaining({ path: "src b/code.ts", line: 1 })] });
+  });
+
   it("has unique case IDs and every required category", () => {
     const ids = evalCases.map(({ id }) => id);
     const seen = new Set<string>();
