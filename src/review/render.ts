@@ -1,3 +1,4 @@
+import { unsafePath } from "../domain/finding.js";
 import type { Finding } from "../domain/finding.js";
 import type { ParsedHunk } from "../domain/diff.js";
 import type { InlineComment } from "../domain/review.js";
@@ -266,4 +267,42 @@ export function buildBody(
   const list = `**Findings not placed inline:**\n${items.join("\n")}`;
   if (outside === 0) return `${head}\n\n${list}`;
   return `${head}\n\n**Note:** ${outside} finding(s) below are outside the PR diff and do not block.\n\n${list}`;
+}
+
+/**
+ * SARIF 2.1.0 for code scanning: warning and high findings only (info stays in the review and the
+ * artifact), and only findings with a safe repository path (code scanning needs a location).
+ */
+export function toSarif(findings: Finding[]): unknown {
+  const level = (s: Finding["severity"]): string => (s === "high" ? "error" : s === "warning" ? "warning" : "note");
+  const results = findings
+    .filter((f) => f.severity !== "info" && f.file !== "" && !unsafePath(f.file))
+    .map((f) => ({
+      ruleId: f.rule,
+      level: level(f.severity),
+      message: { text: f.message },
+      locations: [
+        {
+          physicalLocation: {
+            artifactLocation: { uri: f.file },
+            ...(f.line !== undefined ? { region: { startLine: f.line } } : {}),
+          },
+        },
+      ],
+      // Provenance (Q04, display-only): each field independently iff present;
+      // omitted entirely when both are absent. `message.text` is unchanged.
+      ...((f.source !== undefined || f.confidence !== undefined
+        ? {
+            properties: {
+              ...(f.source !== undefined ? { source: f.source } : {}),
+              ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+            },
+          }
+        : {})),
+    }));
+  return {
+    $schema: "https://json.schemastore.org/sarif-2.1.0.json",
+    version: "2.1.0",
+    runs: [{ tool: { driver: { name: "pr-reviewer" } }, results }],
+  };
 }

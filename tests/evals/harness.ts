@@ -10,8 +10,8 @@ import {
   DEFAULT_MAX_REVIEW_BODY_CHARS,
 } from "../../src/inputs.js";
 import { ReadonlyTokenError, StaleHeadError } from "../../src/github.js";
-import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/main.js";
-import type { LlmResult } from "../../src/llm.js";
+import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/application/contracts.js";
+import type { LlmResult } from "../../src/llm/types.js";
 import type { EvalCase, EvalPublication, EvalRun } from "./types.js";
 
 const BASE_SHA = "b".repeat(40);
@@ -91,6 +91,22 @@ function bridgeBundleErrors(): () => void {
 }
 
 export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
+  return runEval(testCase);
+}
+
+export async function runSourceEval(
+  testCase: EvalCase,
+  runReview: typeof import("../../src/main.js").run,
+  analysisOverride?: Analysis,
+): Promise<EvalRun> {
+  return runEval(testCase, runReview, analysisOverride);
+}
+
+async function runEval(
+  testCase: EvalCase,
+  runReview?: typeof import("../../src/main.js").run,
+  analysisOverride?: Analysis,
+): Promise<EvalRun> {
   const root = mkdtempSync(join(tmpdir(), "lupa-eval-"));
   scratchRoots.push(root);
   const workDir = join(root, "work");
@@ -112,7 +128,7 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
   const bundlePath = resolve(process.cwd(), "dist/index.js");
   const bundleUrl = pathToFileURL(bundlePath);
   bundleUrl.searchParams.set("synthetic-eval", testCase.id);
-  const bundled = (await import(bundleUrl.href)) as typeof import("../../src/main.js");
+  const execute = runReview ?? ((await import(bundleUrl.href)) as typeof import("../../src/main.js")).run;
   const prompts = { system: "", user: "" };
   const gatewayCalls: Array<{ method: string; args: unknown[] }> = [];
   const publications: EvalPublication[] = [];
@@ -218,10 +234,10 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     summaryPath,
     ...testCase.envOverrides,
   };
-  const restoreHasInstance = bridgeBundleErrors();
-  let outcome: Awaited<ReturnType<typeof bundled.run>>;
+  const restoreHasInstance = runReview === undefined ? bridgeBundleErrors() : () => {};
+  let outcome: Awaited<ReturnType<typeof execute>>;
   try {
-    outcome = await bundled.run(env, { gh: gateway, analysis } satisfies Deps);
+    outcome = await execute(env, { gh: gateway, analysis: analysisOverride ?? analysis } satisfies Deps);
   } finally {
     restoreHasInstance();
   }

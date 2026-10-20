@@ -9,7 +9,9 @@ vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
   return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
-import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, run, sanitizeFinding, toSarif, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, sanitizeFinding, toSarif, unquoteGitPath } from "../src/main.js";
+import { run } from "../src/application/run.js";
+import type { Deps, Gateway, PrInfo, RunEnv } from "../src/application/contracts.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { DedupVerdicts, LlmUsage } from "../src/llm.js";

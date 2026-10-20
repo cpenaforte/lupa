@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { isLockfile } from "./diff.js";
+import { isLockfile } from "./diff/patch.js";
 import type { FileDiff } from "./domain/diff.js";
 import type { Finding } from "./domain/finding.js";
 
