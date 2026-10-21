@@ -1,3 +1,4 @@
+import type { RequestContext } from "../runtime/context.js";
 import type { Finding } from "../domain/finding.js";
 import type { ToolCall } from "../agent-types.js";
 import type { ResolvedApiStyle } from "../providers.js";
@@ -59,6 +60,7 @@ export type Attempt =
 export interface ProbeOptions {
   maxTokens: number;
   timeoutSeconds: number;
+  context?: RequestContext;
   temperature?: number;
   topP?: number;
   /** Preserves the opencode-go x-opencode-session header across probe attempts. */
@@ -84,6 +86,7 @@ export type AgentCallOptions = {
   topP?: number;
   maxTokens: number;
   timeoutSeconds: number;
+  context?: RequestContext;
   provider: string;
   maxTurns: number;
   maxSeconds: number;

@@ -1,3 +1,4 @@
+import { createRequestContext } from "../runtime/context.js";
 import * as core from "@actions/core";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,66 +123,72 @@ export async function slowPath(
   // any llm_path override, which pins the path the probe would rebuild — is
   // honored as-is through the resolved endpoint, with no probing.
   if (i.llmAgent) {
-    const selfRepo = String((env.payload.repository as { full_name?: unknown } | undefined)?.full_name ?? "");
-    const linked = parseLinkedRepos(prBody, selfRepo);
-    if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
-    const toolCtx: ToolContext = {
-      roots: { self: env.workDir, linked: new Map() },
-      ensureLinked: async (alias, opts?) => {
-        if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
-          return { error: "repository not accessible: " + alias };
-        const r = await ensureLinkedRepo(alias, {
-          token: i.githubToken,
-          baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
-          maxBytes: AGENT_LIMITS.cloneMaxBytes,
-          deadlineMs: opts?.deadlineMs,
-          sizeKb: async (a) => {
-            const parts = a.split("/");
-            if (parts.length !== 2) return undefined;
-            const [o, n] = parts;
-            return deps.gh.getRepoSize(o!, n!);
-          },
-        });
-        if ("dir" in r) {
-          toolCtx.roots.linked!.set(alias, r.dir);
-          if ("sha" in r && r.sha !== "") core.info(`agent linked repo ${alias} at ${r.sha}`);
-        }
-        return r;
-      },
-    };
-    const conv: Conversation = {
-      ...messages,
-      tools: [...TOOL_DEFS],
-    };
-    if (linked.length > 0)
-      conv.turns = [
-        {
-          role: "user",
-          text:
-            "Linked repositories mentioned in this pull request: " +
-            linked.join(", ") +
-            ". You may inspect them with the repo parameter of the read-only tools.",
+    const owned = createRequestContext(i.llmAgentMaxSeconds * 1000);
+    try {
+      const selfRepo = String((env.payload.repository as { full_name?: unknown } | undefined)?.full_name ?? "");
+      const linked = parseLinkedRepos(prBody, selfRepo);
+      if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
+      const toolCtx: ToolContext = {
+        roots: { self: env.workDir, linked: new Map() },
+        ensureLinked: async (alias, opts?) => {
+          if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
+            return { error: "repository not accessible: " + alias };
+          const r = await ensureLinkedRepo(alias, {
+            token: i.githubToken,
+            baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
+            maxBytes: AGENT_LIMITS.cloneMaxBytes,
+            deadlineMs: opts?.deadlineMs,
+            context: opts?.context ?? owned.context,
+            sizeKb: async (a) => {
+              const parts = a.split("/");
+              if (parts.length !== 2) return undefined;
+              const [o, n] = parts;
+              return deps.gh.getRepoSize(o!, n!);
+            },
+          });
+          if ("dir" in r) {
+            toolCtx.roots.linked!.set(alias, r.dir);
+            if ("sha" in r && r.sha !== "") core.info(`agent linked repo ${alias} at ${r.sha}`);
+          }
+          return r;
         },
-      ];
-    const agentOpts = { ...llmOpts, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
-    const res: LlmResult =
-      i.llmApiStyle === "auto" && i.llmPath === ""
-        ? await deps.analysis.callWithProbeAgent(
-            i.llmProvider,
-            i.llmModel,
-            ep.baseUrl,
-            i.llmApiKey,
-            conv,
-            agentOpts,
-            toolCtx,
-          )
-        : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
-    if (!res.ok) {
-      core.warning(`slow path failed (${res.reason}): ${res.detail}`);
-      return undefined;
+      };
+      const conv: Conversation = {
+        ...messages,
+        tools: [...TOOL_DEFS],
+      };
+      if (linked.length > 0)
+        conv.turns = [
+          {
+            role: "user",
+            text:
+              "Linked repositories mentioned in this pull request: " +
+              linked.join(", ") +
+              ". You may inspect them with the repo parameter of the read-only tools.",
+          },
+        ];
+      const agentOpts = { ...llmOpts, context: owned.context, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
+      const res: LlmResult =
+        i.llmApiStyle === "auto" && i.llmPath === ""
+          ? await deps.analysis.callWithProbeAgent(
+              i.llmProvider,
+              i.llmModel,
+              ep.baseUrl,
+              i.llmApiKey,
+              conv,
+              agentOpts,
+              toolCtx,
+            )
+          : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
+      if (!res.ok) {
+        core.warning(`slow path failed (${res.reason}): ${res.detail}`);
+        return undefined;
+      }
+      noteUsage(res);
+      return { findings: res.findings };
+    } finally {
+      owned.dispose();
     }
-    noteUsage(res);
-    return { findings: res.findings };
   }
   const res: LlmResult =
     i.llmApiStyle === "auto" && i.llmPath === ""

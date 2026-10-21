@@ -60,6 +60,46 @@ describe("parseLinkedRepos", () => {
 });
 
 describe("ensureLinkedRepo", () => {
+  it("cancels an in-flight clone and never starts HEAD inspection", async () => {
+    const baseDir = tempRoot();
+    const controller = new AbortController();
+    const commands: string[] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, args, opts) => {
+        commands.push(args[0]);
+        if (args[0] === "clone") {
+          mkdirSync(join(baseDir, "acme__tools"));
+          controller.abort();
+          expect(opts.signal?.aborted).toBe(true);
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    const result = await ensureLinkedRepo("acme/tools", {
+      token: "", baseDir, deps, context: { signal: controller.signal, deadlineMs: Date.now() + 30_000 },
+    });
+    expect(result).toEqual({ error: "repository not accessible: acme/tools: deadline exceeded" });
+    expect(commands).toEqual(["clone"]);
+    expect(existsSync(join(baseDir, "acme__tools"))).toBe(false);
+  });
+
+  it("does not spawn or wipe a cached clone when its context is already cancelled", async () => {
+    const baseDir = tempRoot();
+    const dir = join(baseDir, "acme__tools");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "preserve"), "cached");
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const result = await ensureLinkedRepo("acme/tools", {
+      token: "", baseDir, context: { signal: controller.signal, deadlineMs: Date.now() + 30_000 },
+      deps: { run: async () => { calls++; return { code: 1, stdout: "", stderr: "" }; } },
+    });
+    expect(result).toEqual({ error: "repository not accessible: acme/tools: deadline exceeded" });
+    expect(calls).toBe(0);
+    expect(readFileSync(join(dir, "preserve"), "utf8")).toBe("cached");
+  });
+
   it("ensureLinkedRepo clones with env auth and never puts the token in argv", async () => {
     const baseDir = tempRoot();
     const token = "s3cret-token";

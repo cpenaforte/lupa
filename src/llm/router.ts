@@ -1,3 +1,4 @@
+import { createRequestContext, type RequestContext } from "../runtime/context.js";
 import { stripProvenance } from "../domain/finding.js";
 import type { Conversation } from "../agent-types.js";
 import { buildEndpointForStyle } from "../providers.js";
@@ -28,6 +29,7 @@ export async function callByStyle(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
     provider: string;
   },
 ): Promise<LlmResult> {
@@ -112,6 +114,7 @@ export async function callWithProbe(
     topP: o.topP,
     maxTokens: o.maxTokens,
     timeoutSeconds: o.timeoutSeconds,
+    context: o.context,
     provider,
   };
 
@@ -195,6 +198,7 @@ export async function callTurnByStyle(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
     provider: string;
   },
   flags: { allowTools: boolean; allowFormat: boolean },
@@ -226,7 +230,7 @@ function agentCallFor(ep: ResolvedEndpoint, o: AgentCallOptions) {
   return (
     c: Conversation,
     flags: { allowTools: boolean; allowFormat: boolean },
-    callOpts: { timeoutSeconds: number },
+    callOpts: { timeoutSeconds: number; context?: RequestContext },
   ): Promise<AgentReply> =>
     callTurnByStyle(
       ep,
@@ -238,6 +242,7 @@ function agentCallFor(ep: ResolvedEndpoint, o: AgentCallOptions) {
         topP: o.topP,
         maxTokens: o.maxTokens,
         timeoutSeconds: callOpts.timeoutSeconds,
+        context: callOpts.context,
         provider: o.provider,
       },
       flags,
@@ -268,7 +273,7 @@ export async function callByStyleAgent(
   const outcome = await runAgent(
     conv,
     toolCtx,
-    { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds },
+    { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, context: o.context },
     { call: agentCallFor(ep, o), log: core.info },
   );
   return withAgentUsage(outcome, outcome.result);
@@ -300,103 +305,110 @@ export async function callWithProbeAgent(
     return { result: { ok: false, reason: "no-key", detail: "no API key configured" } };
   }
 
-  const memoKey = `${provider}:${model}`;
+  const owned = o.context === undefined ? createRequestContext(o.maxSeconds * 1000) : undefined;
+  o = { ...o, context: o.context ?? owned!.context };
+  try {
+    const memoKey = `${provider}:${model}`;
 
-  // A model that already proved it rejects tools skips the loop entirely.
-  // The conversation has no turns at this point, so this is single-shot.
-  // Agent-mode findings carry no provenance (Q04): strip them here while
-  // keeping the genuine single-shot `verdicts` judgment.
-  if (TOOLS_MEMO.get(memoKey) === false) {
-    core.info("agent tools unsupported for this model: using single-shot");
-    const out = await callWithProbe(provider, model, baseUrl, key, { system: conv.system, user: conv.user }, o, explicitStyle);
-    if (out.result.ok) {
-      out.result.findings = out.result.findings.map(stripProvenance);
+    // A model that already proved it rejects tools skips the loop entirely.
+    // The conversation has no turns at this point, so this is single-shot.
+    // Agent-mode findings carry no provenance (Q04): strip them here while
+    // keeping the genuine single-shot `verdicts` judgment.
+    if (TOOLS_MEMO.get(memoKey) === false) {
+      core.info("agent tools unsupported for this model: using single-shot");
+      const out = await callWithProbe(provider, model, baseUrl, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+      if (out.result.ok) {
+        out.result.findings = out.result.findings.map(stripProvenance);
+      }
+      return out;
     }
-    return out;
-  }
 
-  const agentOpts: AgentCallOptions = {
-    model,
-    apiKey: key,
-    temperature: o.temperature,
-    topP: o.topP,
-    maxTokens: o.maxTokens,
-    timeoutSeconds: o.timeoutSeconds,
-    provider,
-    maxTurns: o.maxTurns,
-    maxSeconds: o.maxSeconds,
-  };
+    const agentOpts: AgentCallOptions = {
+      model,
+      apiKey: key,
+      temperature: o.temperature,
+      topP: o.topP,
+      maxTokens: o.maxTokens,
+      timeoutSeconds: o.timeoutSeconds,
+      context: o.context,
+      provider,
+      maxTurns: o.maxTurns,
+      maxSeconds: o.maxSeconds,
+    };
 
-  // One absolute deadline per probe invocation: every probed style shares
-  // it instead of restarting the clock (real-clock; the agent loop derives
-  // per-call timeouts from it).
-  const deadlineMs = Date.now() + o.maxSeconds * 1000;
+    // One absolute deadline per probe invocation: every probed style shares
+    // it instead of restarting the clock (real-clock; the agent loop derives
+    // per-call timeouts from it).
+    const deadlineMs = o.context!.deadlineMs;
 
-  const runStyle = async (style: ResolvedApiStyle) => {
-    const ep = buildEndpointForStyle(provider, model, baseUrl, key, style, o.prNumber ?? null, o.userBase ?? false);
-    const outcome = await runAgent(
-      conv,
-      toolCtx,
-      { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, deadlineMs },
-      { call: agentCallFor(ep, agentOpts), log: core.info },
+    const runStyle = async (style: ResolvedApiStyle) => {
+      const ep = buildEndpointForStyle(provider, model, baseUrl, key, style, o.prNumber ?? null, o.userBase ?? false);
+      const outcome = await runAgent(
+        conv,
+        toolCtx,
+        { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, deadlineMs, context: o.context },
+        { call: agentCallFor(ep, agentOpts), log: core.info },
+      );
+      return { outcome, via: style };
+    };
+
+    // Explicit style: the user decided; exactly one loop, no probe.
+    if (explicitStyle !== undefined && explicitStyle !== "auto") {
+      const { outcome } = await runStyle(explicitStyle);
+      return { result: withAgentUsage(outcome, outcome.result), via: explicitStyle };
+    }
+
+    // A stale memo must not dead-end the probe: the memoized style goes first,
+    // then every other style in PROBE_ORDER order.
+    const memoized = PROBE_MEMO.get(memoKey);
+    const order: readonly ResolvedApiStyle[] =
+      memoized !== undefined ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
+
+    const attempted: ResolvedApiStyle[] = [];
+    let last: LlmResult | undefined;
+    for (const style of order) {
+      attempted.push(style);
+      const { outcome } = await runStyle(style);
+      last = outcome.result;
+      if (outcome.probeAdvance) {
+        // A 400/404 invalidates any memoized style for this pair: drop it and
+        // keep probing through the remaining styles. This wins over the tools
+        // fallback below: a 400 that fails even without tools means the style
+        // itself is wrong.
+        PROBE_MEMO.delete(memoKey);
+        continue;
+      }
+      if (outcome.toolsUnsupported) {
+        // The loop fell back to single-shot: remember it for this model. The
+        // result may still be ok (fallback success), so this check must come
+        // before the ok branch.
+        TOOLS_MEMO.set(memoKey, false);
+        return { result: withAgentUsage(outcome, outcome.result), via: style };
+      }
+      if (outcome.result.ok) {
+        PROBE_MEMO.set(memoKey, style);
+        return { result: withAgentUsage(outcome, outcome.result), via: style };
+      }
+      return { result: withAgentUsage(outcome, outcome.result), via: style };
+    }
+
+    // Every tried style failed: report the last failure, name what was tried.
+    core.warning(
+      `model "${model}": no API style accepted the request; tried ${attempted.join(" → ")}. ` +
+        `Set llm_api_style explicitly to skip the probe.`,
     );
-    return { outcome, via: style };
-  };
-
-  // Explicit style: the user decided; exactly one loop, no probe.
-  if (explicitStyle !== undefined && explicitStyle !== "auto") {
-    const { outcome } = await runStyle(explicitStyle);
-    return { result: withAgentUsage(outcome, outcome.result), via: explicitStyle };
+    const detail = last !== undefined && !last.ok ? last.detail : "no API style accepted the request";
+    const status = last !== undefined && !last.ok && last.reason === "http-error" ? last.status : undefined;
+    return {
+      result: {
+        ok: false,
+        reason: "http-error",
+        detail: redact(detail, key),
+        ...(status !== undefined ? { status } : {}),
+      },
+      via: attempted.at(-1),
+    };
+  } finally {
+    owned?.dispose();
   }
-
-  // A stale memo must not dead-end the probe: the memoized style goes first,
-  // then every other style in PROBE_ORDER order.
-  const memoized = PROBE_MEMO.get(memoKey);
-  const order: readonly ResolvedApiStyle[] =
-    memoized !== undefined ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
-
-  const attempted: ResolvedApiStyle[] = [];
-  let last: LlmResult | undefined;
-  for (const style of order) {
-    attempted.push(style);
-    const { outcome } = await runStyle(style);
-    last = outcome.result;
-    if (outcome.probeAdvance) {
-      // A 400/404 invalidates any memoized style for this pair: drop it and
-      // keep probing through the remaining styles. This wins over the tools
-      // fallback below: a 400 that fails even without tools means the style
-      // itself is wrong.
-      PROBE_MEMO.delete(memoKey);
-      continue;
-    }
-    if (outcome.toolsUnsupported) {
-      // The loop fell back to single-shot: remember it for this model. The
-      // result may still be ok (fallback success), so this check must come
-      // before the ok branch.
-      TOOLS_MEMO.set(memoKey, false);
-      return { result: withAgentUsage(outcome, outcome.result), via: style };
-    }
-    if (outcome.result.ok) {
-      PROBE_MEMO.set(memoKey, style);
-      return { result: withAgentUsage(outcome, outcome.result), via: style };
-    }
-    return { result: withAgentUsage(outcome, outcome.result), via: style };
-  }
-
-  // Every tried style failed: report the last failure, name what was tried.
-  core.warning(
-    `model "${model}": no API style accepted the request; tried ${attempted.join(" → ")}. ` +
-      `Set llm_api_style explicitly to skip the probe.`,
-  );
-  const detail = last !== undefined && !last.ok ? last.detail : "no API style accepted the request";
-  const status = last !== undefined && !last.ok && last.reason === "http-error" ? last.status : undefined;
-  return {
-    result: {
-      ok: false,
-      reason: "http-error",
-      detail: redact(detail, key),
-      ...(status !== undefined ? { status } : {}),
-    },
-    via: attempted.at(-1),
-  };
 }

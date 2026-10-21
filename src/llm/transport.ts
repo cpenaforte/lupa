@@ -1,3 +1,4 @@
+import { requestExpired, type RequestContext } from "../runtime/context.js";
 import type { ResolvedEndpoint } from "../providers.js";
 import { redact } from "../domain/text.js";
 import type { Attempt } from "./types.js";
@@ -25,15 +26,41 @@ export function retryDelayMs(raw: string | null): number {
   return Math.min(secs * 1000, MAX_RETRY_AFTER_MS);
 }
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Cancellation resolves sleep early; waitForRetry decides whether work may resume. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+export async function waitForRetry(delayMs: number, context?: RequestContext): Promise<boolean> {
+  if (requestExpired(context) || (context !== undefined && delayMs >= context.deadlineMs - Date.now())) return false;
+  await sleep(delayMs, context?.signal);
+  return !requestExpired(context);
+}
+
+export function requestTimeout(): { ok: false; reason: "timeout"; detail: string } {
+  return { ok: false, reason: "timeout", detail: "agent budget exhausted" };
+}
 
 /**
  * One HTTP attempt. The abort timer covers the headers AND the body read, and is
  * cleared only after the body is fully read.
  */
-export async function attempt(ep: ResolvedEndpoint, payload: string, o: { timeoutSeconds: number; apiKey: string }): Promise<Attempt> {
+export async function attempt(ep: ResolvedEndpoint, payload: string, o: { timeoutSeconds: number; apiKey: string; context?: RequestContext }): Promise<Attempt> {
+  if (requestExpired(o.context)) return { kind: "fail", result: requestTimeout() };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), o.timeoutSeconds * 1000);
+  const cancel = (): void => controller.abort();
+  o.context?.signal.addEventListener("abort", cancel, { once: true });
+  const timeoutMs = Math.min(o.timeoutSeconds * 1000, o.context === undefined ? Infinity : o.context.deadlineMs - Date.now());
+  const timer = setTimeout(cancel, Math.max(0, timeoutMs));
   try {
     const res = await fetch(`${ep.baseUrl}${ep.path}`, {
       method: "POST",
@@ -42,6 +69,7 @@ export async function attempt(ep: ResolvedEndpoint, payload: string, o: { timeou
       signal: controller.signal,
     });
     const text = await res.text();
+    if (controller.signal.aborted || requestExpired(o.context)) return { kind: "fail", result: requestTimeout() };
     return { kind: "response", status: res.status, ok: res.ok, retryAfter: res.headers.get("retry-after"), text };
   } catch (e) {
     if (controller.signal.aborted) {
@@ -53,6 +81,7 @@ export async function attempt(ep: ResolvedEndpoint, payload: string, o: { timeou
     };
   } finally {
     clearTimeout(timer);
+    o.context?.signal.removeEventListener("abort", cancel);
   }
 }
 

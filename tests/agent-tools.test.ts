@@ -28,6 +28,18 @@ afterEach(() => {
   while (created.length) rmSync(created.pop()!, { recursive: true, force: true });
 });
 
+describe("request cancellation", () => {
+  it("terminates an active grep worker when its request is cancelled", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "a".repeat(100) + "!");
+    const controller = new AbortController();
+    const context = { signal: controller.signal, deadlineMs: Date.now() + 30_000 };
+    const pending = grepInRoot(root, { pattern: "(a+)+$" }, 5000, undefined, undefined, undefined, context);
+    controller.abort();
+    expect(await pending).toEqual({ output: '{"error":"grep cancelled"}', isError: true });
+  });
+});
+
 describe("resolveWithinRoot", () => {
   it("resolveWithinRoot rejects absolute, .., and any .git segment", () => {
     const root = tempRoot();
@@ -56,6 +68,37 @@ describe("resolveWithinRoot", () => {
 });
 
 describe("read_file", () => {
+  it("does not resolve a linked repository after cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let resolutions = 0;
+    const result = await executeTool("read_file", { path: "a.txt", repo: "acme/tools" }, {
+      roots: { self: tempRoot() },
+      ensureLinked: async () => { resolutions++; return { error: "missing" }; },
+    }, { context: { signal: controller.signal, deadlineMs: Date.now() + 30_000 } });
+    expect(result.isError).toBe(true);
+    expect(resolutions).toBe(0);
+  });
+
+  it("shares cancellation with linked resolution and stops before reading", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "must not read");
+    const controller = new AbortController();
+    const context = { signal: controller.signal, deadlineMs: Date.now() + 30_000 };
+    let received: unknown;
+    const result = await executeTool("read_file", { path: "a.txt", repo: "acme/tools" }, {
+      roots: { self: root },
+      ensureLinked: async (_alias, opts) => {
+        received = opts?.context;
+        controller.abort();
+        return { dir: root, sha: "abc" };
+      },
+    }, { context });
+    expect(received).toBe(context);
+    expect(result.isError).toBe(true);
+    expect(result.output).not.toContain("must not read");
+  });
+
   it("read_file returns numbered lines and metadata", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "line1\nline2\nline3\n");

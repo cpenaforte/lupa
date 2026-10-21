@@ -1,3 +1,4 @@
+import { createRequestContext, requestExpired, type RequestContext } from "./runtime/context.js";
 import { AGENT_LIMITS } from "./agent-types.js";
 import type { Conversation, ToolCall } from "./agent-types.js";
 import { executeTool } from "./agent-tools.js";
@@ -15,13 +16,14 @@ export interface AgentBudget {
   maxCallsPerTurn?: number;
   /** Absolute epoch-ms deadline; when present runAgent uses it verbatim. */
   deadlineMs?: number;
+  context?: RequestContext;
 }
 
 export interface AgentHooks {
   call: (
     conv: Conversation,
     flags: { allowTools: boolean; allowFormat: boolean },
-    callOpts: { timeoutSeconds: number; deadlineMs: number },
+    callOpts: { timeoutSeconds: number; deadlineMs: number; context?: RequestContext },
   ) => Promise<AgentReply>;
   log: (msg: string) => void;
   clock?: () => number;
@@ -95,262 +97,276 @@ export async function runAgent(
 ): Promise<AgentOutcome> {
   const clock = hooks.clock ?? Date.now;
   const start = clock();
-  const deadline = budget.deadlineMs ?? start + budget.maxSeconds * 1000;
-  const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
-  const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
-  const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
-  const turnsArr = conv.turns ?? (conv.turns = []);
-  let turns = 0;
-  let calls = 0;
-  let bytes = 0;
-  let toolsUnsupported = false;
-  let usageInput = 0;
-  let usageOutput = 0;
-  let usageCalls = 0;
+  const deadline = budget.context?.deadlineMs ?? budget.deadlineMs ?? start + budget.maxSeconds * 1000;
+  const owned = budget.context === undefined ? createRequestContext(deadline - start) : undefined;
+  const context = budget.context ?? owned!.context;
+  try {
+    const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
+    const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
+    const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
+    const turnsArr = conv.turns ?? (conv.turns = []);
+    let turns = 0;
+    let calls = 0;
+    let bytes = 0;
+    let toolsUnsupported = false;
+    let usageInput = 0;
+    let usageOutput = 0;
+    let usageCalls = 0;
 
-  const elapsedMs = (): number => clock() - start;
-  // Accumulates only ok replies that carry usage, on the non-raced branch
-  // (never inside a `.then`, so a late dangling resolution cannot add after
-  // finish()). ok:false replies never carry usage.
-  const accumulateUsage = (reply: AgentReply): void => {
-    if (reply.ok && reply.usage !== undefined) {
-      usageInput += reply.usage.input;
-      usageOutput += reply.usage.output;
-      usageCalls += reply.usage.calls;
-    }
-  };
-  const finish = (
-    result: LlmResult,
-    stop: AgentOutcome["stop"],
-    probeAdvance: boolean,
-  ): AgentOutcome => {
-    const ms = elapsedMs();
-    hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1000}s`);
-    return {
-      result,
-      stop,
-      probeAdvance,
-      toolsUnsupported,
-      turns,
-      calls,
-      bytes,
-      elapsedMs: ms,
-      ...(usageCalls > 0 ? { usage: { input: usageInput, output: usageOutput, calls: usageCalls } } : {}),
+    const elapsedMs = (): number => clock() - start;
+    // Accumulates only ok replies that carry usage, on the non-raced branch
+    // (never inside a `.then`, so a late dangling resolution cannot add after
+    // finish()). ok:false replies never carry usage.
+    const accumulateUsage = (reply: AgentReply): void => {
+      if (reply.ok && reply.usage !== undefined) {
+        usageInput += reply.usage.input;
+        usageOutput += reply.usage.output;
+        usageCalls += reply.usage.calls;
+      }
     };
-  };
-  const timeoutFor = (remaining: number): number =>
-    Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)));
-  const timedOut = (): AgentOutcome | null => {
-    if (deadline - clock() < 10_000) {
-      return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
-    }
-    return null;
-  };
-  const timeoutLlmResult = (): LlmResult => ({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL });
-  const timeoutReply = (): AgentReply => ({ ok: false, result: timeoutLlmResult() });
+    const finish = (
+      result: LlmResult,
+      stop: AgentOutcome["stop"],
+      probeAdvance: boolean,
+    ): AgentOutcome => {
+      const ms = elapsedMs();
+      hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1000}s`);
+      return {
+        result,
+        stop,
+        probeAdvance,
+        toolsUnsupported,
+        turns,
+        calls,
+        bytes,
+        elapsedMs: ms,
+        ...(usageCalls > 0 ? { usage: { input: usageInput, output: usageOutput, calls: usageCalls } } : {}),
+      };
+    };
+    const timeoutFor = (remaining: number): number =>
+      Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)));
+    const timedOut = (): AgentOutcome | null => {
+      if (requestExpired(context) || deadline - clock() < 10_000) {
+        return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
+      }
+      return null;
+    };
+    const timeoutLlmResult = (): LlmResult => ({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL });
+    const timeoutReply = (): AgentReply => ({ ok: false, result: timeoutLlmResult() });
 
-  /**
-   * Races one model call against the absolute deadline. `nowMs` is passed in
-   * from the already-read clock values at each call site (never read here).
-   * `ms <= 0` returns the timeout result WITHOUT invoking `hooks.call`; else
-   * a real-timer fallback resolves the same timeout result, the timer is
-   * cleared on settle, and the dangling inner promise gets a noop catch.
-   */
-  const callWithDeadline = (
-    flags: { allowTools: boolean; allowFormat: boolean },
-    opts: { timeoutSeconds: number; deadlineMs: number },
-    nowMs: number,
-  ): Promise<{ reply: AgentReply; raced: boolean }> => {
-    const ms = deadline - nowMs;
-    if (ms <= 0) return Promise.resolve({ reply: timeoutReply(), raced: true });
-    // The model call starts before the race timer so a synchronous throw
-    // cannot leak a live timer (async adapters are unaffected: the timer
-    // still guards the in-flight promise identically).
-    const inner = hooks.call(conv, flags, opts);
-    // Adapters resolve by contract and never reject; this is timer hygiene
-    // for the dangling promise after a race win.
-    inner.then(undefined, () => {});
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeoutP = new Promise<{ reply: AgentReply; raced: boolean }>((resolve) => {
-      timer = setTimeout(() => resolve({ reply: timeoutReply(), raced: true }), ms);
-    });
-    return Promise.race([inner.then((reply) => ({ reply, raced: false as const })), timeoutP]).finally(() => {
-      clearTimeout(timer);
-    });
-  };
+    /**
+     * Races one model call against the absolute deadline. `nowMs` is passed in
+     * from the already-read clock values at each call site (never read here).
+     * `ms <= 0` returns the timeout result WITHOUT invoking `hooks.call`; else
+     * cancellation resolves the same timeout result. The shared context also
+     * cancels transport/retry work; racing remains a backstop for custom hooks.
+     * Every listener and race timer is removed on settle.
+     */
+    const callWithDeadline = (
+      flags: { allowTools: boolean; allowFormat: boolean },
+      opts: { timeoutSeconds: number; deadlineMs: number },
+      nowMs: number,
+    ): Promise<{ reply: AgentReply; raced: boolean }> => {
+      const ms = deadline - nowMs;
+      if (requestExpired(context) || ms <= 0) return Promise.resolve({ reply: timeoutReply(), raced: true });
+      // The model call starts before the race timer so a synchronous throw
+      // cannot leak a live timer (async adapters are unaffected: the timer
+      // still guards the in-flight promise identically).
+      const inner = hooks.call(conv, flags, { ...opts, context });
+      // Adapters resolve by contract and never reject; this is timer hygiene
+      // for the dangling promise after a race win.
+      inner.then(undefined, () => {});
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancel: () => void;
+      const timeoutP = new Promise<{ reply: AgentReply; raced: boolean }>((resolve) => {
+        cancel = () => resolve({ reply: timeoutReply(), raced: true });
+        timer = setTimeout(cancel, ms);
+        context.signal.addEventListener("abort", cancel, { once: true });
+        if (context.signal.aborted) cancel();
+      });
+      return Promise.race([inner.then((reply) => ({ reply, raced: false as const })), timeoutP]).finally(() => {
+        clearTimeout(timer);
+        context.signal.removeEventListener("abort", cancel!);
+      });
+    };
 
-  const appendAssistant = (reply: { text: string; toolCalls: ToolCall[]; rawItems?: unknown[] }): void => {
-    turnsArr.push({
-      role: "assistant",
-      text: reply.text,
-      toolCalls: reply.toolCalls,
-      ...(reply.rawItems !== undefined ? { rawItems: reply.rawItems } : {}),
-    });
-  };
+    const appendAssistant = (reply: { text: string; toolCalls: ToolCall[]; rawItems?: unknown[] }): void => {
+      turnsArr.push({
+        role: "assistant",
+        text: reply.text,
+        toolCalls: reply.toolCalls,
+        ...(reply.rawItems !== undefined ? { rawItems: reply.rawItems } : {}),
+      });
+    };
 
-  for (;;) {
-    const expired = timedOut();
-    if (expired) return expired;
-    const remaining = deadline - clock();
-    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
-    const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
-    if (forced) turnsArr.push({ role: "user", text: BUDGET_NOTE });
-    const turnStart = clock();
-    const turnIndex = turns;
-    const nowMs = deadline - remaining;
-    const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
-    if (first.raced) return finish(timeoutLlmResult(), "budget", false);
-    const reply = first.reply;
-    accumulateUsage(reply);
+    for (;;) {
+      const expired = timedOut();
+      if (expired) return expired;
+      const remaining = deadline - clock();
+      const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
+      const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
+      if (forced) turnsArr.push({ role: "user", text: BUDGET_NOTE });
+      const turnStart = clock();
+      const turnIndex = turns;
+      const nowMs = deadline - remaining;
+      const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
+      if (first.raced) return finish(timeoutLlmResult(), "budget", false);
+      const reply = first.reply;
+      accumulateUsage(reply);
 
-    if (!reply.ok) {
-      const status = statusOf(reply.result);
-      // Turn-0 tool-call failure: a 400 means the endpoint rejects tools, so
-      // retry the same conversation without them; a bare 404 advances the probe.
-      if (turns === 0 && !forced) {
-        if (status === 400) {
-          const retryExpired = timedOut();
-          if (retryExpired) return retryExpired;
-          const retryRemaining = deadline - clock();
-          const retried = await callWithDeadline(
-            { ...NO_TOOLS },
-            { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline },
-            deadline - retryRemaining,
-          );
-          if (retried.raced) return finish(timeoutLlmResult(), "budget", false);
-          const retry = retried.reply;
-          accumulateUsage(retry);
-          if (!retry.ok) {
-            const s2 = statusOf(retry.result);
+      if (!reply.ok) {
+        const status = statusOf(reply.result);
+        // Turn-0 tool-call failure: a 400 means the endpoint rejects tools, so
+        // retry the same conversation without them; a bare 404 advances the probe.
+        if (turns === 0 && !forced) {
+          if (status === 400) {
+            const retryExpired = timedOut();
+            if (retryExpired) return retryExpired;
+            const retryRemaining = deadline - clock();
+            const retried = await callWithDeadline(
+              { ...NO_TOOLS },
+              { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline },
+              deadline - retryRemaining,
+            );
+            if (retried.raced) return finish(timeoutLlmResult(), "budget", false);
+            const retry = retried.reply;
+            accumulateUsage(retry);
+            if (!retry.ok) {
+              const s2 = statusOf(retry.result);
+              toolsUnsupported = true;
+              return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
+            }
+            const parsed = tryParseFinal(retry.text);
+            appendAssistant(retry);
+            if (parsed.ok) {
+              turns += 1;
+              toolsUnsupported = true;
+              return finish(parsed, "fallback", false);
+            }
+            turnsArr.push({ role: "user", text: REPAIR_NOTE });
+            const repairExpired = timedOut();
+            if (repairExpired) return repairExpired;
+            const repairRemaining = deadline - clock();
+            const repaired = await callWithDeadline(
+              { ...NO_TOOLS },
+              { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline },
+              deadline - repairRemaining,
+            );
+            if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
+            const fixed = repaired.reply;
+            accumulateUsage(fixed);
+            if (!fixed.ok) {
+              toolsUnsupported = true;
+              return finish(fixed.result, "error", false);
+            }
+            turns += 2;
+            appendAssistant(fixed);
+            const p2 = tryParseFinal(fixed.text);
             toolsUnsupported = true;
-            return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
+            if (p2.ok) return finish(p2, "fallback", false);
+            return finish(p2, "error", false);
           }
-          const parsed = tryParseFinal(retry.text);
-          appendAssistant(retry);
-          if (parsed.ok) {
-            turns += 1;
-            toolsUnsupported = true;
-            return finish(parsed, "fallback", false);
-          }
-          turnsArr.push({ role: "user", text: REPAIR_NOTE });
-          const repairExpired = timedOut();
-          if (repairExpired) return repairExpired;
-          const repairRemaining = deadline - clock();
-          const repaired = await callWithDeadline(
-            { ...NO_TOOLS },
-            { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline },
-            deadline - repairRemaining,
-          );
-          if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
-          const fixed = repaired.reply;
-          accumulateUsage(fixed);
-          if (!fixed.ok) {
-            toolsUnsupported = true;
-            return finish(fixed.result, "error", false);
-          }
-          turns += 2;
-          appendAssistant(fixed);
-          const p2 = tryParseFinal(fixed.text);
-          toolsUnsupported = true;
-          if (p2.ok) return finish(p2, "fallback", false);
-          return finish(p2, "error", false);
+          if (status === 404) return finish(reply.result, "error", true);
+          return finish(reply.result, "error", false);
         }
-        if (status === 404) return finish(reply.result, "error", true);
         return finish(reply.result, "error", false);
       }
-      return finish(reply.result, "error", false);
-    }
 
-    if (forced) {
-      appendAssistant(reply);
-      turns += 1;
-      hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
-      const parsed = tryParseFinal(reply.text);
-      if (parsed.ok) return finish(parsed, "budget", false);
-      return finish(parsed, "error", false);
-    }
-
-    if (reply.toolCalls.length === 0) {
-      appendAssistant(reply);
-      turns += 1;
-      const parsed = tryParseFinal(reply.text);
-      if (parsed.ok) {
+      if (forced) {
+        appendAssistant(reply);
+        turns += 1;
         hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
-        return finish(parsed, "final", false);
+        const parsed = tryParseFinal(reply.text);
+        if (parsed.ok) return finish(parsed, "budget", false);
+        return finish(parsed, "error", false);
       }
-      hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
-      turnsArr.push({ role: "user", text: REPAIR_NOTE });
-      const repairExpired = timedOut();
-      if (repairExpired) return repairExpired;
-      const repairStart = clock();
-      const repairRemaining = deadline - clock();
-      const repaired = await callWithDeadline(
-        { ...NO_TOOLS },
-        { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline },
-        deadline - repairRemaining,
-      );
-      if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
-      const fixed = repaired.reply;
-      accumulateUsage(fixed);
-      if (!fixed.ok) return finish(fixed.result, "error", false);
-      appendAssistant(fixed);
-      turns += 1;
-      const p2 = tryParseFinal(fixed.text);
-      hooks.log(`agent turn ${turnIndex + 1}: tools=[] results_bytes=0 ms=${clock() - repairStart}`);
-      if (p2.ok) return finish(p2, "final", false);
-      return finish(p2, "error", false);
-    }
 
-    appendAssistant(reply);
-    turns += 1;
-    let turnBytes = 0;
-    for (let i = 0; i < reply.toolCalls.length; i++) {
-      const call = reply.toolCalls[i]!;
-      if (i >= maxCalls) {
-        // Too-many-calls record is loop-generated bookkeeping: excluded
-        // from `bytes` (content outputs alone are counted).
-        turnsArr.push({
-          role: "tool",
-          id: call.id,
-          name: call.name,
-          output: `{"error":"too many tool calls in one turn (max ${maxCalls})"}`,
-          isError: true,
+      if (reply.toolCalls.length === 0) {
+        appendAssistant(reply);
+        turns += 1;
+        const parsed = tryParseFinal(reply.text);
+        if (parsed.ok) {
+          hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+          return finish(parsed, "final", false);
+        }
+        hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+        turnsArr.push({ role: "user", text: REPAIR_NOTE });
+        const repairExpired = timedOut();
+        if (repairExpired) return repairExpired;
+        const repairStart = clock();
+        const repairRemaining = deadline - clock();
+        const repaired = await callWithDeadline(
+          { ...NO_TOOLS },
+          { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline },
+          deadline - repairRemaining,
+        );
+        if (repaired.raced) return finish(timeoutLlmResult(), "budget", false);
+        const fixed = repaired.reply;
+        accumulateUsage(fixed);
+        if (!fixed.ok) return finish(fixed.result, "error", false);
+        appendAssistant(fixed);
+        turns += 1;
+        const p2 = tryParseFinal(fixed.text);
+        hooks.log(`agent turn ${turnIndex + 1}: tools=[] results_bytes=0 ms=${clock() - repairStart}`);
+        if (p2.ok) return finish(p2, "final", false);
+        return finish(p2, "error", false);
+      }
+
+      appendAssistant(reply);
+      turns += 1;
+      let turnBytes = 0;
+      for (let i = 0; i < reply.toolCalls.length; i++) {
+        if (requestExpired(context)) return finish(timeoutLlmResult(), "budget", false);
+        const call = reply.toolCalls[i]!;
+        if (i >= maxCalls) {
+          // Too-many-calls record is loop-generated bookkeeping: excluded
+          // from `bytes` (content outputs alone are counted).
+          turnsArr.push({
+            role: "tool",
+            id: call.id,
+            name: call.name,
+            output: `{"error":"too many tool calls in one turn (max ${maxCalls})"}`,
+            isError: true,
+          });
+          continue;
+        }
+        const remainingBytes = maxTotalBytes - bytes;
+        if (remainingBytes < MARKER_BYTES) {
+          // Below this no content output can fit: skip execution without
+          // incrementing `calls`; the record itself is bookkeeping-excluded.
+          turnsArr.push({
+            role: "tool",
+            id: call.id,
+            name: call.name,
+            output: `{"error":"tool result budget exhausted (max ${maxTotalBytes} bytes)"}`,
+            isError: true,
+          });
+          continue;
+        }
+        const effective = Math.min(maxResultBytes, remainingBytes);
+        const res = await executeTool(call.name, call.args, toolCtx, {
+          context,
+          deadlineMs: Date.now() + Math.max(0, deadline - clock()),
+          maxResultBytes: Math.min(maxResultBytes, remainingBytes),
         });
-        continue;
+        calls += 1;
+        const output = capToolResult(res.output, effective);
+        const replaced = output !== res.output;
+        const isError = res.isError || replaced;
+        if (!replaced) {
+          const n = Buffer.byteLength(output, "utf8");
+          bytes += n;
+          turnBytes += n;
+        }
+        turnsArr.push(
+          isError
+            ? { role: "tool", id: call.id, name: call.name, output, isError: true }
+            : { role: "tool", id: call.id, name: call.name, output },
+        );
       }
-      const remainingBytes = maxTotalBytes - bytes;
-      if (remainingBytes < MARKER_BYTES) {
-        // Below this no content output can fit: skip execution without
-        // incrementing `calls`; the record itself is bookkeeping-excluded.
-        turnsArr.push({
-          role: "tool",
-          id: call.id,
-          name: call.name,
-          output: `{"error":"tool result budget exhausted (max ${maxTotalBytes} bytes)"}`,
-          isError: true,
-        });
-        continue;
-      }
-      const effective = Math.min(maxResultBytes, remainingBytes);
-      const res = await executeTool(call.name, call.args, toolCtx, {
-        deadlineMs: Date.now() + Math.max(0, deadline - clock()),
-        maxResultBytes: Math.min(maxResultBytes, remainingBytes),
-      });
-      calls += 1;
-      const output = capToolResult(res.output, effective);
-      const replaced = output !== res.output;
-      const isError = res.isError || replaced;
-      if (!replaced) {
-        const n = Buffer.byteLength(output, "utf8");
-        bytes += n;
-        turnBytes += n;
-      }
-      turnsArr.push(
-        isError
-          ? { role: "tool", id: call.id, name: call.name, output, isError: true }
-          : { role: "tool", id: call.id, name: call.name, output },
-      );
+      hooks.log(`agent turn ${turnIndex}: tools=[${reply.toolCalls.map((t) => t.name).join(",")}] results_bytes=${turnBytes} ms=${clock() - turnStart}`);
     }
-    hooks.log(`agent turn ${turnIndex}: tools=[${reply.toolCalls.map((t) => t.name).join(",")}] results_bytes=${turnBytes} ms=${clock() - turnStart}`);
+  } finally {
+    owned?.dispose();
   }
 }

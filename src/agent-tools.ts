@@ -1,3 +1,4 @@
+import { requestExpired, type RequestContext } from "./runtime/context.js";
 import { closeSync, type Dirent, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -10,8 +11,9 @@ export interface ToolRoots {
 }
 
 export interface ToolContext {
+  context?: RequestContext;
   roots: ToolRoots;
-  ensureLinked?: (alias: string, opts?: { deadlineMs?: number }) => Promise<{ dir: string; sha: string } | { error: string }>;
+  ensureLinked?: (alias: string, opts?: { deadlineMs?: number; context?: RequestContext }) => Promise<{ dir: string; sha: string } | { error: string }>;
 }
 
 const DRIVE_LETTER = /^[a-zA-Z]:/;
@@ -128,12 +130,15 @@ function okResult(payload: unknown): { output: string; isError: boolean } {
 }
 
 async function resolveRoot(repo: unknown, ctx: ToolContext, deadlineMs?: number): Promise<string | { error: string }> {
+  if (requestExpired(ctx.context)) return { error: "tool request cancelled" };
   const alias = repo === undefined || repo === null || repo === "" ? "self" : String(repo);
   if (alias === "self") return ctx.roots.self;
   const linked = ctx.roots.linked?.get(alias);
   if (linked) return linked;
   if (ctx.ensureLinked) {
-    const res = deadlineMs !== undefined ? await ctx.ensureLinked(alias, { deadlineMs }) : await ctx.ensureLinked(alias);
+    const res = deadlineMs !== undefined || ctx.context !== undefined
+      ? await ctx.ensureLinked(alias, { deadlineMs, ...(ctx.context ? { context: ctx.context } : {}) })
+      : await ctx.ensureLinked(alias);
     if ("dir" in res) return res.dir;
   }
   return { error: `repository not accessible: ${alias}` };
@@ -147,6 +152,7 @@ async function rootFor(args: Record<string, unknown>, ctx: ToolContext, deadline
 
 async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: { maxBytes?: number; endMs?: number }): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" ? args.path : "";
@@ -219,6 +225,7 @@ interface DirEntry {
 
 async function listDir(args: Record<string, unknown>, ctx: ToolContext, endMs?: number, maxBytes?: number): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" && args.path !== "" ? args.path : ".";
@@ -582,7 +589,8 @@ type GrepWorkerResult =
   | { isError: true; output: string }
   | { isError: false; matches: GrepMatch[]; filesScanned: number; hitLimit: boolean };
 
-function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeoutMs: number): Promise<GrepWorkerResult> {
+function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeoutMs: number, context?: RequestContext): Promise<GrepWorkerResult> {
+  if (requestExpired(context)) return Promise.resolve({ isError: true, output: errorResult("grep cancelled").output });
   return new Promise((resolvePromise) => {
     let worker: Worker;
     try {
@@ -601,10 +609,13 @@ function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeou
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      void worker.terminate();
-      resolvePromise(result);
+      context?.signal.removeEventListener("abort", cancel);
+      void worker.terminate().then(() => resolvePromise(result), () => resolvePromise(result));
     };
+    const cancel = (): void => finish({ isError: true, output: errorResult("grep cancelled").output });
     timer = setTimeout(() => finish({ isError: true, output: errorResult("grep timed out").output }), timeoutMs);
+    context?.signal.addEventListener("abort", cancel, { once: true });
+    if (context?.signal.aborted) cancel();
 
     worker.on("message", (msg: { matches: GrepMatch[]; filesScanned: number; hitLimit: boolean }) => {
       finish({ isError: false, matches: msg.matches, filesScanned: msg.filesScanned, hitLimit: msg.hitLimit });
@@ -634,6 +645,7 @@ export async function grepInRoot(
   limits?: WalkLimits,
   endMs?: number,
   maxBytes?: number,
+  context?: RequestContext,
 ): Promise<{ output: string; isError: boolean }> {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
@@ -672,7 +684,7 @@ export async function grepInRoot(
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
 
   const effectiveTimeout = endMs === undefined ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
-  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout);
+  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout, context);
   if (outcome.isError) return { output: outcome.output, isError: true };
 
   const { matches, filesScanned, hitLimit } = outcome;
@@ -696,6 +708,7 @@ export async function grepInRoot(
 
 async function grep(args: Record<string, unknown>, ctx: ToolContext, opts?: { timeoutMs?: number; endMs?: number; maxBytes?: number }): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
   return grepInRoot(
     resolvedRoot.root,
@@ -709,11 +722,13 @@ async function grep(args: Record<string, unknown>, ctx: ToolContext, opts?: { ti
     undefined,
     opts?.endMs,
     opts?.maxBytes,
+    ctx.context,
   );
 }
 
 async function glob(args: Record<string, unknown>, ctx: ToolContext, endMs?: number, maxBytes?: number): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   if (endMs !== undefined && endMs - Date.now() <= 0) {
@@ -805,8 +820,14 @@ export async function executeTool(
   name: string,
   args: unknown,
   ctx: ToolContext,
-  limits?: { deadlineMs?: number; maxResultBytes?: number },
+  limits?: { deadlineMs?: number; maxResultBytes?: number; context?: RequestContext },
 ): Promise<{ output: string; isError: boolean }> {
+  const context = limits?.context ?? ctx.context;
+  if (requestExpired(context)) return errorResult("tool request cancelled");
+  if (context !== undefined) {
+    ctx = { ...ctx, context };
+    limits = { ...limits, deadlineMs: Math.min(limits?.deadlineMs ?? Infinity, context.deadlineMs) };
+  }
   const a: Record<string, unknown> = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
   try {
     switch (name) {

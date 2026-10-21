@@ -171,7 +171,7 @@ describe("runAgent", () => {
     const out2 = await runAgent(h2.conv, h2.toolCtx, h2.budget, h2.hooks);
     expect(out2.result).toEqual({ ok: true, findings: [] });
     expect(out2.stop).toBe("budget");
-    expect(h2.seenOpts[0]).toEqual({ timeoutSeconds: 50, deadlineMs: 1_060_000 });
+    expect(h2.seenOpts[0]).toMatchObject({ timeoutSeconds: 50, deadlineMs: 1_060_000 });
   });
 
   it("repairs invalid final JSON once, then fails invalid-json", async () => {
@@ -358,7 +358,7 @@ describe("runAgent", () => {
     const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
     expect(out.result).toEqual({ ok: true, findings: [] });
     expect(out.stop).toBe("final");
-    expect(h.seenOpts[0]).toEqual({ timeoutSeconds: 60, deadlineMs: 4_600_000 });
+    expect(h.seenOpts[0]).toMatchObject({ timeoutSeconds: 60, deadlineMs: 4_600_000 });
   });
 
   it("floors (not ceils) the per-call timeout with 10.5s remaining", async () => {
@@ -371,7 +371,7 @@ describe("runAgent", () => {
     const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
     expect(out.result).toEqual({ ok: true, findings: [] });
     expect(out.stop).toBe("final");
-    expect(h.seenOpts[0]).toEqual({ timeoutSeconds: 10, deadlineMs: 1_060_000 });
+    expect(h.seenOpts[0]).toMatchObject({ timeoutSeconds: 10, deadlineMs: 1_060_000 });
   });
 
   it("a same-turn tool budget exhaustion records the exact error without incrementing calls", async () => {

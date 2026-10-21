@@ -1,10 +1,11 @@
+import type { RequestContext } from "../runtime/context.js";
 import type { Conversation, ToolCall } from "../agent-types.js";
 import type { ResolvedEndpoint } from "../providers.js";
 import { redact } from "../domain/text.js";
 import type { AgentReply, LlmResult } from "./types.js";
 import { PR_REVIEW_SCHEMA, parseContent, parseVerdicts, toFindings, extractUsage } from "./schema.js";
 import { isAnthropicCompat, tokenFieldFor, validateSampling } from "./sampling.js";
-import { attempt, errMessage, retryDelayMs, sleep, SNIPPET_CHARS } from "./transport.js";
+import { attempt, errMessage, retryDelayMs, waitForRetry, requestTimeout, SNIPPET_CHARS } from "./transport.js";
 
 /** Providers that accept the full strict json_schema shape. */
 const FULL_SCHEMA_PROVIDERS: ReadonlySet<string> = new Set(["openai", "opencode-zen", "opencode-go"]);
@@ -151,6 +152,7 @@ export async function callLlm(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
     provider: string;
   },
 ): Promise<LlmResult> {
@@ -171,7 +173,7 @@ export async function callLlm(
   if (a.kind === "fail") return a.result;
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return requestTimeout();
     a = await attempt(ep, payload, o);
     if (a.kind === "fail") return a.result;
   }
@@ -229,6 +231,7 @@ export async function callChatTurn(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
     provider: string;
   },
   flags: { allowTools: boolean; allowFormat: boolean },
@@ -250,7 +253,7 @@ export async function callChatTurn(
   if (a.kind === "fail") return { ok: false, result: a.result };
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return { ok: false, result: requestTimeout() };
     a = await attempt(ep, payload, o);
     if (a.kind === "fail") return { ok: false, result: a.result };
   }

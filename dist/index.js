@@ -7690,7 +7690,7 @@ var require_client = __commonJS({
         maxHeaderSize,
         headersTimeout,
         socketTimeout,
-        requestTimeout,
+        requestTimeout: requestTimeout2,
         connectTimeout,
         bodyTimeout,
         idleTimeout,
@@ -7723,7 +7723,7 @@ var require_client = __commonJS({
         if (socketTimeout !== void 0) {
           throw new InvalidArgumentError("unsupported socketTimeout, use headersTimeout & bodyTimeout instead");
         }
-        if (requestTimeout !== void 0) {
+        if (requestTimeout2 !== void 0) {
           throw new InvalidArgumentError("unsupported requestTimeout, use headersTimeout & bodyTimeout instead");
         }
         if (idleTimeout !== void 0) {
@@ -26463,6 +26463,17 @@ function mergeDuplicates(findings, verdicts) {
   return { merged: groups.map((g) => g.finding), dropped };
 }
 
+// lib/src/runtime/context.js
+function createRequestContext(timeoutMs) {
+  const controller = new AbortController();
+  const context3 = { deadlineMs: Date.now() + timeoutMs, signal: controller.signal };
+  const timer = setTimeout(() => controller.abort(), Math.max(0, timeoutMs));
+  return { context: context3, dispose: () => clearTimeout(timer) };
+}
+function requestExpired(context3) {
+  return context3 !== void 0 && (context3.signal.aborted || context3.deadlineMs <= Date.now());
+}
+
 // lib/src/application/slow-path.js
 import { tmpdir } from "node:os";
 import { join as join5 } from "node:path";
@@ -26566,6 +26577,8 @@ function okResult(payload) {
   return { output: JSON.stringify(payload), isError: false };
 }
 async function resolveRoot(repo, ctx, deadlineMs) {
+  if (requestExpired(ctx.context))
+    return { error: "tool request cancelled" };
   const alias = repo === void 0 || repo === null || repo === "" ? "self" : String(repo);
   if (alias === "self")
     return ctx.roots.self;
@@ -26573,7 +26586,7 @@ async function resolveRoot(repo, ctx, deadlineMs) {
   if (linked)
     return linked;
   if (ctx.ensureLinked) {
-    const res = deadlineMs !== void 0 ? await ctx.ensureLinked(alias, { deadlineMs }) : await ctx.ensureLinked(alias);
+    const res = deadlineMs !== void 0 || ctx.context !== void 0 ? await ctx.ensureLinked(alias, { deadlineMs, ...ctx.context ? { context: ctx.context } : {} }) : await ctx.ensureLinked(alias);
     if ("dir" in res)
       return res.dir;
   }
@@ -26587,6 +26600,8 @@ async function rootFor(args, ctx, deadlineMs) {
 }
 async function readFile(args, ctx, opts) {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
+  if (requestExpired(ctx.context))
+    return errorResult("tool request cancelled");
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   const rel = typeof args.path === "string" ? args.path : "";
@@ -26639,6 +26654,8 @@ async function readFile(args, ctx, opts) {
 }
 async function listDir(args, ctx, endMs, maxBytes) {
   const resolvedRoot = await rootFor(args, ctx, endMs);
+  if (requestExpired(ctx.context))
+    return errorResult("tool request cancelled");
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   const rel = typeof args.path === "string" && args.path !== "" ? args.path : ".";
@@ -26891,7 +26908,9 @@ var GREP_WORKER_SRC = [
   "}",
   "parentPort.postMessage({ matches, filesScanned, hitLimit });"
 ].join("\n");
-function runGrepWorker(pattern, files, limit, timeoutMs) {
+function runGrepWorker(pattern, files, limit, timeoutMs, context3) {
+  if (requestExpired(context3))
+    return Promise.resolve({ isError: true, output: errorResult("grep cancelled").output });
   return new Promise((resolvePromise) => {
     let worker;
     try {
@@ -26910,10 +26929,14 @@ function runGrepWorker(pattern, files, limit, timeoutMs) {
         return;
       settled = true;
       clearTimeout(timer);
-      void worker.terminate();
-      resolvePromise(result);
+      context3?.signal.removeEventListener("abort", cancel);
+      void worker.terminate().then(() => resolvePromise(result), () => resolvePromise(result));
     };
+    const cancel = () => finish({ isError: true, output: errorResult("grep cancelled").output });
     timer = setTimeout(() => finish({ isError: true, output: errorResult("grep timed out").output }), timeoutMs);
+    context3?.signal.addEventListener("abort", cancel, { once: true });
+    if (context3?.signal.aborted)
+      cancel();
     worker.on("message", (msg) => {
       finish({ isError: false, matches: msg.matches, filesScanned: msg.filesScanned, hitLimit: msg.hitLimit });
     });
@@ -26922,7 +26945,7 @@ function runGrepWorker(pattern, files, limit, timeoutMs) {
     });
   });
 }
-async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs, maxBytes) {
+async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs, maxBytes, context3) {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
     new RegExp(pattern);
@@ -26950,7 +26973,7 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs
   const requested = args.max_results === void 0 ? GREP_MAX_MATCHES : Math.floor(Number(args.max_results));
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
   const effectiveTimeout2 = endMs === void 0 ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
-  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout2);
+  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout2, context3);
   if (outcome.isError)
     return { output: outcome.output, isError: true };
   const { matches, filesScanned, hitLimit } = outcome;
@@ -26967,6 +26990,8 @@ async function grepInRoot(root, args, timeoutMs = GREP_TIMEOUT_MS, limits, endMs
 }
 async function grep(args, ctx, opts) {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
+  if (requestExpired(ctx.context))
+    return errorResult("tool request cancelled");
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   return grepInRoot(resolvedRoot.root, {
@@ -26974,10 +26999,12 @@ async function grep(args, ctx, opts) {
     path: typeof args.path === "string" ? args.path : void 0,
     glob: typeof args.glob === "string" ? args.glob : void 0,
     max_results: args.max_results === void 0 ? void 0 : Number(args.max_results)
-  }, opts?.timeoutMs ?? GREP_TIMEOUT_MS, void 0, opts?.endMs, opts?.maxBytes);
+  }, opts?.timeoutMs ?? GREP_TIMEOUT_MS, void 0, opts?.endMs, opts?.maxBytes, ctx.context);
 }
 async function glob(args, ctx, endMs, maxBytes) {
   const resolvedRoot = await rootFor(args, ctx, endMs);
+  if (requestExpired(ctx.context))
+    return errorResult("tool request cancelled");
   if ("error" in resolvedRoot)
     return errorResult(resolvedRoot.error);
   if (endMs !== void 0 && endMs - Date.now() <= 0) {
@@ -27053,6 +27080,13 @@ var TOOL_DEFS = [
   }
 ];
 async function executeTool(name, args, ctx, limits) {
+  const context3 = limits?.context ?? ctx.context;
+  if (requestExpired(context3))
+    return errorResult("tool request cancelled");
+  if (context3 !== void 0) {
+    ctx = { ...ctx, context: context3 };
+    limits = { ...limits, deadlineMs: Math.min(limits?.deadlineMs ?? Infinity, context3.deadlineMs) };
+  }
   const a = args && typeof args === "object" ? args : {};
   try {
     switch (name) {
@@ -27278,7 +27312,7 @@ function effectiveTimeout(configuredMs, endMs, nowMs = Date.now()) {
 }
 function defaultRun(cmd, args, o) {
   return new Promise((resolve2) => {
-    execFile(cmd, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd: o.cwd, env: o.env, timeout: o.timeoutMs, signal: o.signal }, (err, stdout, stderr) => {
       if (!err) {
         resolve2({ code: 0, stdout, stderr });
         return;
@@ -27372,10 +27406,12 @@ function removeDir(dir) {
   }
 }
 async function ensureLinkedRepo(alias, o) {
+  if (o.context !== void 0)
+    o = { ...o, deadlineMs: Math.min(o.deadlineMs ?? Infinity, o.context.deadlineMs) };
   const dir = join4(o.baseDir, alias.split("/").join("__"));
   const deps = o.deps ?? { run: defaultRun, ...o.sizeKb !== void 0 ? { sizeKb: o.sizeKb } : {} };
   const deadlineExceeded = `repository not accessible: ${alias}: deadline exceeded`;
-  if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
+  if (requestExpired(o.context) || o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
     return { error: deadlineExceeded };
   }
   if (existsSync4(dir)) {
@@ -27406,18 +27442,18 @@ async function ensureLinkedRepo(alias, o) {
   }
   const args = ["clone", "--depth", "1", "--single-branch", `https://github.com/${alias}.git`, dir];
   const cloneTimeout = effectiveTimeout(o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
-  if (cloneTimeout === "expired") {
+  if (requestExpired(o.context) || cloneTimeout === "expired") {
     return { error: deadlineExceeded };
   }
   let result;
   try {
-    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: cloneTimeout });
+    result = await deps.run("git", args, { cwd: o.baseDir, env, timeoutMs: cloneTimeout, signal: o.context?.signal });
   } catch (e) {
     result = { code: null, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
   }
-  if (result.code !== 0) {
+  if (result.code !== 0 || requestExpired(o.context)) {
     removeDir(dir);
-    if (o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
+    if (requestExpired(o.context) || o.deadlineMs !== void 0 && o.deadlineMs - Date.now() <= 0) {
       return { error: deadlineExceeded };
     }
     const detail = redactToken(result.stderr.trim() || "clone failed", o.token);
@@ -27436,7 +27472,7 @@ async function ensureLinkedRepo(alias, o) {
       return { error: "repository too large" };
     }
   }
-  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs);
+  const head = await cloneHead(deps, dir, o.timeoutMs ?? CLONE_TIMEOUT_MS, o.deadlineMs, o.context);
   if (head === "expired") {
     removeDir(dir);
     return { error: deadlineExceeded };
@@ -27477,22 +27513,22 @@ function readMarker(dir) {
     return null;
   }
 }
-async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
+async function cloneHead(deps, dir, timeoutMs, deadlineMs, context3) {
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   let branch = "";
   let sha = "";
-  const isExpired = () => deadlineMs !== void 0 && deadlineMs - Date.now() <= 0;
+  const isExpired = () => requestExpired(context3) || deadlineMs !== void 0 && deadlineMs - Date.now() <= 0;
   try {
     const branchTimeout = effectiveTimeout(timeoutMs, deadlineMs);
-    if (branchTimeout === "expired")
+    if (isExpired() || branchTimeout === "expired")
       return "expired";
-    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: branchTimeout });
+    const b = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: branchTimeout, signal: context3?.signal });
     if (b.code === 0)
       branch = b.stdout.trim();
     const headTimeout = effectiveTimeout(timeoutMs, deadlineMs);
-    if (headTimeout === "expired")
+    if (isExpired() || headTimeout === "expired")
       return "expired";
-    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout });
+    const h = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: headTimeout, signal: context3?.signal });
     if (isExpired())
       return "expired";
     if (h.code === 0)
@@ -27505,7 +27541,7 @@ async function cloneHead(deps, dir, timeoutMs, deadlineMs) {
 }
 async function validateCache(deps, alias, dir, o) {
   const endMs = o.deadlineMs;
-  const isExpired = () => endMs !== void 0 && endMs - Date.now() <= 0;
+  const isExpired = () => requestExpired(o.context) || endMs !== void 0 && endMs - Date.now() <= 0;
   if (isExpired())
     return "expired";
   if (!existsSync4(join4(dir, ".git")))
@@ -27519,7 +27555,7 @@ async function validateCache(deps, alias, dir, o) {
     let timeout = effectiveTimeout(configured, endMs);
     if (timeout === "expired")
       return "expired";
-    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs: timeout });
+    const origin = await deps.run("git", ["config", "--get", "remote.origin.url"], { cwd: dir, env, timeoutMs: timeout, signal: o.context?.signal });
     if (isExpired())
       return "expired";
     if (origin.code !== 0 || origin.stdout.trim() !== `https://github.com/${alias}.git`)
@@ -27527,7 +27563,7 @@ async function validateCache(deps, alias, dir, o) {
     timeout = effectiveTimeout(configured, endMs);
     if (timeout === "expired")
       return "expired";
-    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    const branch = await deps.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir, env, timeoutMs: timeout, signal: o.context?.signal });
     if (isExpired())
       return "expired";
     const resolvedBranch = branch.code === 0 ? branch.stdout.trim() : "";
@@ -27546,7 +27582,7 @@ async function validateCache(deps, alias, dir, o) {
     timeout = effectiveTimeout(configured, endMs);
     if (timeout === "expired")
       return "expired";
-    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: timeout });
+    const head = await deps.run("git", ["rev-parse", "HEAD"], { cwd: dir, env, timeoutMs: timeout, signal: o.context?.signal });
     if (isExpired())
       return "expired";
     if (head.code !== 0)
@@ -27838,55 +27874,61 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
     userBase: i.llmBaseUrl !== ""
   };
   if (i.llmAgent) {
-    const selfRepo = String(env.payload.repository?.full_name ?? "");
-    const linked = parseLinkedRepos(prBody, selfRepo);
-    if (linked.length > 0)
-      info(`agent linked repositories: ${linked.join(", ")}`);
-    const toolCtx = {
-      roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
-      ensureLinked: async (alias, opts) => {
-        if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
-          return { error: "repository not accessible: " + alias };
-        const r = await ensureLinkedRepo(alias, {
-          token: i.githubToken,
-          baseDir: join5(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
-          maxBytes: AGENT_LIMITS.cloneMaxBytes,
-          deadlineMs: opts?.deadlineMs,
-          sizeKb: async (a) => {
-            const parts = a.split("/");
-            if (parts.length !== 2)
-              return void 0;
-            const [o, n] = parts;
-            return deps.gh.getRepoSize(o, n);
+    const owned = createRequestContext(i.llmAgentMaxSeconds * 1e3);
+    try {
+      const selfRepo = String(env.payload.repository?.full_name ?? "");
+      const linked = parseLinkedRepos(prBody, selfRepo);
+      if (linked.length > 0)
+        info(`agent linked repositories: ${linked.join(", ")}`);
+      const toolCtx = {
+        roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
+        ensureLinked: async (alias, opts) => {
+          if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
+            return { error: "repository not accessible: " + alias };
+          const r = await ensureLinkedRepo(alias, {
+            token: i.githubToken,
+            baseDir: join5(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
+            maxBytes: AGENT_LIMITS.cloneMaxBytes,
+            deadlineMs: opts?.deadlineMs,
+            context: opts?.context ?? owned.context,
+            sizeKb: async (a) => {
+              const parts = a.split("/");
+              if (parts.length !== 2)
+                return void 0;
+              const [o, n] = parts;
+              return deps.gh.getRepoSize(o, n);
+            }
+          });
+          if ("dir" in r) {
+            toolCtx.roots.linked.set(alias, r.dir);
+            if ("sha" in r && r.sha !== "")
+              info(`agent linked repo ${alias} at ${r.sha}`);
           }
-        });
-        if ("dir" in r) {
-          toolCtx.roots.linked.set(alias, r.dir);
-          if ("sha" in r && r.sha !== "")
-            info(`agent linked repo ${alias} at ${r.sha}`);
+          return r;
         }
-        return r;
+      };
+      const conv = {
+        ...messages,
+        tools: [...TOOL_DEFS]
+      };
+      if (linked.length > 0)
+        conv.turns = [
+          {
+            role: "user",
+            text: "Linked repositories mentioned in this pull request: " + linked.join(", ") + ". You may inspect them with the repo parameter of the read-only tools."
+          }
+        ];
+      const agentOpts = { ...llmOpts, context: owned.context, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
+      const res2 = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbeAgent(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, conv, agentOpts, toolCtx) : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
+      if (!res2.ok) {
+        warning(`slow path failed (${res2.reason}): ${res2.detail}`);
+        return void 0;
       }
-    };
-    const conv = {
-      ...messages,
-      tools: [...TOOL_DEFS]
-    };
-    if (linked.length > 0)
-      conv.turns = [
-        {
-          role: "user",
-          text: "Linked repositories mentioned in this pull request: " + linked.join(", ") + ". You may inspect them with the repo parameter of the read-only tools."
-        }
-      ];
-    const agentOpts = { ...llmOpts, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
-    const res2 = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbeAgent(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, conv, agentOpts, toolCtx) : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
-    if (!res2.ok) {
-      warning(`slow path failed (${res2.reason}): ${res2.detail}`);
-      return void 0;
+      noteUsage(res2);
+      return { findings: res2.findings };
+    } finally {
+      owned.dispose();
     }
-    noteUsage(res2);
-    return { findings: res2.findings };
   }
   const res = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts) : await deps.analysis.callByStyle(ep, messages, llmOpts);
   if (!res.ok) {
@@ -28702,10 +28744,36 @@ function retryDelayMs(raw) {
     return RETRY_BACKOFF_MS;
   return Math.min(secs * 1e3, MAX_RETRY_AFTER_MS);
 }
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function sleep(ms, signal) {
+  if (signal?.aborted)
+    return Promise.resolve();
+  return new Promise((resolve2) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve2();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+async function waitForRetry(delayMs, context3) {
+  if (requestExpired(context3) || context3 !== void 0 && delayMs >= context3.deadlineMs - Date.now())
+    return false;
+  await sleep(delayMs, context3?.signal);
+  return !requestExpired(context3);
+}
+function requestTimeout() {
+  return { ok: false, reason: "timeout", detail: "agent budget exhausted" };
+}
 async function attempt(ep, payload, o) {
+  if (requestExpired(o.context))
+    return { kind: "fail", result: requestTimeout() };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), o.timeoutSeconds * 1e3);
+  const cancel = () => controller.abort();
+  o.context?.signal.addEventListener("abort", cancel, { once: true });
+  const timeoutMs = Math.min(o.timeoutSeconds * 1e3, o.context === void 0 ? Infinity : o.context.deadlineMs - Date.now());
+  const timer = setTimeout(cancel, Math.max(0, timeoutMs));
   try {
     const res = await fetch(`${ep.baseUrl}${ep.path}`, {
       method: "POST",
@@ -28714,6 +28782,8 @@ async function attempt(ep, payload, o) {
       signal: controller.signal
     });
     const text = await res.text();
+    if (controller.signal.aborted || requestExpired(o.context))
+      return { kind: "fail", result: requestTimeout() };
     return { kind: "response", status: res.status, ok: res.ok, retryAfter: res.headers.get("retry-after"), text };
   } catch (e) {
     if (controller.signal.aborted) {
@@ -28725,6 +28795,7 @@ async function attempt(ep, payload, o) {
     };
   } finally {
     clearTimeout(timer);
+    o.context?.signal.removeEventListener("abort", cancel);
   }
 }
 var PULL_TIMEOUT_DEFAULT_S = 300;
@@ -29079,7 +29150,8 @@ async function callGoogle(ep, modelId, messages, o) {
       return a.result;
   }
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return requestTimeout();
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail")
       return a.result;
@@ -29149,7 +29221,8 @@ async function callGoogleTurn(ep, modelId, conv, o, flags) {
       return { ok: false, result: a.result };
   }
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return { ok: false, result: requestTimeout() };
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail")
       return { ok: false, result: a.result };
@@ -29307,7 +29380,8 @@ async function callMessages(ep, messages, o) {
   if (a.kind === "fail")
     return a.result;
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return requestTimeout();
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail")
       return a.result;
@@ -29372,7 +29446,8 @@ async function callMessagesTurn(ep, conv, o, flags) {
   if (a.kind === "fail")
     return { ok: false, result: a.result };
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return { ok: false, result: requestTimeout() };
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail")
       return { ok: false, result: a.result };
@@ -29535,7 +29610,8 @@ async function callResponses(ep, messages, o) {
       return a.result;
   }
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return requestTimeout();
     a = await attempt(ep, payload, o);
     if (a.kind === "fail")
       return a.result;
@@ -29596,7 +29672,8 @@ async function callResponsesTurn(ep, conv, o, flags) {
       return { ok: false, result: a.result };
   }
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return { ok: false, result: requestTimeout() };
     a = await attempt(ep, payload, o);
     if (a.kind === "fail")
       return { ok: false, result: a.result };
@@ -29664,225 +29741,240 @@ function capToolResult(output, maxBytes) {
 async function runAgent(conv, toolCtx, budget, hooks) {
   const clock = hooks.clock ?? Date.now;
   const start = clock();
-  const deadline = budget.deadlineMs ?? start + budget.maxSeconds * 1e3;
-  const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
-  const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
-  const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
-  const turnsArr = conv.turns ?? (conv.turns = []);
-  let turns = 0;
-  let calls = 0;
-  let bytes = 0;
-  let toolsUnsupported = false;
-  let usageInput = 0;
-  let usageOutput = 0;
-  let usageCalls = 0;
-  const elapsedMs = () => clock() - start;
-  const accumulateUsage = (reply) => {
-    if (reply.ok && reply.usage !== void 0) {
-      usageInput += reply.usage.input;
-      usageOutput += reply.usage.output;
-      usageCalls += reply.usage.calls;
-    }
-  };
-  const finish = (result, stop, probeAdvance) => {
-    const ms = elapsedMs();
-    hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1e3}s`);
-    return {
-      result,
-      stop,
-      probeAdvance,
-      toolsUnsupported,
-      turns,
-      calls,
-      bytes,
-      elapsedMs: ms,
-      ...usageCalls > 0 ? { usage: { input: usageInput, output: usageOutput, calls: usageCalls } } : {}
+  const deadline = budget.context?.deadlineMs ?? budget.deadlineMs ?? start + budget.maxSeconds * 1e3;
+  const owned = budget.context === void 0 ? createRequestContext(deadline - start) : void 0;
+  const context3 = budget.context ?? owned.context;
+  try {
+    const maxCalls = budget.maxCallsPerTurn ?? AGENT_LIMITS.maxCallsPerTurn;
+    const maxResultBytes = budget.maxResultBytes ?? AGENT_LIMITS.resultBytes;
+    const maxTotalBytes = budget.maxTotalBytes ?? AGENT_LIMITS.totalBytes;
+    const turnsArr = conv.turns ?? (conv.turns = []);
+    let turns = 0;
+    let calls = 0;
+    let bytes = 0;
+    let toolsUnsupported = false;
+    let usageInput = 0;
+    let usageOutput = 0;
+    let usageCalls = 0;
+    const elapsedMs = () => clock() - start;
+    const accumulateUsage = (reply) => {
+      if (reply.ok && reply.usage !== void 0) {
+        usageInput += reply.usage.input;
+        usageOutput += reply.usage.output;
+        usageCalls += reply.usage.calls;
+      }
     };
-  };
-  const timeoutFor = (remaining) => Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1e3)));
-  const timedOut = () => {
-    if (deadline - clock() < 1e4) {
-      return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
-    }
-    return null;
-  };
-  const timeoutLlmResult = () => ({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL });
-  const timeoutReply = () => ({ ok: false, result: timeoutLlmResult() });
-  const callWithDeadline = (flags, opts, nowMs) => {
-    const ms = deadline - nowMs;
-    if (ms <= 0)
-      return Promise.resolve({ reply: timeoutReply(), raced: true });
-    const inner = hooks.call(conv, flags, opts);
-    inner.then(void 0, () => {
-    });
-    let timer;
-    const timeoutP = new Promise((resolve2) => {
-      timer = setTimeout(() => resolve2({ reply: timeoutReply(), raced: true }), ms);
-    });
-    return Promise.race([inner.then((reply) => ({ reply, raced: false })), timeoutP]).finally(() => {
-      clearTimeout(timer);
-    });
-  };
-  const appendAssistant = (reply) => {
-    turnsArr.push({
-      role: "assistant",
-      text: reply.text,
-      toolCalls: reply.toolCalls,
-      ...reply.rawItems !== void 0 ? { rawItems: reply.rawItems } : {}
-    });
-  };
-  for (; ; ) {
-    const expired = timedOut();
-    if (expired)
-      return expired;
-    const remaining = deadline - clock();
-    const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
-    const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
-    if (forced)
-      turnsArr.push({ role: "user", text: BUDGET_NOTE });
-    const turnStart = clock();
-    const turnIndex = turns;
-    const nowMs = deadline - remaining;
-    const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
-    if (first.raced)
-      return finish(timeoutLlmResult(), "budget", false);
-    const reply = first.reply;
-    accumulateUsage(reply);
-    if (!reply.ok) {
-      const status = statusOf2(reply.result);
-      if (turns === 0 && !forced) {
-        if (status === 400) {
-          const retryExpired = timedOut();
-          if (retryExpired)
-            return retryExpired;
-          const retryRemaining = deadline - clock();
-          const retried = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline }, deadline - retryRemaining);
-          if (retried.raced)
-            return finish(timeoutLlmResult(), "budget", false);
-          const retry = retried.reply;
-          accumulateUsage(retry);
-          if (!retry.ok) {
-            const s2 = statusOf2(retry.result);
+    const finish = (result, stop, probeAdvance) => {
+      const ms = elapsedMs();
+      hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1e3}s`);
+      return {
+        result,
+        stop,
+        probeAdvance,
+        toolsUnsupported,
+        turns,
+        calls,
+        bytes,
+        elapsedMs: ms,
+        ...usageCalls > 0 ? { usage: { input: usageInput, output: usageOutput, calls: usageCalls } } : {}
+      };
+    };
+    const timeoutFor = (remaining) => Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1e3)));
+    const timedOut = () => {
+      if (requestExpired(context3) || deadline - clock() < 1e4) {
+        return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
+      }
+      return null;
+    };
+    const timeoutLlmResult = () => ({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL });
+    const timeoutReply = () => ({ ok: false, result: timeoutLlmResult() });
+    const callWithDeadline = (flags, opts, nowMs) => {
+      const ms = deadline - nowMs;
+      if (requestExpired(context3) || ms <= 0)
+        return Promise.resolve({ reply: timeoutReply(), raced: true });
+      const inner = hooks.call(conv, flags, { ...opts, context: context3 });
+      inner.then(void 0, () => {
+      });
+      let timer;
+      let cancel;
+      const timeoutP = new Promise((resolve2) => {
+        cancel = () => resolve2({ reply: timeoutReply(), raced: true });
+        timer = setTimeout(cancel, ms);
+        context3.signal.addEventListener("abort", cancel, { once: true });
+        if (context3.signal.aborted)
+          cancel();
+      });
+      return Promise.race([inner.then((reply) => ({ reply, raced: false })), timeoutP]).finally(() => {
+        clearTimeout(timer);
+        context3.signal.removeEventListener("abort", cancel);
+      });
+    };
+    const appendAssistant = (reply) => {
+      turnsArr.push({
+        role: "assistant",
+        text: reply.text,
+        toolCalls: reply.toolCalls,
+        ...reply.rawItems !== void 0 ? { rawItems: reply.rawItems } : {}
+      });
+    };
+    for (; ; ) {
+      const expired = timedOut();
+      if (expired)
+        return expired;
+      const remaining = deadline - clock();
+      const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
+      const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
+      if (forced)
+        turnsArr.push({ role: "user", text: BUDGET_NOTE });
+      const turnStart = clock();
+      const turnIndex = turns;
+      const nowMs = deadline - remaining;
+      const first = await callWithDeadline(flags, { timeoutSeconds: timeoutFor(remaining), deadlineMs: deadline }, nowMs);
+      if (first.raced)
+        return finish(timeoutLlmResult(), "budget", false);
+      const reply = first.reply;
+      accumulateUsage(reply);
+      if (!reply.ok) {
+        const status = statusOf2(reply.result);
+        if (turns === 0 && !forced) {
+          if (status === 400) {
+            const retryExpired = timedOut();
+            if (retryExpired)
+              return retryExpired;
+            const retryRemaining = deadline - clock();
+            const retried = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline }, deadline - retryRemaining);
+            if (retried.raced)
+              return finish(timeoutLlmResult(), "budget", false);
+            const retry = retried.reply;
+            accumulateUsage(retry);
+            if (!retry.ok) {
+              const s2 = statusOf2(retry.result);
+              toolsUnsupported = true;
+              return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
+            }
+            const parsed = tryParseFinal(retry.text);
+            appendAssistant(retry);
+            if (parsed.ok) {
+              turns += 1;
+              toolsUnsupported = true;
+              return finish(parsed, "fallback", false);
+            }
+            turnsArr.push({ role: "user", text: REPAIR_NOTE });
+            const repairExpired = timedOut();
+            if (repairExpired)
+              return repairExpired;
+            const repairRemaining = deadline - clock();
+            const repaired = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline }, deadline - repairRemaining);
+            if (repaired.raced)
+              return finish(timeoutLlmResult(), "budget", false);
+            const fixed = repaired.reply;
+            accumulateUsage(fixed);
+            if (!fixed.ok) {
+              toolsUnsupported = true;
+              return finish(fixed.result, "error", false);
+            }
+            turns += 2;
+            appendAssistant(fixed);
+            const p2 = tryParseFinal(fixed.text);
             toolsUnsupported = true;
-            return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
+            if (p2.ok)
+              return finish(p2, "fallback", false);
+            return finish(p2, "error", false);
           }
-          const parsed = tryParseFinal(retry.text);
-          appendAssistant(retry);
-          if (parsed.ok) {
-            turns += 1;
-            toolsUnsupported = true;
-            return finish(parsed, "fallback", false);
-          }
-          turnsArr.push({ role: "user", text: REPAIR_NOTE });
-          const repairExpired = timedOut();
-          if (repairExpired)
-            return repairExpired;
-          const repairRemaining = deadline - clock();
-          const repaired = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline }, deadline - repairRemaining);
-          if (repaired.raced)
-            return finish(timeoutLlmResult(), "budget", false);
-          const fixed = repaired.reply;
-          accumulateUsage(fixed);
-          if (!fixed.ok) {
-            toolsUnsupported = true;
-            return finish(fixed.result, "error", false);
-          }
-          turns += 2;
-          appendAssistant(fixed);
-          const p2 = tryParseFinal(fixed.text);
-          toolsUnsupported = true;
-          if (p2.ok)
-            return finish(p2, "fallback", false);
-          return finish(p2, "error", false);
+          if (status === 404)
+            return finish(reply.result, "error", true);
+          return finish(reply.result, "error", false);
         }
-        if (status === 404)
-          return finish(reply.result, "error", true);
         return finish(reply.result, "error", false);
       }
-      return finish(reply.result, "error", false);
-    }
-    if (forced) {
-      appendAssistant(reply);
-      turns += 1;
-      hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
-      const parsed = tryParseFinal(reply.text);
-      if (parsed.ok)
-        return finish(parsed, "budget", false);
-      return finish(parsed, "error", false);
-    }
-    if (reply.toolCalls.length === 0) {
-      appendAssistant(reply);
-      turns += 1;
-      const parsed = tryParseFinal(reply.text);
-      if (parsed.ok) {
+      if (forced) {
+        appendAssistant(reply);
+        turns += 1;
         hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
-        return finish(parsed, "final", false);
+        const parsed = tryParseFinal(reply.text);
+        if (parsed.ok)
+          return finish(parsed, "budget", false);
+        return finish(parsed, "error", false);
       }
-      hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
-      turnsArr.push({ role: "user", text: REPAIR_NOTE });
-      const repairExpired = timedOut();
-      if (repairExpired)
-        return repairExpired;
-      const repairStart = clock();
-      const repairRemaining = deadline - clock();
-      const repaired = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline }, deadline - repairRemaining);
-      if (repaired.raced)
-        return finish(timeoutLlmResult(), "budget", false);
-      const fixed = repaired.reply;
-      accumulateUsage(fixed);
-      if (!fixed.ok)
-        return finish(fixed.result, "error", false);
-      appendAssistant(fixed);
+      if (reply.toolCalls.length === 0) {
+        appendAssistant(reply);
+        turns += 1;
+        const parsed = tryParseFinal(reply.text);
+        if (parsed.ok) {
+          hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+          return finish(parsed, "final", false);
+        }
+        hooks.log(`agent turn ${turnIndex}: tools=[] results_bytes=0 ms=${clock() - turnStart}`);
+        turnsArr.push({ role: "user", text: REPAIR_NOTE });
+        const repairExpired = timedOut();
+        if (repairExpired)
+          return repairExpired;
+        const repairStart = clock();
+        const repairRemaining = deadline - clock();
+        const repaired = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(repairRemaining), deadlineMs: deadline }, deadline - repairRemaining);
+        if (repaired.raced)
+          return finish(timeoutLlmResult(), "budget", false);
+        const fixed = repaired.reply;
+        accumulateUsage(fixed);
+        if (!fixed.ok)
+          return finish(fixed.result, "error", false);
+        appendAssistant(fixed);
+        turns += 1;
+        const p2 = tryParseFinal(fixed.text);
+        hooks.log(`agent turn ${turnIndex + 1}: tools=[] results_bytes=0 ms=${clock() - repairStart}`);
+        if (p2.ok)
+          return finish(p2, "final", false);
+        return finish(p2, "error", false);
+      }
+      appendAssistant(reply);
       turns += 1;
-      const p2 = tryParseFinal(fixed.text);
-      hooks.log(`agent turn ${turnIndex + 1}: tools=[] results_bytes=0 ms=${clock() - repairStart}`);
-      if (p2.ok)
-        return finish(p2, "final", false);
-      return finish(p2, "error", false);
-    }
-    appendAssistant(reply);
-    turns += 1;
-    let turnBytes = 0;
-    for (let i = 0; i < reply.toolCalls.length; i++) {
-      const call = reply.toolCalls[i];
-      if (i >= maxCalls) {
-        turnsArr.push({
-          role: "tool",
-          id: call.id,
-          name: call.name,
-          output: `{"error":"too many tool calls in one turn (max ${maxCalls})"}`,
-          isError: true
+      let turnBytes = 0;
+      for (let i = 0; i < reply.toolCalls.length; i++) {
+        if (requestExpired(context3))
+          return finish(timeoutLlmResult(), "budget", false);
+        const call = reply.toolCalls[i];
+        if (i >= maxCalls) {
+          turnsArr.push({
+            role: "tool",
+            id: call.id,
+            name: call.name,
+            output: `{"error":"too many tool calls in one turn (max ${maxCalls})"}`,
+            isError: true
+          });
+          continue;
+        }
+        const remainingBytes = maxTotalBytes - bytes;
+        if (remainingBytes < MARKER_BYTES) {
+          turnsArr.push({
+            role: "tool",
+            id: call.id,
+            name: call.name,
+            output: `{"error":"tool result budget exhausted (max ${maxTotalBytes} bytes)"}`,
+            isError: true
+          });
+          continue;
+        }
+        const effective = Math.min(maxResultBytes, remainingBytes);
+        const res = await executeTool(call.name, call.args, toolCtx, {
+          context: context3,
+          deadlineMs: Date.now() + Math.max(0, deadline - clock()),
+          maxResultBytes: Math.min(maxResultBytes, remainingBytes)
         });
-        continue;
+        calls += 1;
+        const output = capToolResult(res.output, effective);
+        const replaced = output !== res.output;
+        const isError = res.isError || replaced;
+        if (!replaced) {
+          const n = Buffer.byteLength(output, "utf8");
+          bytes += n;
+          turnBytes += n;
+        }
+        turnsArr.push(isError ? { role: "tool", id: call.id, name: call.name, output, isError: true } : { role: "tool", id: call.id, name: call.name, output });
       }
-      const remainingBytes = maxTotalBytes - bytes;
-      if (remainingBytes < MARKER_BYTES) {
-        turnsArr.push({
-          role: "tool",
-          id: call.id,
-          name: call.name,
-          output: `{"error":"tool result budget exhausted (max ${maxTotalBytes} bytes)"}`,
-          isError: true
-        });
-        continue;
-      }
-      const effective = Math.min(maxResultBytes, remainingBytes);
-      const res = await executeTool(call.name, call.args, toolCtx, {
-        deadlineMs: Date.now() + Math.max(0, deadline - clock()),
-        maxResultBytes: Math.min(maxResultBytes, remainingBytes)
-      });
-      calls += 1;
-      const output = capToolResult(res.output, effective);
-      const replaced = output !== res.output;
-      const isError = res.isError || replaced;
-      if (!replaced) {
-        const n = Buffer.byteLength(output, "utf8");
-        bytes += n;
-        turnBytes += n;
-      }
-      turnsArr.push(isError ? { role: "tool", id: call.id, name: call.name, output, isError: true } : { role: "tool", id: call.id, name: call.name, output });
+      hooks.log(`agent turn ${turnIndex}: tools=[${reply.toolCalls.map((t) => t.name).join(",")}] results_bytes=${turnBytes} ms=${clock() - turnStart}`);
     }
-    hooks.log(`agent turn ${turnIndex}: tools=[${reply.toolCalls.map((t) => t.name).join(",")}] results_bytes=${turnBytes} ms=${clock() - turnStart}`);
+  } finally {
+    owned?.dispose();
   }
 }
 
@@ -29994,7 +30086,8 @@ async function callLlm(ep, messages, o) {
   if (a.kind === "fail")
     return a.result;
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return requestTimeout();
     a = await attempt(ep, payload, o);
     if (a.kind === "fail")
       return a.result;
@@ -30049,7 +30142,8 @@ async function callChatTurn(ep, conv, o, flags) {
   if (a.kind === "fail")
     return { ok: false, result: a.result };
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context))
+      return { ok: false, result: requestTimeout() };
     a = await attempt(ep, payload, o);
     if (a.kind === "fail")
       return { ok: false, result: a.result };
@@ -30114,6 +30208,7 @@ async function callWithProbe(provider, model, baseUrl2, key, messages, o, explic
     topP: o.topP,
     maxTokens: o.maxTokens,
     timeoutSeconds: o.timeoutSeconds,
+    context: o.context,
     provider
   };
   const run2 = async (style) => {
@@ -30176,6 +30271,7 @@ function agentCallFor(ep, o) {
     topP: o.topP,
     maxTokens: o.maxTokens,
     timeoutSeconds: callOpts.timeoutSeconds,
+    context: callOpts.context,
     provider: o.provider
   }, flags);
 }
@@ -30185,77 +30281,84 @@ function withAgentUsage(outcome, result) {
   return result;
 }
 async function callByStyleAgent(ep, conv, o, toolCtx) {
-  const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds }, { call: agentCallFor(ep, o), log: info });
+  const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, context: o.context }, { call: agentCallFor(ep, o), log: info });
   return withAgentUsage(outcome, outcome.result);
 }
 async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolCtx, explicitStyle) {
   if (key === "") {
     return { result: { ok: false, reason: "no-key", detail: "no API key configured" } };
   }
-  const memoKey = `${provider}:${model}`;
-  if (TOOLS_MEMO.get(memoKey) === false) {
-    info("agent tools unsupported for this model: using single-shot");
-    const out = await callWithProbe(provider, model, baseUrl2, key, { system: conv.system, user: conv.user }, o, explicitStyle);
-    if (out.result.ok) {
-      out.result.findings = out.result.findings.map(stripProvenance);
+  const owned = o.context === void 0 ? createRequestContext(o.maxSeconds * 1e3) : void 0;
+  o = { ...o, context: o.context ?? owned.context };
+  try {
+    const memoKey = `${provider}:${model}`;
+    if (TOOLS_MEMO.get(memoKey) === false) {
+      info("agent tools unsupported for this model: using single-shot");
+      const out = await callWithProbe(provider, model, baseUrl2, key, { system: conv.system, user: conv.user }, o, explicitStyle);
+      if (out.result.ok) {
+        out.result.findings = out.result.findings.map(stripProvenance);
+      }
+      return out;
     }
-    return out;
-  }
-  const agentOpts = {
-    model,
-    apiKey: key,
-    temperature: o.temperature,
-    topP: o.topP,
-    maxTokens: o.maxTokens,
-    timeoutSeconds: o.timeoutSeconds,
-    provider,
-    maxTurns: o.maxTurns,
-    maxSeconds: o.maxSeconds
-  };
-  const deadlineMs = Date.now() + o.maxSeconds * 1e3;
-  const runStyle = async (style) => {
-    const ep = buildEndpointForStyle(provider, model, baseUrl2, key, style, o.prNumber ?? null, o.userBase ?? false);
-    const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, deadlineMs }, { call: agentCallFor(ep, agentOpts), log: info });
-    return { outcome, via: style };
-  };
-  if (explicitStyle !== void 0 && explicitStyle !== "auto") {
-    const { outcome } = await runStyle(explicitStyle);
-    return { result: withAgentUsage(outcome, outcome.result), via: explicitStyle };
-  }
-  const memoized = PROBE_MEMO.get(memoKey);
-  const order = memoized !== void 0 ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
-  const attempted = [];
-  let last;
-  for (const style of order) {
-    attempted.push(style);
-    const { outcome } = await runStyle(style);
-    last = outcome.result;
-    if (outcome.probeAdvance) {
-      PROBE_MEMO.delete(memoKey);
-      continue;
+    const agentOpts = {
+      model,
+      apiKey: key,
+      temperature: o.temperature,
+      topP: o.topP,
+      maxTokens: o.maxTokens,
+      timeoutSeconds: o.timeoutSeconds,
+      context: o.context,
+      provider,
+      maxTurns: o.maxTurns,
+      maxSeconds: o.maxSeconds
+    };
+    const deadlineMs = o.context.deadlineMs;
+    const runStyle = async (style) => {
+      const ep = buildEndpointForStyle(provider, model, baseUrl2, key, style, o.prNumber ?? null, o.userBase ?? false);
+      const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, deadlineMs, context: o.context }, { call: agentCallFor(ep, agentOpts), log: info });
+      return { outcome, via: style };
+    };
+    if (explicitStyle !== void 0 && explicitStyle !== "auto") {
+      const { outcome } = await runStyle(explicitStyle);
+      return { result: withAgentUsage(outcome, outcome.result), via: explicitStyle };
     }
-    if (outcome.toolsUnsupported) {
-      TOOLS_MEMO.set(memoKey, false);
+    const memoized = PROBE_MEMO.get(memoKey);
+    const order = memoized !== void 0 ? [memoized, ...PROBE_ORDER.filter((s) => s !== memoized)] : PROBE_ORDER;
+    const attempted = [];
+    let last;
+    for (const style of order) {
+      attempted.push(style);
+      const { outcome } = await runStyle(style);
+      last = outcome.result;
+      if (outcome.probeAdvance) {
+        PROBE_MEMO.delete(memoKey);
+        continue;
+      }
+      if (outcome.toolsUnsupported) {
+        TOOLS_MEMO.set(memoKey, false);
+        return { result: withAgentUsage(outcome, outcome.result), via: style };
+      }
+      if (outcome.result.ok) {
+        PROBE_MEMO.set(memoKey, style);
+        return { result: withAgentUsage(outcome, outcome.result), via: style };
+      }
       return { result: withAgentUsage(outcome, outcome.result), via: style };
     }
-    if (outcome.result.ok) {
-      PROBE_MEMO.set(memoKey, style);
-      return { result: withAgentUsage(outcome, outcome.result), via: style };
-    }
-    return { result: withAgentUsage(outcome, outcome.result), via: style };
+    warning(`model "${model}": no API style accepted the request; tried ${attempted.join(" \u2192 ")}. Set llm_api_style explicitly to skip the probe.`);
+    const detail = last !== void 0 && !last.ok ? last.detail : "no API style accepted the request";
+    const status = last !== void 0 && !last.ok && last.reason === "http-error" ? last.status : void 0;
+    return {
+      result: {
+        ok: false,
+        reason: "http-error",
+        detail: redact(detail, key),
+        ...status !== void 0 ? { status } : {}
+      },
+      via: attempted.at(-1)
+    };
+  } finally {
+    owned?.dispose();
   }
-  warning(`model "${model}": no API style accepted the request; tried ${attempted.join(" \u2192 ")}. Set llm_api_style explicitly to skip the probe.`);
-  const detail = last !== void 0 && !last.ok ? last.detail : "no API style accepted the request";
-  const status = last !== void 0 && !last.ok && last.reason === "http-error" ? last.status : void 0;
-  return {
-    result: {
-      ok: false,
-      reason: "http-error",
-      detail: redact(detail, key),
-      ...status !== void 0 ? { status } : {}
-    },
-    via: attempted.at(-1)
-  };
 }
 
 // lib/src/platform/analysis-services.js
