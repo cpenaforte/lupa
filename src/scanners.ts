@@ -1,5 +1,7 @@
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { runProcess, type ProcessOptions } from "./runtime/process.js";
+import { cleanEnvForExec, type ExecutionOptions } from "./runtime/exec-env.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import type { Finding } from "./domain/finding.js";
@@ -142,7 +144,7 @@ function firstPhysicalLocation(locations: unknown): { file: string; line?: numbe
   return { file, line };
 }
 
-/** SARIF 2.1.0 level → severity. A missing level defaults to "warning" per the spec. */
+/** SARIF 2.1.0 level → severity, after resolving the referenced rule default. */
 function severityOf(level: unknown): Finding["severity"] {
   if (level === undefined) return "warning";
   if (level === "error") return "high";
@@ -167,15 +169,22 @@ export function parseSarif(text: string): Finding[] | undefined {
   const out: Finding[] = [];
   for (const run of log.runs) {
     if (!isObj(run) || !Array.isArray(run.results)) continue;
+    const tool = isObj(run.tool) ? run.tool : undefined;
+    const driver = isObj(tool?.driver) ? tool.driver : undefined;
+    const rules = Array.isArray(driver?.rules) ? driver.rules : [];
     for (const res of run.results) {
       if (!isObj(res)) continue;
+      const indexed = typeof res.ruleIndex === "number" ? rules[res.ruleIndex] : undefined;
+      const rule = isObj(indexed) && (res.ruleId === undefined || indexed.id === res.ruleId)
+        ? indexed : rules.find((candidate) => isObj(candidate) && candidate.id === res.ruleId);
+      const defaults = isObj(rule) && isObj(rule.defaultConfiguration) ? rule.defaultConfiguration : undefined;
       const { file, line } = firstPhysicalLocation(res.locations);
       const msg = isObj(res.message) ? res.message.text : undefined;
       out.push({
-        severity: severityOf(res.level),
+        severity: severityOf(res.level ?? defaults?.level),
         file,
         line,
-        rule: typeof res.ruleId === "string" ? res.ruleId : "unknown",
+        rule: typeof res.ruleId === "string" ? res.ruleId : isObj(rule) && typeof rule.id === "string" ? rule.id : "unknown",
         message: typeof msg === "string" ? msg : "scanner finding",
       });
     }
@@ -193,33 +202,27 @@ interface Exec {
   code: number | null; // 0 on success; numeric exit code otherwise (null if killed by signal)
   stdout: string;
   timedOut: boolean; // killed by the timeout
+  failed?: boolean; // cancellation, output overflow, or unsuccessful cleanup
 }
 
-/** Runs one tool. Exported for tests (the timeout parameter is the seam). */
-export function runExec(
+/** Compatibility adapter, with an explicit scrubbed child environment. */
+export async function runExec(
   file: string,
   args: string[],
   cwd: string,
   env?: NodeJS.ProcessEnv,
   timeoutMs: number = TOOL_TIMEOUT_MS,
+  execution: Pick<ProcessOptions, "signal" | "cleanup"> = {},
 ): Promise<Exec> {
-  return new Promise((resolve) => {
-    execFile(
-      file,
-      args,
-      { cwd, env: { ...process.env, ...env }, maxBuffer: MAX_BUFFER, timeout: timeoutMs },
-      (err, stdout) => {
-        if (!err) return resolve({ missing: false, code: 0, stdout: String(stdout), timedOut: false });
-        const e = err as NodeJS.ErrnoException & { killed?: boolean };
-        if (e.code === "ENOENT") return resolve({ missing: true, code: null, stdout: "", timedOut: false });
-        // execFile sets `killed` when its timeout fires.
-        const timedOut = e.killed === true;
-        // Non-zero exit (scanners exit 1 when findings exist): keep stdout, which may hold SARIF.
-        const code = typeof e.code === "number" ? e.code : null;
-        resolve({ missing: false, code, stdout: stdout ? String(stdout) : "", timedOut });
-      },
-    );
+  const r = await runProcess(file, args, {
+    cwd, env: cleanEnvForExec(env ?? process.env), timeoutMs,
+    maxBufferBytes: MAX_BUFFER, signal: execution.signal, cleanup: execution.cleanup,
   });
+  return {
+    missing: r.missing, code: r.exitCode, stdout: r.stdout, timedOut: r.timedOut,
+    ...(r.cancelled || r.cleanupFailed || (r.exitCode === null && !r.missing && !r.timedOut)
+      ? { failed: true } : {}),
+  };
 }
 
 export function warning(rule: string, message: string, source?: string): Finding {
@@ -287,6 +290,7 @@ export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: numb
   const source = sourceForLabel(label);
   if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`, source)];
   if (r.timedOut) return [warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`, source)];
+  if (r.failed) return [warning("scanner-failed", `${label} execution incomplete`, source)];
   const over = byteCheck(r.stdout, maxBytes, label);
   if (over !== undefined) return over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : undefined;
@@ -316,10 +320,30 @@ function dockerArgs(
   image: string,
   digest: string,
   args: string[],
+  name: string,
   extraMounts: string[] = [],
 ): string[] {
   const mounts = [`${dir}:/src`, ...extraMounts].flatMap((m) => ["-v", m]);
-  return ["run", "--rm", ...mounts, "-w", "/src", `${image}@${digest}`, ...args];
+  return ["run", "--rm", "--name", name, ...mounts, "-w", "/src", `${image}@${digest}`, ...args];
+}
+
+/** Own the container identity and its separately bounded forced-removal command. */
+async function runDocker(
+  dir: string, image: string, digest: string, args: string[], env: NodeJS.ProcessEnv,
+  timeoutMs: number, execution: ExecutionOptions, extraMounts: string[] = [],
+): Promise<Exec> {
+  const name = `lupa-${randomUUID()}`;
+  return runExec("docker", dockerArgs(dir, image, digest, args, name, extraMounts), dir, env, timeoutMs, {
+    signal: execution.signal,
+    cleanup: async () => {
+      const removed = await runProcess("docker", ["rm", "-f", name], {
+        cwd: dir, env, timeoutMs: 500, maxBufferBytes: 64 * 1024,
+      });
+      if (removed.exitCode !== 0 || removed.timedOut || removed.cancelled || removed.cleanupFailed) {
+        throw new Error("owned container cleanup failed");
+      }
+    },
+  });
 }
 
 export interface ScannerResult {
@@ -350,8 +374,9 @@ export async function runScanners(o: {
   outDir?: string;
   timeoutMs?: number;
   maxArtifactBytes?: number;
-}): Promise<ScannerResult> {
+}, execution: ExecutionOptions = {}): Promise<ScannerResult> {
   const findings: Finding[] = [];
+  const env = cleanEnvForExec(execution.env ?? process.env);
   const jobs = o.jobs ?? resolveJobs();
   const dir = resolvePath(o.dir);
   const timeoutMs = o.timeoutMs ?? TOOL_TIMEOUT_MS;
@@ -359,27 +384,29 @@ export async function runScanners(o: {
 
   // semgrep (binary, not docker)
   const sg = semgrepArgv({ baselineSha: o.baselineSha, jobs, hasToken: !!o.hasSemgrepToken });
-  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs, maxArtifactBytes));
+  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, { ...env, ...sg.env }, timeoutMs, execution), timeoutMs, maxArtifactBytes));
 
   // trivy (docker image pinned by digest)
-  const tv = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv(".")), dir, undefined, timeoutMs);
+  const tv = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv("."), env, timeoutMs, execution);
   findings.push(...fromStdout("docker", "trivy", tv, timeoutMs, maxArtifactBytes));
 
   // gitleaks (docker image pinned by digest; SARIF goes to a report file in a temp dir)
-  findings.push(...(await runGitleaks(dir, timeoutMs, maxArtifactBytes)));
+  findings.push(...(await runGitleaks(dir, timeoutMs, maxArtifactBytes, env, execution)));
 
   // osv-scanner (docker image pinned by digest), one run per lockfile
   for (const lock of o.lockfiles ?? []) {
-    const osv = await runExec("docker", dockerArgs(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock)), dir, undefined, timeoutMs);
+    const osv = await runDocker(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock), env, timeoutMs, execution);
     findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs, maxArtifactBytes));
   }
 
   // SBOM (trivy fs --format cyclonedx). Written under a unique mkdtemp dir inside outDir.
   let sbomPath: string | undefined;
   if (o.sbom) {
-    const sb = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv(".")), dir, undefined, timeoutMs);
+    const sb = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv("."), env, timeoutMs, execution);
     if (sb.missing) {
       findings.push(warning("scanner-missing", "sbom unavailable: docker not found", "sbom"));
+    } else if (sb.timedOut || sb.failed) {
+      findings.push(warning("scanner-failed", sb.timedOut ? `sbom timed out after ${timeoutMs / 1000}s` : "sbom execution incomplete", "sbom"));
     } else {
       const over = byteCheck(sb.stdout, maxArtifactBytes, "sbom");
       if (over !== undefined) {
@@ -423,7 +450,7 @@ function isCycloneDx(text: string): boolean {
  * when clean and may not create the report; exit 0 with no report is therefore clean.
  * A temp-dir failure is a `scanner-failed` warning, never a throw.
  */
-async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Promise<Finding[]> {
+async function runGitleaks(dir: string, timeoutMs: number, maxBytes: number, env: NodeJS.ProcessEnv, execution: ExecutionOptions): Promise<Finding[]> {
   let reportDir: string;
   try {
     reportDir = await mkdtemp(join(os.tmpdir(), "gitleaks-"));
@@ -432,17 +459,13 @@ async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, max
   }
   const hostReport = join(reportDir, "report.sarif");
   try {
-    const gl = await runExec(
-      "docker",
-      dockerArgs(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), [
-        `${reportDir}:/out`,
-      ]),
-      dir,
-      undefined,
-      timeoutMs,
+    const gl = await runDocker(
+      dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"),
+      env, timeoutMs, execution, [`${reportDir}:/out`],
     );
     if (gl.missing) return [warning("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
     if (gl.timedOut) return [warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`, "gitleaks")];
+    if (gl.failed) return [warning("scanner-failed", "gitleaks execution incomplete", "gitleaks")];
     let text: string | undefined;
     try {
       const capped = readCappedFileSync(hostReport, maxBytes);

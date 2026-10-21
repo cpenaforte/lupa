@@ -9,7 +9,7 @@ import { checkModelListed } from "../providers.js";
 export function createAnalysis(): Analysis {
   return {
     runScanners,
-    runL2: (dir, changedFiles) => runL2(dir, undefined, undefined, changedFiles),
+    runL2: (dir, changedFiles, execution) => runL2(dir, undefined, undefined, changedFiles, execution),
     ensureOllama,
     checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved

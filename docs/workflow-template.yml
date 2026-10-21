@@ -53,6 +53,7 @@ jobs:
       group: pr-reviewer-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
     steps:

@@ -5777,7 +5777,7 @@ var require_client_h1 = __commonJS({
       kResume,
       kHTTPContext
     } = require_symbols();
-    var constants3 = require_constants2();
+    var constants4 = require_constants2();
     var EMPTY_BUF = Buffer.alloc(0);
     var FastBuffer = Buffer[Symbol.species];
     var addListener = util.addListener;
@@ -5852,7 +5852,7 @@ var require_client_h1 = __commonJS({
       constructor(client, socket, { exports: exports2 }) {
         assert(Number.isFinite(client[kMaxHeadersSize]) && client[kMaxHeadersSize] > 0);
         this.llhttp = exports2;
-        this.ptr = this.llhttp.llhttp_alloc(constants3.TYPE.RESPONSE);
+        this.ptr = this.llhttp.llhttp_alloc(constants4.TYPE.RESPONSE);
         this.client = client;
         this.socket = socket;
         this.timeout = null;
@@ -5947,11 +5947,11 @@ var require_client_h1 = __commonJS({
             currentBufferRef = null;
           }
           const offset = llhttp.llhttp_get_error_pos(this.ptr) - currentBufferPtr;
-          if (ret !== constants3.ERROR.OK) {
+          if (ret !== constants4.ERROR.OK) {
             const body = data.subarray(offset);
-            if (ret === constants3.ERROR.PAUSED_UPGRADE) {
+            if (ret === constants4.ERROR.PAUSED_UPGRADE) {
               this.onUpgrade(body);
-            } else if (ret === constants3.ERROR.PAUSED) {
+            } else if (ret === constants4.ERROR.PAUSED) {
               this.paused = true;
               socket.unshift(body);
             } else {
@@ -5974,10 +5974,10 @@ var require_client_h1 = __commonJS({
         } finally {
           currentParser = null;
         }
-        if (ret === constants3.ERROR.OK) {
+        if (ret === constants4.ERROR.OK) {
           return null;
         }
-        if (ret === constants3.ERROR.PAUSED || ret === constants3.ERROR.PAUSED_UPGRADE) {
+        if (ret === constants4.ERROR.PAUSED || ret === constants4.ERROR.PAUSED_UPGRADE) {
           this.paused = true;
           return null;
         }
@@ -5994,7 +5994,7 @@ var require_client_h1 = __commonJS({
           const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0);
           message = "Response does not match the HTTP/1.1 protocol (" + Buffer.from(llhttp.memory.buffer, ptr, len).toString() + ")";
         }
-        return new HTTPParserError(message, constants3.ERROR[ret], data);
+        return new HTTPParserError(message, constants4.ERROR[ret], data);
       }
       destroy() {
         assert(this.ptr != null);
@@ -6174,7 +6174,7 @@ var require_client_h1 = __commonJS({
           socket[kBlocking] = false;
           client[kResume]();
         }
-        return pause ? constants3.ERROR.PAUSED : 0;
+        return pause ? constants4.ERROR.PAUSED : 0;
       }
       onBody(buf) {
         const { client, socket, statusCode, maxResponseSize } = this;
@@ -6196,7 +6196,7 @@ var require_client_h1 = __commonJS({
         }
         this.bytesRead += buf.length;
         if (request2.onData(buf) === false) {
-          return constants3.ERROR.PAUSED;
+          return constants4.ERROR.PAUSED;
         }
       }
       onMessageComplete() {
@@ -6232,13 +6232,13 @@ var require_client_h1 = __commonJS({
         if (socket[kWriting]) {
           assert(client[kRunning] === 0);
           util.destroy(socket, new InformationalError("reset"));
-          return constants3.ERROR.PAUSED;
+          return constants4.ERROR.PAUSED;
         } else if (!shouldKeepAlive) {
           util.destroy(socket, new InformationalError("reset"));
-          return constants3.ERROR.PAUSED;
+          return constants4.ERROR.PAUSED;
         } else if (socket[kReset] && client[kRunning] === 0) {
           util.destroy(socket, new InformationalError("reset"));
-          return constants3.ERROR.PAUSED;
+          return constants4.ERROR.PAUSED;
         } else if (client[kPipelining] == null || client[kPipelining] === 1) {
           setImmediate(() => client[kResume]());
         } else {
@@ -14947,7 +14947,7 @@ var require_util4 = __commonJS({
     var { getEncoding } = require_encoding();
     var { serializeAMimeType, parseMIMEType } = require_data_url();
     var { types } = __require("node:util");
-    var { StringDecoder } = __require("string_decoder");
+    var { StringDecoder: StringDecoder2 } = __require("string_decoder");
     var { btoa } = __require("node:buffer");
     var staticPropertyDescriptors = {
       enumerable: true,
@@ -15038,7 +15038,7 @@ var require_util4 = __commonJS({
             dataURL += serializeAMimeType(parsed);
           }
           dataURL += ";base64,";
-          const decoder = new StringDecoder("latin1");
+          const decoder = new StringDecoder2("latin1");
           for (const chunk of bytes) {
             dataURL += btoa(decoder.write(chunk));
           }
@@ -15067,7 +15067,7 @@ var require_util4 = __commonJS({
         }
         case "BinaryString": {
           let binaryString = "";
-          const decoder = new StringDecoder("latin1");
+          const decoder = new StringDecoder2("latin1");
           for (const chunk of bytes) {
             binaryString += decoder.write(chunk);
           }
@@ -27988,6 +27988,37 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
   return { findings: res.findings, verdicts: { pairs, links, malformed } };
 }
 
+// lib/src/runtime/exec-env.js
+var EXEC_ALLOW = /* @__PURE__ */ new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "TMPDIR",
+  "GITHUB_WORKSPACE",
+  "SYSTEMROOT",
+  "WINDIR",
+  "TEMP",
+  "TMP",
+  "PATHEXT",
+  "DOCKER_HOST",
+  "SEMGREP_BASELINE_COMMIT"
+]);
+var EXEC_ALLOW_PREFIX = ["RUNNER_"];
+var EXEC_DENY = /TOKEN|KEY|SECRET|PASSWORD|AUTH|^GITHUB_TOKEN$|^ACTIONS_/i;
+function cleanEnvForExec(env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (v === void 0 || EXEC_DENY.test(k))
+      continue;
+    if (EXEC_ALLOW.has(k.toUpperCase()) || EXEC_ALLOW_PREFIX.some((p) => k.startsWith(p)))
+      out[k] = v;
+  }
+  return out;
+}
+
 // lib/src/application/analyze.js
 var SHA_RE = /^[0-9a-f]{40}$/;
 var L2_SKIPPED = {
@@ -28015,45 +28046,6 @@ var MANIFEST_FOR = {
   "Podfile.lock": "Podfile",
   "flake.lock": "flake.nix"
 };
-var EXEC_ALLOW = /* @__PURE__ */ new Set([
-  "PATH",
-  "HOME",
-  "USER",
-  "LANG",
-  "LC_ALL",
-  "TZ",
-  "TMPDIR",
-  "GITHUB_WORKSPACE",
-  "SYSTEMROOT",
-  "PATHEXT",
-  "DOCKER_HOST"
-]);
-var EXEC_ALLOW_PREFIX = ["RUNNER_"];
-var EXEC_DENY = /TOKEN|KEY|SECRET|PASSWORD|AUTH|^GITHUB_TOKEN$|^ACTIONS_/i;
-function cleanEnvForExec(env) {
-  const out = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (v === void 0 || EXEC_DENY.test(k))
-      continue;
-    if (EXEC_ALLOW.has(k) || EXEC_ALLOW_PREFIX.some((p) => k.startsWith(p)))
-      out[k] = v;
-  }
-  return out;
-}
-async function withScrubbedEnv(fn) {
-  const saved = { ...process.env };
-  const clean = cleanEnvForExec(saved);
-  for (const k of Object.keys(process.env))
-    delete process.env[k];
-  Object.assign(process.env, clean);
-  try {
-    return await fn();
-  } finally {
-    for (const k of Object.keys(process.env))
-      delete process.env[k];
-    Object.assign(process.env, saved);
-  }
-}
 function requireSha(name, value) {
   if (!SHA_RE.test(value))
     throw new Error(`lupa: ${name} must be a 40-character lowercase commit SHA`);
@@ -28117,7 +28109,8 @@ async function runAnalysisFlow(env, deps, out) {
   });
   const lockfiles = files.filter((f) => isLockfile(f.file)).map((f) => f.file);
   const forkWithSecrets = pull.isFork && (env.eventName !== "pull_request" || env.tokenType === "app" || env.inputs.llmApiKey !== "");
-  const { scan, l2 } = await withScrubbedEnv(async () => {
+  const execution = { env: cleanEnvForExec(process.env) };
+  const { scan, l2 } = await (async () => {
     const s = await deps.analysis.runScanners({
       dir: env.workDir,
       baselineSha: env.baseSha,
@@ -28126,14 +28119,14 @@ async function runAnalysisFlow(env, deps, out) {
       lockfiles,
       outDir: env.artifactDir,
       maxArtifactBytes: env.inputs.maxArtifactBytes
-    });
+    }, execution);
     if (forkWithSecrets) {
       warning("fork PR with secrets in scope: L2 native toolchains skipped");
       return { scan: s, l2: [L2_SKIPPED] };
     }
-    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)));
+    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)), execution);
     return { scan: s, l2: l };
-  });
+  })();
   if (scan.sbomPath !== void 0) {
     try {
       copyFileSync(scan.sbomPath, join6(env.artifactDir, "sbom.cdx.json"));
@@ -28317,9 +28310,223 @@ function createGateway(token, options) {
 
 // lib/src/scanners.js
 import os5 from "node:os";
-import { execFile as execFile2 } from "node:child_process";
+import { randomUUID as randomUUID2 } from "node:crypto";
+
+// lib/src/runtime/process.js
+import { spawn as nodeSpawn } from "node:child_process";
+import { join as join8 } from "node:path";
+import { constants as constants3 } from "node:os";
+import { StringDecoder } from "node:string_decoder";
+var GRACE_MS = 250;
+var CLEANUP_MS = 1e3;
+var ERRNO = new Set(Object.keys(constants3.errno));
+function createProcessRunner(boundary = {
+  spawn: nodeSpawn,
+  kill: process.kill.bind(process),
+  platform: process.platform
+}) {
+  return async (command, args, options) => {
+    const result = {
+      exitCode: null,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      missing: false,
+      timedOut: false,
+      cancelled: options.signal?.aborted === true
+    };
+    if (result.cancelled)
+      return result;
+    const recordError = (error2) => {
+      const code = error2?.code;
+      if (typeof code === "string" && ERRNO.has(code))
+        result.errorCode = code;
+      result.missing = code === "ENOENT";
+    };
+    return new Promise((resolve2) => {
+      let child;
+      let settled = false;
+      let stopping = false;
+      let invalidOutput = false;
+      let stdout = Buffer.alloc(0);
+      let stderr = Buffer.alloc(0);
+      let deadline;
+      const cap = Math.max(0, Math.floor(options.maxBufferBytes));
+      const decode = (bytes) => {
+        const text = new StringDecoder("utf8").write(bytes);
+        if (Buffer.byteLength(text) <= cap)
+          return text;
+        invalidOutput = true;
+        return new StringDecoder("utf8").write(Buffer.from(text).subarray(0, cap));
+      };
+      const finish = () => {
+        if (settled)
+          return;
+        settled = true;
+        clearTimeout(deadline);
+        options.signal?.removeEventListener("abort", abort);
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+        result.stdout = decode(stdout);
+        result.stderr = decode(stderr);
+        if (invalidOutput)
+          result.exitCode = null;
+        resolve2(result);
+      };
+      const boundedCleanup = async (cleanup, budget = CLEANUP_MS) => {
+        let timer;
+        try {
+          await Promise.race([
+            Promise.resolve().then(cleanup),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("cleanup deadline")), budget);
+            })
+          ]);
+        } catch {
+          result.cleanupFailed = true;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const windowsTree = (force) => new Promise((resolveTree, rejectTree) => {
+        const root = options.env.SystemRoot ?? options.env.SYSTEMROOT ?? "C:\\Windows";
+        let helper;
+        try {
+          helper = boundary.spawn(join8(root, "System32", "taskkill.exe"), ["/PID", String(child.pid), "/T", ...force ? ["/F"] : []], { cwd: options.cwd, env: options.env, shell: false, stdio: "ignore", windowsHide: true });
+        } catch {
+          rejectTree(new Error("tree cleanup failed"));
+          return;
+        }
+        const timer = setTimeout(() => {
+          helper.kill("SIGKILL");
+          rejectTree(new Error("tree cleanup deadline"));
+        }, GRACE_MS);
+        const done = (ok) => {
+          clearTimeout(timer);
+          if (ok)
+            resolveTree();
+          else
+            rejectTree(new Error("tree cleanup failed"));
+        };
+        helper.once("error", () => done(false));
+        helper.once("close", (code) => done(code === 0));
+      });
+      const groupSignal = (signal) => {
+        if (child.pid === void 0)
+          return;
+        try {
+          boundary.kill(-child.pid, signal);
+        } catch (error2) {
+          if (error2.code !== "ESRCH")
+            result.cleanupFailed = true;
+        }
+      };
+      const stop = () => {
+        if (settled || stopping)
+          return;
+        stopping = true;
+        clearTimeout(deadline);
+        const cleanup = options.cleanup ? boundedCleanup(options.cleanup) : Promise.resolve();
+        let graceful = Promise.resolve();
+        if (child.pid !== void 0) {
+          if (boundary.platform === "win32") {
+            graceful = windowsTree(false).catch(() => void 0);
+          } else {
+            groupSignal("SIGTERM");
+          }
+        }
+        const forced = new Promise((resolveForce) => {
+          setTimeout(() => {
+            if (child.pid === void 0) {
+              resolveForce();
+              return;
+            }
+            if (boundary.platform === "win32") {
+              void boundedCleanup(() => windowsTree(true)).then(resolveForce);
+            } else {
+              groupSignal("SIGKILL");
+              resolveForce();
+            }
+          }, GRACE_MS);
+        });
+        void Promise.all([cleanup, graceful, forced]).then(finish);
+      };
+      const abort = () => {
+        if (settled)
+          return;
+        result.cancelled = true;
+        stop();
+      };
+      const capture = (stream, chunk) => {
+        if (settled)
+          return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const previous = stream === "stdout" ? stdout : stderr;
+        const room = Math.max(0, cap - previous.length);
+        const next = Buffer.concat([previous, bytes.subarray(0, room)]);
+        if (stream === "stdout")
+          stdout = next;
+        else
+          stderr = next;
+        if (bytes.length > room) {
+          invalidOutput = true;
+          stop();
+        }
+      };
+      try {
+        child = boundary.spawn(command, args, {
+          cwd: options.cwd,
+          env: options.env,
+          detached: boundary.platform !== "win32",
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true
+        });
+      } catch (error2) {
+        recordError(error2);
+        finish();
+        return;
+      }
+      child.stdout?.on("data", (chunk) => capture("stdout", chunk));
+      child.stderr?.on("data", (chunk) => capture("stderr", chunk));
+      child.once("error", (error2) => {
+        if (settled)
+          return;
+        recordError(error2);
+        if (child.pid === void 0)
+          finish();
+        else
+          stop();
+      });
+      child.once("exit", (code, signal) => {
+        if (settled)
+          return;
+        result.exitCode = code;
+        result.signal = signal;
+      });
+      child.once("close", (code, signal) => {
+        if (settled)
+          return;
+        result.exitCode = code;
+        result.signal = signal;
+        if (!stopping)
+          finish();
+      });
+      deadline = setTimeout(() => {
+        result.timedOut = true;
+        stop();
+      }, Math.max(0, options.timeoutMs));
+      options.signal?.addEventListener("abort", abort, { once: true });
+      if (options.signal?.aborted)
+        abort();
+    });
+  };
+}
+var runProcess = createProcessRunner();
+
+// lib/src/scanners.js
 import { mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join8, resolve as resolvePath } from "node:path";
+import { join as join9, resolve as resolvePath } from "node:path";
 var TRIVY_IMAGE = "ghcr.io/aquasecurity/trivy:0.75.0";
 var TRIVY_DIGEST = "sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa";
 var OSV_IMAGE = "ghcr.io/google/osv-scanner:v2.6.0";
@@ -28407,16 +28614,22 @@ function parseSarif(text) {
   for (const run2 of log.runs) {
     if (!isObj(run2) || !Array.isArray(run2.results))
       continue;
+    const tool = isObj(run2.tool) ? run2.tool : void 0;
+    const driver = isObj(tool?.driver) ? tool.driver : void 0;
+    const rules = Array.isArray(driver?.rules) ? driver.rules : [];
     for (const res of run2.results) {
       if (!isObj(res))
         continue;
+      const indexed = typeof res.ruleIndex === "number" ? rules[res.ruleIndex] : void 0;
+      const rule = isObj(indexed) && (res.ruleId === void 0 || indexed.id === res.ruleId) ? indexed : rules.find((candidate) => isObj(candidate) && candidate.id === res.ruleId);
+      const defaults2 = isObj(rule) && isObj(rule.defaultConfiguration) ? rule.defaultConfiguration : void 0;
       const { file, line } = firstPhysicalLocation(res.locations);
       const msg = isObj(res.message) ? res.message.text : void 0;
       out.push({
-        severity: severityOf(res.level),
+        severity: severityOf(res.level ?? defaults2?.level),
         file,
         line,
-        rule: typeof res.ruleId === "string" ? res.ruleId : "unknown",
+        rule: typeof res.ruleId === "string" ? res.ruleId : isObj(rule) && typeof rule.id === "string" ? rule.id : "unknown",
         message: typeof msg === "string" ? msg : "scanner finding"
       });
     }
@@ -28424,19 +28637,22 @@ function parseSarif(text) {
   return out;
 }
 var TOOL_TIMEOUT_MS = 6e5;
-function runExec(file, args, cwd, env, timeoutMs = TOOL_TIMEOUT_MS) {
-  return new Promise((resolve2) => {
-    execFile2(file, args, { cwd, env: { ...process.env, ...env }, maxBuffer: MAX_BUFFER, timeout: timeoutMs }, (err, stdout) => {
-      if (!err)
-        return resolve2({ missing: false, code: 0, stdout: String(stdout), timedOut: false });
-      const e = err;
-      if (e.code === "ENOENT")
-        return resolve2({ missing: true, code: null, stdout: "", timedOut: false });
-      const timedOut = e.killed === true;
-      const code = typeof e.code === "number" ? e.code : null;
-      resolve2({ missing: false, code, stdout: stdout ? String(stdout) : "", timedOut });
-    });
+async function runExec(file, args, cwd, env, timeoutMs = TOOL_TIMEOUT_MS, execution = {}) {
+  const r = await runProcess(file, args, {
+    cwd,
+    env: cleanEnvForExec(env ?? process.env),
+    timeoutMs,
+    maxBufferBytes: MAX_BUFFER,
+    signal: execution.signal,
+    cleanup: execution.cleanup
   });
+  return {
+    missing: r.missing,
+    code: r.exitCode,
+    stdout: r.stdout,
+    timedOut: r.timedOut,
+    ...r.cancelled || r.cleanupFailed || r.exitCode === null && !r.missing && !r.timedOut ? { failed: true } : {}
+  };
 }
 function warning2(rule, message, source) {
   return source === void 0 ? { severity: "warning", file: "", rule, message } : { severity: "warning", file: "", rule, message, source };
@@ -28483,6 +28699,8 @@ function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFA
     return [warning2("scanner-missing", `${label} unavailable: ${tool} not found`, source)];
   if (r.timedOut)
     return [warning2("scanner-failed", `${label} timed out after ${timeoutMs / 1e3}s`, source)];
+  if (r.failed)
+    return [warning2("scanner-failed", `${label} execution incomplete`, source)];
   const over = byteCheck(r.stdout, maxBytes, label);
   if (over !== void 0)
     return over;
@@ -28504,30 +28722,50 @@ function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFA
   }
   return provenanced;
 }
-function dockerArgs(dir, image, digest, args, extraMounts = []) {
+function dockerArgs(dir, image, digest, args, name, extraMounts = []) {
   const mounts = [`${dir}:/src`, ...extraMounts].flatMap((m) => ["-v", m]);
-  return ["run", "--rm", ...mounts, "-w", "/src", `${image}@${digest}`, ...args];
+  return ["run", "--rm", "--name", name, ...mounts, "-w", "/src", `${image}@${digest}`, ...args];
 }
-async function runScanners(o) {
+async function runDocker(dir, image, digest, args, env, timeoutMs, execution, extraMounts = []) {
+  const name = `lupa-${randomUUID2()}`;
+  return runExec("docker", dockerArgs(dir, image, digest, args, name, extraMounts), dir, env, timeoutMs, {
+    signal: execution.signal,
+    cleanup: async () => {
+      const removed = await runProcess("docker", ["rm", "-f", name], {
+        cwd: dir,
+        env,
+        timeoutMs: 500,
+        maxBufferBytes: 64 * 1024
+      });
+      if (removed.exitCode !== 0 || removed.timedOut || removed.cancelled || removed.cleanupFailed) {
+        throw new Error("owned container cleanup failed");
+      }
+    }
+  });
+}
+async function runScanners(o, execution = {}) {
   const findings = [];
+  const env = cleanEnvForExec(execution.env ?? process.env);
   const jobs = o.jobs ?? resolveJobs();
   const dir = resolvePath(o.dir);
   const timeoutMs = o.timeoutMs ?? TOOL_TIMEOUT_MS;
   const maxArtifactBytes = o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
   const sg = semgrepArgv({ baselineSha: o.baselineSha, jobs, hasToken: !!o.hasSemgrepToken });
-  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs, maxArtifactBytes));
-  const tv = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv(".")), dir, void 0, timeoutMs);
+  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, { ...env, ...sg.env }, timeoutMs, execution), timeoutMs, maxArtifactBytes));
+  const tv = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv("."), env, timeoutMs, execution);
   findings.push(...fromStdout("docker", "trivy", tv, timeoutMs, maxArtifactBytes));
-  findings.push(...await runGitleaks(dir, timeoutMs, maxArtifactBytes));
+  findings.push(...await runGitleaks(dir, timeoutMs, maxArtifactBytes, env, execution));
   for (const lock of o.lockfiles ?? []) {
-    const osv = await runExec("docker", dockerArgs(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock)), dir, void 0, timeoutMs);
+    const osv = await runDocker(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock), env, timeoutMs, execution);
     findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs, maxArtifactBytes));
   }
   let sbomPath;
   if (o.sbom) {
-    const sb = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv(".")), dir, void 0, timeoutMs);
+    const sb = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv("."), env, timeoutMs, execution);
     if (sb.missing) {
       findings.push(warning2("scanner-missing", "sbom unavailable: docker not found", "sbom"));
+    } else if (sb.timedOut || sb.failed) {
+      findings.push(warning2("scanner-failed", sb.timedOut ? `sbom timed out after ${timeoutMs / 1e3}s` : "sbom execution incomplete", "sbom"));
     } else {
       const over = byteCheck(sb.stdout, maxArtifactBytes, "sbom");
       if (over !== void 0) {
@@ -28537,8 +28775,8 @@ async function runScanners(o) {
       } else {
         let sbomDir;
         try {
-          sbomDir = await mkdtemp(join8(o.outDir ?? os5.tmpdir(), "sbom-"));
-          const out = join8(sbomDir, "sbom.cdx.json");
+          sbomDir = await mkdtemp(join9(o.outDir ?? os5.tmpdir(), "sbom-"));
+          const out = join9(sbomDir, "sbom.cdx.json");
           await writeFile2(out, sb.stdout, "utf8");
           sbomPath = out;
         } catch (e) {
@@ -28559,22 +28797,22 @@ function isCycloneDx(text) {
     return false;
   }
 }
-async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFAULT_MAX_ARTIFACT_BYTES) {
+async function runGitleaks(dir, timeoutMs, maxBytes, env, execution) {
   let reportDir;
   try {
-    reportDir = await mkdtemp(join8(os5.tmpdir(), "gitleaks-"));
+    reportDir = await mkdtemp(join9(os5.tmpdir(), "gitleaks-"));
   } catch (e) {
     return [warning2("scanner-failed", `gitleaks temp dir unavailable: ${e.message}`, "gitleaks")];
   }
-  const hostReport = join8(reportDir, "report.sarif");
+  const hostReport = join9(reportDir, "report.sarif");
   try {
-    const gl = await runExec("docker", dockerArgs(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), [
-      `${reportDir}:/out`
-    ]), dir, void 0, timeoutMs);
+    const gl = await runDocker(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), env, timeoutMs, execution, [`${reportDir}:/out`]);
     if (gl.missing)
       return [warning2("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
     if (gl.timedOut)
       return [warning2("scanner-failed", `gitleaks timed out after ${timeoutMs / 1e3}s`, "gitleaks")];
+    if (gl.failed)
+      return [warning2("scanner-failed", "gitleaks execution incomplete", "gitleaks")];
     let text;
     try {
       const capped = readCappedFileSync(hostReport, maxBytes);
@@ -28602,9 +28840,8 @@ async function runGitleaks(dir, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFAULT_
 }
 
 // lib/src/l2.js
-import { execFile as execFile3 } from "node:child_process";
 import { readdirSync as readdirSync3, readFileSync as readFileSync6, statSync as statSync5 } from "node:fs";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var L2_TIMEOUT_MS = 6e5;
 var MAX_BUFFER2 = 16 * 1024 * 1024;
 function listFiles(dir) {
@@ -28616,7 +28853,7 @@ function listFiles(dir) {
   }
   return names.filter((n) => {
     try {
-      return statSync5(join9(dir, n)).isFile();
+      return statSync5(join10(dir, n)).isFile();
     } catch {
       return false;
     }
@@ -28624,7 +28861,7 @@ function listFiles(dir) {
 }
 function pyprojectHasRuff(dir) {
   try {
-    return /^\s*\[tool\.ruff(\.[^\]]*)?\]/m.test(readFileSync6(join9(dir, "pyproject.toml"), "utf8"));
+    return /^\s*\[tool\.ruff(\.[^\]]*)?\]/m.test(readFileSync6(join10(dir, "pyproject.toml"), "utf8"));
   } catch {
     return false;
   }
@@ -28666,24 +28903,26 @@ function l2Argv(name) {
       throw new Error(`unknown L2 tool: ${name}`);
   }
 }
-var execTool = (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS) => new Promise((resolve2) => {
-  execFile3(cmd, args, { cwd, maxBuffer: MAX_BUFFER2, timeout: timeoutMs }, (err, stdout, stderr) => {
-    const out = String(stdout);
-    if (!err)
-      return resolve2({ failure: void 0, stdout: out });
-    const e = err;
-    const code = typeof e.code === "string" || typeof e.code === "number" ? e.code : null;
-    resolve2({
-      failure: {
-        code,
-        signal: e.signal ?? null,
-        output: `${out}${String(stderr)}`,
-        timedOut: e.killed === true
-      },
-      stdout: out
-    });
+var execTool = async (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS, execution = {}) => {
+  const r = await runProcess(cmd, args, {
+    cwd,
+    env: cleanEnvForExec(execution.env ?? process.env),
+    timeoutMs,
+    maxBufferBytes: MAX_BUFFER2,
+    signal: execution.signal
   });
-});
+  const incomplete = r.cancelled || r.cleanupFailed === true || r.exitCode === null && !r.missing;
+  return {
+    stdout: r.stdout,
+    failure: r.exitCode === 0 && !r.timedOut && !incomplete ? void 0 : {
+      code: r.errorCode ?? (r.missing ? "ENOENT" : r.exitCode),
+      signal: r.signal,
+      output: r.stdout + r.stderr,
+      timedOut: r.timedOut,
+      ...incomplete ? { incomplete: true } : {}
+    }
+  };
+};
 function describeFailure(name, f, timeoutMs) {
   if (f.timedOut)
     return `${name} timed out after ${timeoutMs / 1e3}s`;
@@ -28691,6 +28930,8 @@ function describeFailure(name, f, timeoutMs) {
     return `${name} killed by signal ${f.signal}`;
   if (typeof f.code === "string")
     return `${name} could not run (${f.code})`;
+  if (f.incomplete)
+    return `${name} execution incomplete`;
   if (typeof f.code === "number")
     return `${name} reported issues (exit ${f.code})`;
   return `${name} exited abnormally`;
@@ -28713,7 +28954,7 @@ ${detail}` : ""}`,
   ];
 }
 function interpretGofmt(name, failure, stdout, changed, timeoutMs = L2_TIMEOUT_MS) {
-  if (failure?.timedOut === true || failure?.signal != null) {
+  if (failure?.timedOut === true || failure?.signal != null || failure?.incomplete === true) {
     return interpretDefault(name, failure, stdout, changed, timeoutMs);
   }
   const files = stdout.split("\n").filter((line) => line !== "").map((line) => line.startsWith("./") ? line.slice(2) : line).filter((file) => changed.has(file));
@@ -28735,18 +28976,18 @@ function interpretGofmt(name, failure, stdout, changed, timeoutMs = L2_TIMEOUT_M
 var interpreters = {
   gofmt: interpretGofmt
 };
-async function runOne(name, dir, spawn, timeoutMs, changed) {
+async function runOne(name, dir, spawn, timeoutMs, changed, execution) {
   const { cmd, args } = l2Argv(name);
-  const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs);
+  const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
   if (failure?.code === "ENOENT")
     return [];
   const interpret = interpreters[name] ?? interpretDefault;
   return interpret(name, failure, stdout, changed, timeoutMs);
 }
-async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set()) {
+async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set(), execution) {
   const findings = [];
   for (const name of detectL2Tools(dir)) {
-    findings.push(...await runOne(name, dir, spawn, timeoutMs, changedFiles));
+    findings.push(...await runOne(name, dir, spawn, timeoutMs, changedFiles, execution));
   }
   return findings;
 }
@@ -30391,7 +30632,7 @@ async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolC
 function createAnalysis() {
   return {
     runScanners,
-    runL2: (dir, changedFiles) => runL2(dir, void 0, void 0, changedFiles),
+    runL2: (dir, changedFiles, execution) => runL2(dir, void 0, void 0, changedFiles, execution),
     ensureOllama,
     checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved

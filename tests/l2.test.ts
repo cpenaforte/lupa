@@ -4,6 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectL2Tools, execTool, L2_TIMEOUT_MS, l2Argv, runL2 } from "../src/l2.js";
 
+it("execTool strips secrets from explicit child env and preserves zero-exit stdout", async () => {
+  const result = await execTool(process.execPath, ["-e", "console.log(JSON.stringify(process.env))"], process.cwd(), 5000,
+    { env: { PATH: process.env.PATH, GITHUB_TOKEN: "secret", RUNNER_TEMP: "/owned", NODE_OPTIONS: "--bad" } });
+  expect(result.failure).toBeUndefined();
+  expect(JSON.parse(result.stdout)).toEqual({ PATH: process.env.PATH, RUNNER_TEMP: "/owned" });
+});
+
 const tmpDirs: string[] = [];
 function makeTmp(files: Record<string, string> = {}, dirs: string[] = []): string {
   const dir = mkdtempSync(join(tmpdir(), "l2-"));

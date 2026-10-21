@@ -16,6 +16,8 @@ import { mergeDuplicates } from "../review/grouping.js";
 import { exitFor } from "../review/policy.js";
 import { slowPath } from "./slow-path.js";
 import { note, publishReview, runtimeSecrets } from "./publish.js";
+import { cleanEnvForExec } from "../runtime/exec-env.js";
+export { cleanEnvForExec } from "../runtime/exec-env.js";
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 
@@ -48,56 +50,6 @@ const MANIFEST_FOR: Readonly<Record<string, string>> = {
   "Podfile.lock": "Podfile",
   "flake.lock": "flake.nix",
 };
-
-// ---------------------------------------------------------------------------
-// Exec environment scrubbing (R1). Scanners and linters run PR-controlled code
-// (build scripts, configs), so they must not inherit secrets.
-// ---------------------------------------------------------------------------
-
-const EXEC_ALLOW: ReadonlySet<string> = new Set([
-  "PATH",
-  "HOME",
-  "USER",
-  "LANG",
-  "LC_ALL",
-  "TZ",
-  "TMPDIR",
-  "GITHUB_WORKSPACE",
-  "SYSTEMROOT",
-  "PATHEXT",
-  "DOCKER_HOST",
-]);
-const EXEC_ALLOW_PREFIX = ["RUNNER_"];
-/** Deny wins over the allowlist. */
-const EXEC_DENY = /TOKEN|KEY|SECRET|PASSWORD|AUTH|^GITHUB_TOKEN$|^ACTIONS_/i;
-
-/** The environment handed to PR-controlled exec: allowlisted names only, never secret-shaped names. */
-export function cleanEnvForExec(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (v === undefined || EXEC_DENY.test(k)) continue;
-    if (EXEC_ALLOW.has(k) || EXEC_ALLOW_PREFIX.some((p) => k.startsWith(p))) out[k] = v;
-  }
-  return out;
-}
-
-/**
- * Runs `fn` with process.env replaced by the scrubbed exec env. Scanners and L2 spawn children
- * that inherit process.env at spawn time, so the swap reaches them without changing their modules.
- * Restored in `finally`. Calls are sequential in run(), so the window never overlaps another call.
- */
-async function withScrubbedEnv<T>(fn: () => Promise<T>): Promise<T> {
-  const saved: NodeJS.ProcessEnv = { ...process.env };
-  const clean = cleanEnvForExec(saved);
-  for (const k of Object.keys(process.env)) delete process.env[k];
-  Object.assign(process.env, clean);
-  try {
-    return await fn();
-  } finally {
-    for (const k of Object.keys(process.env)) delete process.env[k];
-    Object.assign(process.env, saved);
-  }
-}
 
 function requireSha(name: string, value: string): void {
   if (!SHA_RE.test(value)) throw new Error(`lupa: ${name} must be a 40-character lowercase commit SHA`);
@@ -172,7 +124,8 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   // so they are skipped. Trusted, data-driven scanners still run.
   const forkWithSecrets =
     pull.isFork && (env.eventName !== "pull_request" || env.tokenType === "app" || env.inputs.llmApiKey !== "");
-  const { scan, l2 } = await withScrubbedEnv(async () => {
+  const execution = { env: cleanEnvForExec(process.env) };
+  const { scan, l2 } = await (async () => {
     const s = await deps.analysis.runScanners({
       dir: env.workDir,
       baselineSha: env.baseSha,
@@ -181,14 +134,14 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
       lockfiles,
       outDir: env.artifactDir,
       maxArtifactBytes: env.inputs.maxArtifactBytes,
-    });
+    }, execution);
     if (forkWithSecrets) {
       core.warning("fork PR with secrets in scope: L2 native toolchains skipped");
       return { scan: s, l2: [L2_SKIPPED] };
     }
-    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)));
+    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)), execution);
     return { scan: s, l2: l };
-  });
+  })();
   if (scan.sbomPath !== undefined) {
     try {
       copyFileSync(scan.sbomPath, join(env.artifactDir, "sbom.cdx.json"));

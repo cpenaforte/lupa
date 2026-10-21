@@ -8,7 +8,7 @@ import { createAnalysis } from "./platform/analysis-services.js";
 export type { RunEnv, PrInfo, Gateway, Analysis, Deps, Outcome } from "./application/contracts.js";
 export { run } from "./application/run.js";
 export { readRunEnv } from "./platform/action-env.js";
-export { cleanEnvForExec } from "./application/analyze.js";
+export { cleanEnvForExec } from "./runtime/exec-env.js";
 export { sanitizeFinding } from "./domain/finding.js";
 export { parseDiffFiles, unquoteGitPath } from "./diff/patch.js";
 export { readFindings } from "./artifacts/review-store.js";

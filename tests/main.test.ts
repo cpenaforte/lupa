@@ -286,6 +286,7 @@ interface MockOpts {
   summaryPrefill?: string;
   /** Findings returned by the runScanners fake (default []). */
   scan?: Finding[];
+  observeExec?: (kind: "scanner" | "native", env: NodeJS.ProcessEnv | undefined) => void;
   /** Resolved review threads returned by the listReviewThreads fake (default none). */
   threads?: ReviewThread[];
   /** listReviewThreads throws (fail-open pin). */
@@ -359,12 +360,14 @@ async function runWithMocks(o: MockOpts = {}) {
       info: { isFork: o.forkReadonly === true, headRepo: o.forkReadonly ? "fork/r" : "o/r" },
     }),
     analysis: {
-      runScanners: async () => {
-        rec.scanEnv = { ...process.env };
+      runScanners: async (_options, execution) => {
+        rec.scanEnv = execution?.env;
+        o.observeExec?.("scanner", execution?.env);
         return o.sbomMissing ? { findings: [], sbomPath: join(sbomDir, "sbom.cdx.json") } : { findings: o.scan ?? [] };
       },
-      runL2: async (_dir, changedFiles) => {
-        rec.l2Env = { ...process.env };
+      runL2: async (_dir, changedFiles, execution) => {
+        rec.l2Env = execution?.env;
+        o.observeExec?.("native", execution?.env);
         rec.l2Changed = changedFiles;
         return [];
       },
@@ -908,7 +911,7 @@ describe("run() orchestration", () => {
     expect(r.llmCalled).toBe(0);
   });
 
-  it("scanners and L2 see a scrubbed env; the parent env is restored afterwards", async () => {
+  it("scanners and L2 receive scrubbed env without mutating the parent during success", async () => {
     const saved = { ...process.env };
     process.env.PR_TEST_API_TOKEN = "t-secret";
     process.env.MY_SERVICE_KEY = "k-secret";
@@ -916,7 +919,12 @@ describe("run() orchestration", () => {
     process.env.ACTIONS_RUNTIME_TOKEN = "rt-secret";
     process.env.RUNNER_TEMP = "/tmp/opencode/rt";
     try {
-      const r = await runWithMocks({});
+      const seen: string[] = [];
+      const r = await runWithMocks({ observeExec: (kind) => {
+        seen.push(kind);
+        expect(process.env.GITHUB_TOKEN).toBe("ghs_secret");
+      } });
+      expect(seen).toEqual(["scanner", "native"]);
       for (const env of [r.scanEnv, r.l2Env]) {
         expect(env).toBeDefined();
         expect(env?.PR_TEST_API_TOKEN).toBeUndefined();
@@ -935,8 +943,26 @@ describe("run() orchestration", () => {
   });
 
   it("passes the parsed-diff changed set to runL2", async () => {
+    // Existing gofmt file scoping is kept through the additive options seam.
     const r = await runWithMocks({ scan: [] });
     expect(r.l2Changed).toEqual(new Set(["src/a.ts"])); // exact changed paths of the DIFF fixture
+  });
+
+  it.each(["scanner", "native"] as const)("keeps parent env unchanged while %s rejects", async (rejectedKind) => {
+    const saved = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "parent-secret";
+    try {
+      const parent = { ...process.env };
+      await expect(runWithMocks({ observeExec: (kind, env) => {
+        expect(env?.GITHUB_TOKEN).toBeUndefined();
+        expect(process.env).toEqual(parent);
+        if (kind === rejectedKind) throw new Error("owned test rejection");
+      } })).rejects.toThrow("owned test rejection");
+      expect(process.env).toEqual(parent);
+    } finally {
+      if (saved === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = saved;
+    }
   });
 
   it("the LLM slow path keeps its key (not scrubbed; it is intended API use)", async () => {
