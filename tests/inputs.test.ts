@@ -19,6 +19,7 @@ const INPUT_NAMES = [
   "llm_top_p",
   "pr_number",
   "fail_level",
+  "analysis_policy",
   "max_diff_chars",
   "max_prompt_chars",
   "post_comment",
@@ -66,6 +67,7 @@ describe("getInputs defaults", () => {
     expect(i.llmProvider).toBe("openai");
     expect(i.llmApiStyle).toBe("auto");
     expect(i.failLevel).toBe("warning");
+    expect(i.analysisPolicy).toBe("advisory");
     expect(i.maxDiffChars).toBe(60000);
     expect(i.maxPromptChars).toBe(120000);
     expect(i.timeoutSeconds).toBe(90);
@@ -81,6 +83,18 @@ describe("getInputs defaults", () => {
     expect(i.maxInlineComments).toBe(30);
     expect(i.maxReviewBodyChars).toBe(60000);
     expect(i.maxArtifactBytes).toBe(8388608);
+  });
+});
+
+describe("getInputs analysis_policy", () => {
+  it.each(["advisory", "required"])("accepts the %s profile", (analysis_policy) => {
+    setInputs({ analysis_policy });
+    expect(getInputs().analysisPolicy).toBe(analysis_policy);
+  });
+
+  it.each(["strict", "Required", "none"])("rejects unknown profile %s", (analysis_policy) => {
+    setInputs({ analysis_policy });
+    expect(() => getInputs()).toThrow(/analysis_policy/);
   });
 });
 

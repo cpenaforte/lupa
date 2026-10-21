@@ -35,6 +35,7 @@ function defaultInputs(): ActionInputs {
     llmApiKey: "synthetic-fixture-key",
     llmMaxTokens: 128,
     failLevel: "warning",
+    analysisPolicy: "advisory",
     maxDiffChars: 60000,
     maxPromptChars: 120000,
     maxFindings: DEFAULT_MAX_FINDINGS,

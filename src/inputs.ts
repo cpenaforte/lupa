@@ -1,4 +1,5 @@
 import * as core from "@actions/core";
+import type { AnalysisPolicy } from "./domain/assessment.js";
 
 export type FailLevel = "none" | "warning" | "high";
 
@@ -40,6 +41,7 @@ export interface ActionInputs {
   llmTopP?: number;
   llmMaxTokens: number;
   failLevel: FailLevel;
+  analysisPolicy?: AnalysisPolicy;
   maxDiffChars: number;
   maxPromptChars: number;
   maxFindings: number;
@@ -137,6 +139,7 @@ export function getInputs(): ActionInputs {
     ...(llmTopP !== undefined ? { llmTopP } : {}),
     llmMaxTokens: readInt("llm_max_tokens", 2000, 1),
     failLevel: parseFailLevel(readString("fail_level", "warning")),
+    analysisPolicy: readEnum("analysis_policy", ["advisory", "required"] as const, "advisory"),
     maxDiffChars: readInt("max_diff_chars", 60000, 1),
     maxPromptChars: readInt("max_prompt_chars", 120000, 1),
     maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),

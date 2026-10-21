@@ -1,6 +1,7 @@
 import type { ExecutionOptions } from "../runtime/exec-env.js";
 import type { ActionInputs } from "../inputs.js";
 import type { Finding } from "../domain/finding.js";
+import type { AnalysisAssessment } from "../domain/assessment.js";
 import type { ReviewPayload } from "../domain/review.js";
 import type { ReviewThread } from "../github.js";
 import type { ToolContext } from "../agent-tools.js";
@@ -99,6 +100,7 @@ export interface Deps {
 }
 
 export interface Outcome {
+  analysis?: AnalysisAssessment;
   posted: boolean;
   summaryWritten: boolean;
   exitCode: number;

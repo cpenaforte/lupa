@@ -21002,6 +21002,7 @@ function getInputs() {
     ...llmTopP !== void 0 ? { llmTopP } : {},
     llmMaxTokens: readInt("llm_max_tokens", 2e3, 1),
     failLevel: parseFailLevel(readString("fail_level", "warning")),
+    analysisPolicy: readEnum("analysis_policy", ["advisory", "required"], "advisory"),
     maxDiffChars: readInt("max_diff_chars", 6e4, 1),
     maxPromptChars: readInt("max_prompt_chars", 12e4, 1),
     maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
