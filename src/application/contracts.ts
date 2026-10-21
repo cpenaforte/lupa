@@ -42,7 +42,7 @@ export interface Gateway {
   findPrsByHead(headRepo: string, headRef: string): Promise<number[]>;
   getIssueBody(issue: number): Promise<string>;
   /** Repository size in KB, or undefined when unknown (any API error). */
-  getRepoSize(owner: string, repo: string): Promise<number | undefined>;
+  getRepoSize(owner: string, repo: string, options?: { signal?: AbortSignal }): Promise<number | undefined>;
   createReview(pr: number, payload: ReviewPayload, opts: { canWrite: boolean; maxBodyChars?: number; blocking?: ReadonlySet<string>; commentKeys?: readonly (string | null)[] }): Promise<void>;
   createIssueComment(pr: number, body: string, opts: { enabled: boolean; issuesWrite: boolean }): Promise<void>;
   /** This PR's review threads for the wrongly-resolved re-check (fail-open: empty on any error). */

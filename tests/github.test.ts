@@ -451,6 +451,19 @@ describe("postReview fold non-blocking markers", () => {
 });
 
 describe("getRepoSize", () => {
+  it("passes cancellation into the Octokit metadata request", async () => {
+    const controller = new AbortController();
+    let received: AbortSignal | undefined;
+    const client = {
+      rest: { repos: { get: async (options: { request?: { signal?: AbortSignal } }) => {
+        received = options.request?.signal;
+        return { data: { size: 4321 } };
+      } } },
+    } as unknown as Octokit;
+    expect(await getRepoSize(client, "o", "r", { signal: controller.signal })).toBe(4321);
+    expect(received).toBe(controller.signal);
+  });
+
   it("getRepoSize returns the Octokit size in KB and undefined on error", async () => {
     const ok = { rest: { repos: { get: async () => ({ data: { size: 4321 } }) } } } as unknown as Octokit;
     await expect(getRepoSize(ok, "o", "r")).resolves.toBe(4321);

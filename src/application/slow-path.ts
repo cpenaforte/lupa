@@ -139,11 +139,11 @@ export async function slowPath(
             maxBytes: AGENT_LIMITS.cloneMaxBytes,
             deadlineMs: opts?.deadlineMs,
             context: opts?.context ?? owned.context,
-            sizeKb: async (a) => {
+            sizeKb: async (a, options) => {
               const parts = a.split("/");
               if (parts.length !== 2) return undefined;
               const [o, n] = parts;
-              return deps.gh.getRepoSize(o!, n!);
+              return deps.gh.getRepoSize(o!, n!, options);
             },
           });
           if ("dir" in r) {

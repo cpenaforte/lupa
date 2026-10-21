@@ -117,9 +117,14 @@ function repoOf(): { owner: string; repo: string } {
  * missing repo, no access, network failure — resolves to undefined so the
  * caller treats the size as unknown instead of failing the run.
  */
-export async function getRepoSize(octokit: Octokit, owner: string, repo: string): Promise<number | undefined> {
+export async function getRepoSize(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  options?: { signal?: AbortSignal },
+): Promise<number | undefined> {
   try {
-    const r = await octokit.rest.repos.get({ owner, repo });
+    const r = await octokit.rest.repos.get({ owner, repo, ...(options?.signal ? { request: { signal: options.signal } } : {}) });
     const size = (r.data as { size?: unknown }).size;
     return typeof size === "number" ? size : undefined;
   } catch {

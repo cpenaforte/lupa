@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getEventListeners } from "node:events";
+import { createRequestContext } from "../src/runtime/context.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -60,6 +62,64 @@ describe("parseLinkedRepos", () => {
 });
 
 describe("ensureLinkedRepo", () => {
+  it.each(["deadline", "external"] as const)("settles on %s cancellation when metadata ignores the signal", async (mode) => {
+    vi.useFakeTimers();
+    const owned = createRequestContext(20);
+    const controller = new AbortController();
+    const context = mode === "deadline" ? owned.context : { signal: controller.signal, deadlineMs: owned.context.deadlineMs };
+    let resolveSize!: (value: number) => void;
+    let metadataSignal: AbortSignal | undefined;
+    let settled = false;
+    let gitCalls = 0;
+    const pending = ensureLinkedRepo("acme/tools", {
+      token: "", baseDir: tempRoot(), maxBytes: 1024, context,
+      deps: {
+        sizeKb: (_alias, opts) => {
+          metadataSignal = opts?.signal;
+          return new Promise((resolve) => { resolveSize = resolve; });
+        },
+        run: async () => { gitCalls++; return { code: 0, stdout: "", stderr: "" }; },
+      },
+    }).then((result) => { settled = true; return result; });
+    try {
+      if (mode === "external") controller.abort();
+      await vi.advanceTimersByTimeAsync(mode === "external" ? 1 : 60);
+      expect(settled).toBe(true);
+      expect(await pending).toEqual({ error: "repository not accessible: acme/tools: deadline exceeded" });
+      expect(metadataSignal?.aborted).toBe(true);
+      expect(gitCalls).toBe(0);
+      expect(getEventListeners(context.signal, "abort")).toHaveLength(0);
+      owned.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      resolveSize(0);
+      await pending;
+      owned.dispose();
+      vi.useRealTimers();
+    }
+    expect(gitCalls).toBe(0);
+  });
+
+  it("removes metadata cancellation resources when the lookup succeeds", async () => {
+    vi.useFakeTimers();
+    const owned = createRequestContext(30_000);
+    try {
+      const result = await ensureLinkedRepo("acme/tools", {
+        token: "", baseDir: tempRoot(), maxBytes: 1024, context: owned.context,
+        deps: {
+          sizeKb: async () => 2,
+          run: async () => { throw new Error("oversized repository must not clone"); },
+        },
+      });
+      expect(result).toEqual({ error: "repository too large" });
+      expect(getEventListeners(owned.context.signal, "abort")).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      owned.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels an in-flight clone and never starts HEAD inspection", async () => {
     const baseDir = tempRoot();
     const controller = new AbortController();

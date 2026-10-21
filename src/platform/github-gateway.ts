@@ -44,7 +44,7 @@ export function createGateway(token: string, options?: { trustedLogin?: string }
       const r = await octokit().rest.issues.get({ owner, repo, issue_number: issue });
       return r.data.body ?? "";
     },
-    getRepoSize: (owner, repo) => fetchRepoSize(octokit(), owner, repo),
+    getRepoSize: (owner, repo, options) => fetchRepoSize(octokit(), owner, repo, options),
     listReviewThreads: async (pr) => {
       // No token (dry-run without one): skip silently — the expected path.
       if (token === "") return [];

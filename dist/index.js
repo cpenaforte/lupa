@@ -25476,9 +25476,9 @@ function positiveInt(v) {
 function repoOf() {
   return context2.repo;
 }
-async function getRepoSize(octokit, owner, repo) {
+async function getRepoSize(octokit, owner, repo, options) {
   try {
-    const r = await octokit.rest.repos.get({ owner, repo });
+    const r = await octokit.rest.repos.get({ owner, repo, ...options?.signal ? { request: { signal: options.signal } } : {} });
     const size = r.data.size;
     return typeof size === "number" ? size : void 0;
   } catch {
@@ -27303,6 +27303,29 @@ import { execFile } from "node:child_process";
 import { existsSync as existsSync4, lstatSync, mkdirSync, readdirSync as readdirSync2, readFileSync as readFileSync4, renameSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 var CLONE_TIMEOUT_MS = 6e4;
+async function lookupSize(lookup, alias, context3, deadlineMs) {
+  if (context3 === void 0 && deadlineMs === void 0)
+    return lookup(alias);
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  context3?.signal.addEventListener("abort", cancel, { once: true });
+  const timer = deadlineMs === void 0 ? void 0 : setTimeout(cancel, Math.max(0, deadlineMs - Date.now()));
+  let onAbort;
+  try {
+    if (requestExpired(context3) || deadlineMs !== void 0 && deadlineMs <= Date.now())
+      return void 0;
+    return await new Promise((resolve2, reject) => {
+      onAbort = () => resolve2(void 0);
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      lookup(alias, { signal: controller.signal }).then(resolve2, reject);
+    });
+  } finally {
+    clearTimeout(timer);
+    context3?.signal.removeEventListener("abort", cancel);
+    if (onAbort !== void 0)
+      controller.signal.removeEventListener("abort", onAbort);
+  }
+}
 function effectiveTimeout(configuredMs, endMs, nowMs = Date.now()) {
   if (endMs === void 0)
     return configuredMs;
@@ -27425,9 +27448,12 @@ async function ensureLinkedRepo(alias, o) {
   if (o.maxBytes !== void 0 && deps.sizeKb) {
     let kb;
     try {
-      kb = await deps.sizeKb(alias);
+      kb = await lookupSize(deps.sizeKb, alias, o.context, o.deadlineMs);
     } catch {
       kb = void 0;
+    }
+    if (requestExpired(o.context) || o.deadlineMs !== void 0 && o.deadlineMs <= Date.now()) {
+      return { error: deadlineExceeded };
     }
     if (kb !== void 0 && kb > o.maxBytes / 1024) {
       return { error: "repository too large" };
@@ -27891,12 +27917,12 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
             maxBytes: AGENT_LIMITS.cloneMaxBytes,
             deadlineMs: opts?.deadlineMs,
             context: opts?.context ?? owned.context,
-            sizeKb: async (a) => {
+            sizeKb: async (a, options) => {
               const parts = a.split("/");
               if (parts.length !== 2)
                 return void 0;
               const [o, n] = parts;
-              return deps.gh.getRepoSize(o, n);
+              return deps.gh.getRepoSize(o, n, options);
             }
           });
           if ("dir" in r) {
@@ -28271,7 +28297,7 @@ function createGateway(token, options) {
       const r = await octokit().rest.issues.get({ owner, repo, issue_number: issue2 });
       return r.data.body ?? "";
     },
-    getRepoSize: (owner, repo) => getRepoSize(octokit(), owner, repo),
+    getRepoSize: (owner, repo, options2) => getRepoSize(octokit(), owner, repo, options2),
     listReviewThreads: async (pr) => {
       if (token === "")
         return [];

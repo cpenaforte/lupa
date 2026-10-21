@@ -15,10 +15,38 @@ export interface CloneDeps {
     args: string[],
     o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal?: AbortSignal },
   ) => Promise<CloneRunResult>;
-  sizeKb?: (alias: string) => Promise<number | undefined>;
+  sizeKb?: (alias: string, options?: { signal?: AbortSignal }) => Promise<number | undefined>;
 }
 
 const CLONE_TIMEOUT_MS = 60000;
+
+/** Bound metadata too: injected clients may ignore the forwarded abort signal. */
+async function lookupSize(
+  lookup: NonNullable<CloneDeps["sizeKb"]>,
+  alias: string,
+  context?: RequestContext,
+  deadlineMs?: number,
+): Promise<number | undefined> {
+  if (context === undefined && deadlineMs === undefined) return lookup(alias);
+  const controller = new AbortController();
+  const cancel = (): void => controller.abort();
+  context?.signal.addEventListener("abort", cancel, { once: true });
+  const timer = deadlineMs === undefined ? undefined : setTimeout(cancel, Math.max(0, deadlineMs - Date.now()));
+  let onAbort: (() => void) | undefined;
+  try {
+    if (requestExpired(context) || (deadlineMs !== undefined && deadlineMs <= Date.now())) return undefined;
+    return await new Promise<number | undefined>((resolve, reject) => {
+      onAbort = () => resolve(undefined);
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      // Both outcomes are observed even after cancellation wins the wait.
+      lookup(alias, { signal: controller.signal }).then(resolve, reject);
+    });
+  } finally {
+    clearTimeout(timer);
+    context?.signal.removeEventListener("abort", cancel);
+    if (onAbort !== undefined) controller.signal.removeEventListener("abort", onAbort);
+  }
+}
 
 /**
  * Clamps a configured git timeout to the remaining deadline budget.
@@ -182,7 +210,7 @@ export async function ensureLinkedRepo(
     timeoutMs?: number;
     maxBytes?: number;
     deps?: CloneDeps;
-    sizeKb?: (alias: string) => Promise<number | undefined>;
+    sizeKb?: CloneDeps["sizeKb"];
     deadlineMs?: number;
     context?: RequestContext;
   },
@@ -206,9 +234,12 @@ export async function ensureLinkedRepo(
   if (o.maxBytes !== undefined && deps.sizeKb) {
     let kb: number | undefined;
     try {
-      kb = await deps.sizeKb(alias);
+      kb = await lookupSize(deps.sizeKb, alias, o.context, o.deadlineMs);
     } catch {
       kb = undefined;
+    }
+    if (requestExpired(o.context) || (o.deadlineMs !== undefined && o.deadlineMs <= Date.now())) {
+      return { error: deadlineExceeded };
     }
     if (kb !== undefined && kb > o.maxBytes / 1024) {
       return { error: "repository too large" };
