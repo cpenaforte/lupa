@@ -89,6 +89,70 @@ it("owns unique container cleanup names and rejects incomplete SARIF, gitleaks, 
 
 // ---- argv / gating / pins ------------------------------------------------
 
+const INTERRUPTED_SARIF = JSON.stringify({ runs: [{
+  invocations: [{ executionSuccessful: true }],
+  results: [{ ruleId: "retained-high", level: "error", message: { text: "unsafe operation" },
+    locations: [{ physicalLocation: { artifactLocation: { uri: "src/a.ts" }, region: { startLine: 2 } } }] }],
+}] });
+const INTERRUPTIONS: { name: string; result: Partial<ProcessResult> }[] = [
+  { name: "cleanup failure after exit zero", result: { exitCode: 0, cleanupFailed: true } },
+  { name: "cancellation after exit zero", result: { exitCode: 0, cancelled: true } },
+  { name: "abnormal termination", result: { exitCode: null, signal: "SIGKILL" } },
+  { name: "timeout after exit zero", result: { exitCode: 0, timedOut: true } },
+];
+const CLEAN_PROCESS: ProcessResult = {
+  exitCode: 0, signal: null, stdout: '{"runs":[]}', stderr: "", missing: false, timedOut: false, cancelled: false,
+};
+
+it.each(INTERRUPTIONS)("retains bounded stdout findings and failure on $name", async ({ result }) => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  try {
+    for (const stdout of [INTERRUPTED_SARIF, '{"runs":[]}', "", "not SARIF"]) {
+      vi.mocked(runProcess).mockResolvedValue({ ...CLEAN_PROCESS, ...result, stdout });
+      const executed = await runExec("semgrep", [], ".");
+      const findings = fromStdout("semgrep", "semgrep", executed);
+      expect(findings.filter((finding) => finding.rule === "retained-high")).toEqual(
+        stdout === INTERRUPTED_SARIF ? [{
+          severity: "high", file: "src/a.ts", line: 2, rule: "retained-high", message: "unsafe operation",
+          source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" },
+        }] : []);
+      expect(findings.at(-1)).toMatchObject({ rule: "scanner-failed", severity: "warning", source: "semgrep" });
+      const capped = fromStdout("semgrep", "semgrep", executed, TOOL_TIMEOUT_MS, 1);
+      expect(capped.some((finding) => finding.rule === "retained-high")).toBe(false);
+      expect(capped.some((finding) => finding.rule === "scanner-failed")).toBe(true);
+    }
+  } finally {
+    vi.mocked(runProcess).mockImplementation(original);
+  }
+});
+
+it.each(INTERRUPTIONS)("retains bounded gitleaks report findings and failure on $name", async ({ result }) => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  let reportDir: string | undefined;
+  try {
+    for (const report of [INTERRUPTED_SARIF, '{"runs":[]}', "", "not SARIF", undefined]) {
+      vi.mocked(runProcess).mockImplementation(async (_command, args) => {
+        const mount = args.find((arg) => arg.endsWith(":/out"));
+        if (!mount) return CLEAN_PROCESS;
+        reportDir = mount.slice(0, -":/out".length);
+        if (report !== undefined) writeFileSync(join(reportDir, "report.sarif"), report);
+        return { ...CLEAN_PROCESS, ...result };
+      });
+      const { findings } = await runScanners({ dir: ".", baselineSha: "abc" });
+      expect(findings.filter((finding) => finding.rule === "retained-high")).toEqual(
+        report === INTERRUPTED_SARIF ? [{
+          severity: "high", file: "src/a.ts", line: 2, rule: "retained-high", message: "unsafe operation",
+          source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" },
+        }] : []);
+      expect(findings.at(-1)).toMatchObject({ rule: "scanner-failed", severity: "warning", source: "gitleaks" });
+      expect(existsSync(reportDir!)).toBe(false);
+    }
+  } finally {
+    vi.mocked(runProcess).mockImplementation(original);
+    if (reportDir) rmSync(reportDir, { recursive: true, force: true });
+  }
+});
+
 it("inherits missing SARIF severity from a referenced rule default (synthetic)", () => {
   const findings = parseSarif(JSON.stringify({ runs: [{
     tool: { driver: { rules: [{ id: "critical-rule", defaultConfiguration: { level: "error" } }] } },

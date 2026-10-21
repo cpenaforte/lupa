@@ -29,6 +29,7 @@ import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
 import { memberRulesOf } from "../src/review/thread-identity.js";
+import { fromStdout } from "../src/scanners.js";
 
 const SHA_HEAD = "a".repeat(40);
 const SHA_OTHER = "c".repeat(40);
@@ -884,6 +885,22 @@ describe("run() orchestration", () => {
     }
     expect(analysis.l2Changed).toEqual(new Set(["src b/code.ts"]));
   });
+
+  it.each([{ failed: true, timedOut: false }, { failed: false, timedOut: true }])(
+    "keeps interrupted high scanner evidence in the production high gate (%j)", async (status) => {
+      const stdout = JSON.stringify({ runs: [{
+        results: [{ ruleId: "retained-high", level: "error", message: { text: "unsafe operation" },
+          locations: [{ physicalLocation: { artifactLocation: { uri: "src/a.ts" }, region: { startLine: 2 } } }] }],
+      }] });
+      const scan = fromStdout("semgrep", "semgrep", { missing: false, code: 0, stdout, ...status });
+      const result = await runWithMocks({ failLevel: "high", llm: [], scan });
+      expect(result.exitCode).toBe(1);
+      expect(result.reviews[0]).toMatchObject({
+        event: "REQUEST_CHANGES", comments: [{ path: "src/a.ts", line: 2 }],
+      });
+      expect(scan.at(-1)).toMatchObject({ rule: "scanner-failed" });
+    },
+  );
 
   it("surfaces unresolved patch sections as safe repository warnings in both flows", async () => {
     const diff = 'diff --git a/a b/b b/c b/d\nBinary files a/a b/b and b/c b/d differ\n' + DIFF;

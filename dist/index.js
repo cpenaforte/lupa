@@ -28697,18 +28697,19 @@ function fromStdout(tool, label, r, timeoutMs = TOOL_TIMEOUT_MS, maxBytes = DEFA
   const source = sourceForLabel(label);
   if (r.missing)
     return [warning2("scanner-missing", `${label} unavailable: ${tool} not found`, source)];
-  if (r.timedOut)
-    return [warning2("scanner-failed", `${label} timed out after ${timeoutMs / 1e3}s`, source)];
-  if (r.failed)
-    return [warning2("scanner-failed", `${label} execution incomplete`, source)];
+  const interruption = r.timedOut ? warning2("scanner-failed", `${label} timed out after ${timeoutMs / 1e3}s`, source) : r.failed ? warning2("scanner-failed", `${label} execution incomplete`, source) : void 0;
   const over = byteCheck(r.stdout, maxBytes, label);
   if (over !== void 0)
-    return over;
+    return interruption ? [...over, interruption] : over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : void 0;
   if (!parsed) {
+    if (interruption)
+      return [interruption];
     return [warning2("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`, source)];
   }
   const provenanced = parsed.map((f) => ({ ...f, source, confidence: 90, evidence: { analyzer: source } }));
+  if (interruption)
+    return [...provenanced, interruption];
   const health = invocationFailed(r.stdout);
   if (health === true) {
     return [...provenanced, warning2("scanner-failed", `${label} reported an unsuccessful run`, source)];
@@ -28809,27 +28810,31 @@ async function runGitleaks(dir, timeoutMs, maxBytes, env, execution) {
     const gl = await runDocker(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), env, timeoutMs, execution, [`${reportDir}:/out`]);
     if (gl.missing)
       return [warning2("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
-    if (gl.timedOut)
-      return [warning2("scanner-failed", `gitleaks timed out after ${timeoutMs / 1e3}s`, "gitleaks")];
-    if (gl.failed)
-      return [warning2("scanner-failed", "gitleaks execution incomplete", "gitleaks")];
+    const interruption = gl.timedOut ? warning2("scanner-failed", `gitleaks timed out after ${timeoutMs / 1e3}s`, "gitleaks") : gl.failed ? warning2("scanner-failed", "gitleaks execution incomplete", "gitleaks") : void 0;
     let text;
     try {
       const capped = readCappedFileSync(hostReport, maxBytes);
       if (!capped.ok) {
-        return [warning2("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks")];
+        return [
+          warning2("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks"),
+          ...interruption ? [interruption] : []
+        ];
       }
       text = capped.text;
     } catch {
       text = void 0;
     }
     if (text === void 0) {
+      if (interruption)
+        return [interruption];
       return gl.code === 0 ? [] : [warning2("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`, "gitleaks")];
     }
     const parsed = parseSarif(text);
     if (!parsed)
-      return [warning2("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
+      return [interruption ?? warning2("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
     const provenanced = parsed.map((f) => ({ ...f, source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" } }));
+    if (interruption)
+      return [...provenanced, interruption];
     if (invocationFailed(text) === true) {
       return [...provenanced, warning2("scanner-failed", "gitleaks reported an unsuccessful run", "gitleaks")];
     }

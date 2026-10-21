@@ -280,7 +280,8 @@ function findingsExitCodes(label: string): number[] {
 /**
  * Interpret a scanner whose SARIF arrives on stdout. Fail-open: a non-zero exit (or
  * any exit) with empty/unparseable stdout is a `scanner-failed` warning, never a clean pass.
- * The `maxBytes` byte check runs before parsing (after the missing/timedOut guards).
+ * The `maxBytes` byte check runs before parsing. Interrupted execution keeps any
+ * bounded parseable findings and appends a failure, even if SARIF claims success.
  * The timeout message names the actual `timeoutMs` budget the tool ran under.
  * Parsed findings are always kept; a failed invocation appends a `scanner-failed`
  * warning, never substituted. Explicit invocation success wins over a contradictory
@@ -289,15 +290,18 @@ function findingsExitCodes(label: string): number[] {
 export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Finding[] {
   const source = sourceForLabel(label);
   if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`, source)];
-  if (r.timedOut) return [warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`, source)];
-  if (r.failed) return [warning("scanner-failed", `${label} execution incomplete`, source)];
+  const interruption = r.timedOut
+    ? warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`, source)
+    : r.failed ? warning("scanner-failed", `${label} execution incomplete`, source) : undefined;
   const over = byteCheck(r.stdout, maxBytes, label);
-  if (over !== undefined) return over;
+  if (over !== undefined) return interruption ? [...over, interruption] : over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : undefined;
   if (!parsed) {
+    if (interruption) return [interruption];
     return [warning("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`, source)];
   }
   const provenanced = parsed.map((f) => ({ ...f, source, confidence: 90, evidence: { analyzer: source } }));
+  if (interruption) return [...provenanced, interruption];
   const health = invocationFailed(r.stdout);
   if (health === true) {
     return [...provenanced, warning("scanner-failed", `${label} reported an unsuccessful run`, source)];
@@ -464,24 +468,28 @@ async function runGitleaks(dir: string, timeoutMs: number, maxBytes: number, env
       env, timeoutMs, execution, [`${reportDir}:/out`],
     );
     if (gl.missing) return [warning("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
-    if (gl.timedOut) return [warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`, "gitleaks")];
-    if (gl.failed) return [warning("scanner-failed", "gitleaks execution incomplete", "gitleaks")];
+    const interruption = gl.timedOut
+      ? warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`, "gitleaks")
+      : gl.failed ? warning("scanner-failed", "gitleaks execution incomplete", "gitleaks") : undefined;
     let text: string | undefined;
     try {
       const capped = readCappedFileSync(hostReport, maxBytes);
       if (!capped.ok) {
-        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks")];
+        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks"),
+          ...(interruption ? [interruption] : [])];
       }
       text = capped.text;
     } catch {
       text = undefined;
     }
     if (text === undefined) {
+      if (interruption) return [interruption];
       return gl.code === 0 ? [] : [warning("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`, "gitleaks")];
     }
     const parsed = parseSarif(text);
-    if (!parsed) return [warning("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
+    if (!parsed) return [interruption ?? warning("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
     const provenanced = parsed.map((f) => ({ ...f, source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" } }));
+    if (interruption) return [...provenanced, interruption];
     // Exit codes do not apply here (this path parses a report file, not a process
     // result), but invocation health still does when the SARIF carries it.
     if (invocationFailed(text) === true) {
