@@ -784,7 +784,6 @@ export const TOOL_DEFS: readonly ToolDef[] = [
         path: { type: "string", description: "Repository-relative directory path. Defaults to the repository root." },
         repo: { type: "string", description: "Repository alias; omit or use \"self\" for the reviewed repository." },
       },
-      required: ["path"],
     },
   },
   {
@@ -816,6 +815,35 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
 ];
 
+/** Validate wire argument shapes before resolving repositories or touching files.
+ * Numeric range and integer rules remain with the individual tools.
+ */
+export function validateToolArgs(name: string, args: unknown):
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; message: string } {
+  const definition = TOOL_DEFS.find((tool) => tool.name === name);
+  if (!definition) return { ok: false, message: `unknown tool: ${name}` };
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return { ok: false, message: `invalid tool arguments for ${name}: expected an object` };
+  }
+  const values = args as Record<string, unknown>;
+  const required = definition.parameters.required as string[] | undefined;
+  const properties = definition.parameters.properties as Record<string, { type: string }>;
+  for (const [field, schema] of Object.entries(properties)) {
+    if (!Object.prototype.hasOwnProperty.call(values, field)) {
+      if (required?.includes(field)) {
+        return { ok: false, message: `invalid tool arguments for ${name}: ${field} is required` };
+      }
+      continue;
+    }
+    const primitive = schema.type === "integer" ? "number" : schema.type;
+    if (typeof values[field] !== primitive) {
+      return { ok: false, message: `invalid tool arguments for ${name}: ${field} must be a ${primitive}` };
+    }
+  }
+  return { ok: true, args: values };
+}
+
 export async function executeTool(
   name: string,
   args: unknown,
@@ -828,8 +856,10 @@ export async function executeTool(
     ctx = { ...ctx, context };
     limits = { ...limits, deadlineMs: Math.min(limits?.deadlineMs ?? Infinity, context.deadlineMs) };
   }
-  const a: Record<string, unknown> = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
   try {
+    const validated = validateToolArgs(name, args);
+    if (!validated.ok) return errorResult(validated.message);
+    const a = validated.args;
     switch (name) {
       case "read_file":
         return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes, endMs: limits?.deadlineMs });
