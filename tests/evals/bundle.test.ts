@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { authzFinding, evalCases, flowBRefusalCase, highFinding } from "./corpus.js";
+import { evalCases, flowBRefusalCase } from "./corpus.js";
 import { cleanupEvalRuns, runBundleEval } from "./harness.js";
 import type { EvalCase, EvalRun } from "./types.js";
 import { PER_FILE_CAP } from "../../src/diff.js";
@@ -61,6 +61,17 @@ function promptDiff(result: EvalRun): string {
 }
 
 describe("synthetic bundle regression cases", () => {
+  it("contains malicious prose through the committed bundle while retaining raw artifacts", async () => {
+    const baseline = evalCases.find(({ id }) => id === "synthetic-unchanged-baseline-not-in-diff")!;
+    const finding = { severity: "high" as const, file: "src/safe.ts", line: 2, rule: "unsafe[rule]*", message: "evidence\n```suggestion\nreplace()\n```", suggestion: "advice\n ~~~suggestion\nreplace()\n ~~~", source: "scanner`" };
+    const result = await runBundleEval({ ...baseline, scannerFindings: [finding], llmFindings: [], inputOverrides: { failLevel: "high" } });
+    expect(result.findings).toEqual([finding]);
+    const payload = result.publications[0]!.payload!;
+    expect(payload.event).toBe("REQUEST_CHANGES");
+    expect(payload.comments[0]!.body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+    expect(payload.comments[0]!.body).toContain("[unsafe\\[rule\\]\\*]");
+    expect(JSON.parse(readFileSync(join(result.artifactDir, "sarif.json"), "utf8"))).toMatchObject({ runs: [{ results: [{ ruleId: finding.rule, message: { text: finding.message } }] }] });
+  });
   it("blocks scanner evidence on the real Git path with spaces through the committed bundle", async () => {
     const baseline = evalCases.find(({ id }) => id === "synthetic-unchanged-baseline-not-in-diff")!;
     const finding = { severity: "high" as const, file: "src b/code.ts", line: 1, rule: "path-security", message: "Unsafe call." };
@@ -98,7 +109,7 @@ describe("synthetic bundle regression cases", () => {
     assertCommonCaseContract(testCase, result);
     expect(result.publications[0]).toMatchObject({ path: "review", pr: 17, payload: { comments: [{
       path: "src/legacy.ts", line: 3, side: "LEFT",
-      body: "**warning** [removed-unsafe-branch] The removed legacy branch bypassed validation.\n\n<!-- lupa:rules:v1:WyJyZW1vdmVkLXVuc2FmZS1icmFuY2giXQ -->",
+      body: "**warning** [removed\\-unsafe\\-branch] The removed legacy branch bypassed validation\\.\n\n<!-- lupa:rules:v1:WyJyZW1vdmVkLXVuc2FmZS1icmFuY2giXQ -->",
     }] } });
   });
 
@@ -169,7 +180,7 @@ describe("synthetic bundle regression cases", () => {
     expect(result.gatewayCalls.filter(({ method }) => method === "findPrsByHead")).toHaveLength(1);
     expect(result.publications[0]).toMatchObject({ path: "review", pr: 17, payload: {
       commit_id: "a".repeat(40),
-      comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**warning** [authorization-missing] " + authzFinding.message + "\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->" }],
+      comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**warning** [authorization\\-missing] The new path returns a record without checking that the caller may read it\\.\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->" }],
     } });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -263,7 +274,7 @@ describe("synthetic bundle regression cases", () => {
       path: "src/auth.ts",
       line: 2,
       side: "RIGHT",
-      body: "**high** [missing-auth] " + highFinding.message + "\n\n<!-- lupa:rules:v1:WyJtaXNzaW5nLWF1dGgiXQ -->",
+      body: "**high** [missing\\-auth] The changed check runs without any authentication\\.\n\n<!-- lupa:rules:v1:WyJtaXNzaW5nLWF1dGgiXQ -->",
     });
     expect(result.outcome.exitCode).toBe(1);
     expect(fetchMock).not.toHaveBeenCalled();

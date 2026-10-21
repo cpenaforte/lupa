@@ -20342,6 +20342,9 @@ import { basename as basename3, dirname as dirname2, join as join6 } from "node:
 var MSG_CAP = 2e3;
 var RULE_CAP = 100;
 var TRUNC_MARK = "\u2026[truncated]";
+function escapeProse(text) {
+  return text.replace(/\\/g, "\\\\").replace(/[\x21-\x2f\x3a-\x40\x5b\x5d-\x60\x7b-\x7e]/g, "\\$&");
+}
 function capText(s, cap) {
   const cps = Array.from(s);
   if (cps.length <= cap)
@@ -25489,7 +25492,7 @@ function foldComments(body, comments, blocking, commentKeys) {
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
     const key = commentKeys?.[i] ?? null;
     const suffix = key !== null && blocking !== void 0 && !blocking.has(key) ? " (non-blocking)" : "";
-    const head = `- ${c.path}:${c.line}${suffix}`;
+    const head = `- ${escapeProse(`${c.path}:${c.line}`)}${suffix}`;
     if (text.trim() === "")
       return head;
     return `${head}
@@ -25598,7 +25601,9 @@ function asThread(n) {
     path: typeof n.path === "string" ? n.path : "",
     line,
     originalLine,
-    rule: threadRuleOf(first?.body),
+    // Modern headings are escaped display text; the versioned marker owns raw identity.
+    // Legacy bodies retain their historical heading parser without decoding ambiguity.
+    rule: rules?.[0] ?? threadRuleOf(first?.body),
     ...rules === void 0 ? {} : { rules }
   };
 }
@@ -26084,15 +26089,16 @@ function fenceFor(content) {
 function provenanceTrailer(f) {
   const parts = [];
   if (f.source !== void 0)
-    parts.push(`src:${f.source}`);
+    parts.push(`src:${escapeProse(f.source)}`);
   if (f.confidence !== void 0)
     parts.push(`conf ${f.confidence}`);
   return parts.length === 0 ? "" : `
 
-\`${parts.join(" \xB7 ")}\``;
+${parts.join(" \xB7 ")}`;
 }
 function formatBody(f, side, reopened = false) {
-  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
+  const marker = reopened ? " **reopened**" : "";
+  let body = `**${f.severity}**${marker} [${escapeProse(f.rule)}] ${escapeProse(f.message)}`;
   if (hasPatch(f)) {
     const fence = fenceFor(f.patch);
     if (side === "RIGHT") {
@@ -26113,7 +26119,7 @@ ${fence}`;
   if (hasSuggestion(f)) {
     body += `
 
-Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+Suggested: ${escapeProse(f.suggestion).replace(/\n/g, "\n  ")}`;
   }
   return body + provenanceTrailer(f);
 }
@@ -26275,7 +26281,7 @@ function buildBody(general, summary2, marks) {
   const items = general.map((f) => {
     const key = reopenedKey(f);
     const marker = reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
-    let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
+    let item = `- **${f.severity}**${marker} ${escapeProse(locate(f))} [${escapeProse(f.rule)}] ${escapeProse(f.message)}`;
     if (hasPatch(f)) {
       const fence = fenceFor(f.patch);
       item += `
@@ -26286,7 +26292,7 @@ function buildBody(general, summary2, marks) {
     }
     if (hasSuggestion(f))
       item += `
-  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+  Suggested: ${escapeProse(f.suggestion).replace(/\n/g, "\n  ")}`;
     return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
   });
   const outside = general.filter((f) => blocking?.has(reopenedKey(f)) !== true).length;
@@ -27620,7 +27626,7 @@ function foldExcessInline(withHeading, excess, blocking) {
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
     const key = c.rule === void 0 ? null : `${c.rule}\0${c.path}\0${c.line}`;
     const suffix = key !== null && blocking !== void 0 && !blocking.has(key) ? " (non-blocking)" : "";
-    const head = `- ${c.path}:${c.line}${suffix}`;
+    const head = `- ${escapeProse(`${c.path}:${c.line}`)}${suffix}`;
     if (text.trim() === "")
       return head;
     return `${head}

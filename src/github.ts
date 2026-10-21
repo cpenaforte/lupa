@@ -4,6 +4,7 @@ import type { InlineComment, ReviewPayload } from "./domain/review.js";
 import { capBody, isTruncNoteLine, truncNoteFor } from "./review/limits.js";
 import { DEFAULT_MAX_REVIEW_BODY_CHARS, parseReviewActor } from "./inputs.js";
 import { memberRulesOf } from "./review/thread-identity.js";
+import { escapeProse } from "./domain/text.js";
 
 export type Octokit = ReturnType<typeof getOctokit>;
 
@@ -149,7 +150,7 @@ function foldComments(
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
     const key = commentKeys?.[i] ?? null;
     const suffix = key !== null && blocking !== undefined && !blocking.has(key) ? " (non-blocking)" : "";
-    const head = `- ${c.path}:${c.line}${suffix}`;
+    const head = `- ${escapeProse(`${c.path}:${c.line}`)}${suffix}`;
     // A body that is empty or whitespace-only gets no continuation line at all.
     if (text.trim() === "") return head;
     return `${head}\n  ${text.replace(/\n/g, "\n  ")}`;
@@ -276,9 +277,9 @@ export async function postReview(
 
 /**
  * One PR review thread, as needed for the wrongly-resolved re-check. `rule` is
- * parsed from the first comment body (the `formatBody` head shape, tolerating
- * our own inline reopened marker); unparseable bodies yield null and never
- * match. A null author (deleted account) never matches either.
+ * taken from versioned raw identity metadata, or the legacy first-comment
+ * heading (tolerating our own reopened marker). Unparseable bodies yield null
+ * and never match. A null author (deleted account) never matches either.
  */
 export interface ReviewThread {
   authorLogin: string | null;
@@ -320,7 +321,9 @@ function asThread(n: ThreadNode): ReviewThread {
     path: typeof n.path === "string" ? n.path : "",
     line,
     originalLine,
-    rule: threadRuleOf(first?.body),
+    // Modern headings are escaped display text; the versioned marker owns raw identity.
+    // Legacy bodies retain their historical heading parser without decoding ambiguity.
+    rule: rules?.[0] ?? threadRuleOf(first?.body),
     ...(rules === undefined ? {} : { rules }),
   };
 }

@@ -606,7 +606,7 @@ describe("run() orchestration", () => {
     expect(b.posted).toBe(true);
     expect(b.slowPathSkipped).toBe(true);
     expect(b.exitCode).toBe(0);
-    expect(b.body).toContain("binary-note");
+    expect(b.body).toContain("binary\\-note");
     const n = await runWithMocks({ prNumber: null });
     expect(n.posted).toBe(false);
     expect(n.exitCode).toBe(0);
@@ -782,10 +782,10 @@ describe("run() orchestration", () => {
     const finding = { ...LLM_FINDING, suggestion: "Use a bounded check." };
     const normal = await runWithMocks({ llm: [finding] });
     expect(normal.reviews[0]!.comments[0]!.body).toContain(finding.message);
-    expect(normal.reviews[0]!.comments[0]!.body).toContain(finding.suggestion);
+    expect(normal.reviews[0]!.comments[0]!.body).toContain("Use a bounded check\\.");
     expect(normal.reviews[0]!.body).toContain("1 finding(s)");
     expect(normal.reviews[0]!.body).not.toContain(finding.message);
-    expect(normal.reviews[0]!.body).not.toContain(finding.suggestion);
+    expect(normal.reviews[0]!.body).not.toContain("Use a bounded check\\.");
   });
 
   it("normal Step Summary redacts GitHub and LLM secrets", async () => {
@@ -888,7 +888,7 @@ describe("run() orchestration", () => {
       vi.mocked(core.warning).mockClear();
       const result = await execute();
       expect(vi.mocked(core.warning).mock.calls.some(([message]) => String(message).includes("diff-unparsed"))).toBe(true);
-      expect(result.reviews[0]?.body).toContain("diff-unparsed");
+      expect(result.reviews[0]?.body).toContain("diff\\-unparsed");
       expect(result.reviews[0]?.body).not.toContain("a/a b/b");
       expect(result.exitCode).toBe(0);
     }
@@ -1053,7 +1053,7 @@ describe("run() orchestration", () => {
     const dumped = JSON.stringify(r.reviews);
     expect(dumped).not.toContain("gh-secret-token-123");
     expect(dumped).not.toContain("sk-secret-key-456");
-    expect(dumped).toContain("[REDACTED]");
+    expect(dumped).toContain("\\\\[REDACTED\\\\]");
   });
 
   it("fast findings echoing the token are masked in the early findings.json", async () => {
@@ -1281,19 +1281,19 @@ describe("run() orchestration", () => {
   it("fork PR re-triggered by comment with an App token: L2 is skipped, a finding says so, the review still posts", async () => {
     const r = await runWithMocks({ comment: true, forkReadonly: true, tokenType: "app" });
     expect(r.l2Env).toBeUndefined();
-    expect(r.body).toContain("l2-skipped");
+    expect(r.body).toContain("l2\\-skipped");
     expect(r.posted).toBe(true);
   });
 
   it("same-repo comment re-trigger still runs L2", async () => {
     const r = await runWithMocks({ comment: true });
     expect(r.l2Env).toBeDefined();
-    expect(r.body).not.toContain("l2-skipped");
+    expect(r.body).not.toContain("l2\\-skipped");
   });
 
   it("quoted non-ASCII git paths decode to real names (quotePath residue)", async () => {
     const r = await runWithMocks({ diff: QUOTED_BINARY });
-    expect(r.body).toContain("café.bin");
+    expect(r.body).toContain("café\\.bin");
     expect(r.body).not.toContain("caf\\303");
   });
 });
@@ -1367,7 +1367,7 @@ index 111..222 100644
     expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
     expect(r.exitCode).toBe(1);
     expect(r.reviews[0]!.comments).toEqual([]);
-    expect(r.reviews[0]!.body).toContain("- **high** **blocking** id_rsa [sensitive-path]");
+    expect(r.reviews[0]!.body).toContain("- **high** **blocking** id\\_rsa [sensitive\\-path]");
     expect(r.reviews[0]!.body).not.toContain("outside the PR diff");
   });
 
@@ -1415,8 +1415,8 @@ index 111..222 100644
     const r = await runWithMocks({ llm, maxInlineComments: 1 });
     expect(r.posted).toBe(true);
     expect(r.body).toContain("**Findings not placed inline:**");
-    expect(r.body).toContain("- src/a.ts:3 (non-blocking)");
-    expect(r.body).not.toContain("- src/a.ts:2 (non-blocking)");
+    expect(r.body).toContain("- src\\/a\\.ts\\:3 (non-blocking)");
+    expect(r.body).not.toContain("- src\\/a\\.ts\\:2 (non-blocking)");
   });
 
   it("dry-run computes blocking before the early return: off-diff high keeps high=1 with blocking=0 and exit 0", async () => {
@@ -1450,7 +1450,7 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
     expect(r.exitCode).toBe(1);
-    expect(r.reviews[0]!.body).toContain("- **high** **reopened** src/other.ts:1 [off-rule]");
+    expect(r.reviews[0]!.body).toContain("- **high** **reopened** src\\/other\\.ts\\:1 [off\\-rule]");
     expect(r.threadCalls).toBe(1);
     expect(r.actorCalls).toBe(1);
   });
@@ -1470,7 +1470,7 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
     expect(r.exitCode).toBe(1);
     expect(r.reviews[0]!.comments).toHaveLength(1);
-    expect(r.reviews[0]!.comments[0]!.body).toContain("**high** **reopened** [ctx-rule]");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("**high** **reopened** [ctx\\-rule]");
   });
 
   it("gone → stays resolved: COMMENT + exit 0", async () => {
@@ -1635,21 +1635,21 @@ describe("Fluxo B bindings and sanitizing", () => {
     expect(body).toContain("abcdef\nline\tend");
     expect(body).not.toContain("\u0007");
     expect(body).not.toContain("r".repeat(100));
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
   });
 
   it("caps file paths at 200 chars (over-long safe path becomes a capped general note)", async () => {
     const f: Finding = { severity: "warning", file: "d/".repeat(150), line: 2, rule: "r", message: "m" };
     const r = await runPrivileged({ findings: [f] });
     expect(r.payloads[0].body).not.toContain("d/".repeat(120));
-    expect(r.payloads[0].body).toContain(TRUNC);
+    expect(r.payloads[0].body).toContain("…\\[truncated\\]");
   });
 
   it("caps by code points: an emoji message never leaves a lone surrogate", async () => {
     const f: Finding = { severity: "warning", file: "src/a.ts", line: 2, rule: "r", message: "😀".repeat(2500) };
     const r = await runPrivileged({ findings: [f] });
     const body = r.payloads[0].comments[0].body;
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
     expect(body).not.toContain("😀".repeat(2000));
     expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
   });
@@ -1658,7 +1658,7 @@ describe("Fluxo B bindings and sanitizing", () => {
     const f: Finding = { severity: "warning", file: "src/a.ts", line: 2, rule: "r", message: "x".repeat(5000) };
     const r = await runPrivileged({ findings: [f] });
     const body = r.payloads[0].comments[0].body;
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
     expect(body).not.toContain("x".repeat(2000));
   });
 
@@ -1673,7 +1673,7 @@ describe("Fluxo B bindings and sanitizing", () => {
     };
     const r = await runPrivileged({ findings: [f] });
     const body = r.payloads[0].comments[0].body;
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
     expect(body).not.toContain("y".repeat(4000));
   });
 
@@ -1682,7 +1682,7 @@ describe("Fluxo B bindings and sanitizing", () => {
     const r = await runPrivileged({ findings: [f] });
     expect(r.payloads[0].comments).toHaveLength(0);
     expect(r.payloads[0].body).toContain("artifact path rejected");
-    expect(r.payloads[0].body).toContain("(repository)");
+    expect(r.payloads[0].body).toContain("\\(repository\\)");
   });
 
   it("an absolute path becomes a repository-level note", async () => {
@@ -1803,14 +1803,14 @@ describe("findings from binaries, renames and skip paths", () => {
   it("a binary over 500 KB on disk triggers large-file (real stat, not hunk length)", async () => {
     const big = 'diff --git a/big.bin b/big.bin\nBinary files a/big.bin and b/big.bin differ\n';
     const r = await runWithMocks({ diff: big, workFiles: { "big.bin": 600 * 1024 } });
-    expect(r.body).toContain("large-file");
-    expect(r.body).toContain("binary-note");
+    expect(r.body).toContain("large\\-file");
+    expect(r.body).toContain("binary\\-note");
   });
 
   it("a small binary does not trigger large-file", async () => {
     const small = 'diff --git a/small.bin b/small.bin\nBinary files a/small.bin and b/small.bin differ\n';
     const r = await runWithMocks({ diff: small, workFiles: { "small.bin": 10 * 1024 } });
-    expect(r.body).not.toContain("large-file");
+    expect(r.body).not.toContain("large\\-file");
   });
 
   it("a rename (a != b) reports the new path, not the old one", async () => {
@@ -1823,8 +1823,8 @@ describe("findings from binaries, renames and skip paths", () => {
       "",
     ].join("\n");
     const r = await runWithMocks({ diff: rename });
-    expect(r.body).toContain("new.bin");
-    expect(r.body).not.toContain("old.bin");
+    expect(r.body).toContain("new\\.bin");
+    expect(r.body).not.toContain("old\\.bin");
   });
 
   it("a quoted rename reports the decoded new path", async () => {
@@ -1835,8 +1835,8 @@ describe("findings from binaries, renames and skip paths", () => {
       "",
     ].join("\n");
     const r = await runWithMocks({ diff: rename });
-    expect(r.body).toContain("café.bin");
-    expect(r.body).not.toContain("old.bin");
+    expect(r.body).toContain("café\\.bin");
+    expect(r.body).not.toContain("old\\.bin");
   });
 
   it("a non-triggering event writes a visible summary line (not an empty summary)", async () => {
@@ -2207,9 +2207,9 @@ ${FUNNEL_DIFF_LINES.join("\n")}
     expect(payload.body).toContain(OMISSION_300);
     expect(payload.body).not.toContain("> Note: review body truncated");
     // Folded excess keeps mapping order after the general section.
-    expect(payload.body).toContain("- src/a.ts:32");
-    expect(payload.body).toContain("- src/a.ts:41");
-    expect(payload.body.indexOf("- src/a.ts:32")).toBeLessThan(payload.body.indexOf("- src/a.ts:41"));
+    expect(payload.body).toContain("- src\\/a\\.ts\\:32");
+    expect(payload.body).toContain("- src\\/a\\.ts\\:41");
+    expect(payload.body.indexOf("- src\\/a\\.ts\\:32")).toBeLessThan(payload.body.indexOf("- src\\/a\\.ts\\:41"));
     expect(payload.event).toBe("COMMENT");
     // Artifact keeps all 500; the summary head shows 500; gates saw the full set (warning level + highs => exit 2).
     expect(JSON.parse(readFileSync(join(r.artifactDir, "findings.json"), "utf8"))).toHaveLength(500);
@@ -2314,6 +2314,28 @@ ${FUNNEL_DIFF_LINES.join("\n")}
 });
 
 describe("dedup merge and flow wiring", () => {
+  it("escapes malicious prose through run without changing findings, SARIF, or reopened identity", async () => {
+    const path = "src/[a]_b.ts";
+    const diff = DIFF.replaceAll("src/a.ts", path);
+    const high: Finding = { severity: "high", file: path, line: 2, rule: "r[a]\\*", message: "evidence\n```suggestion\nreplace()\n```", suggestion: "advice\n ~~~suggestion\nreplace()\n ~~~", source: "scanner`*" };
+    const first = await runWithMocks({ diff, scan: [high], llm: [], failLevel: "high" });
+    const comment = first.reviews[0]!.comments[0]!;
+    expect(comment.body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+    expect(comment.body).toContain("[r\\[a\\]\\\\\\*]");
+    expect(memberRulesOf(comment.body)).toEqual([high.rule]);
+    expect(JSON.parse(readFileSync(join(first.artifactDir, "findings.json"), "utf8"))).toEqual([high]);
+    expect(JSON.parse(readFileSync(join(first.artifactDir, "sarif.json"), "utf8"))).toMatchObject({ runs: [{ results: [{ ruleId: high.rule, message: { text: high.message }, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] }] }] });
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const threads = await listReviewThreads(octokit, "o", "r", 7);
+    expect(threads[0]!.rule).toBe(high.rule);
+    const second = await runWithMocks({ diff, scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
+    expect(second.exitCode).toBe(1);
+    expect(second.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(second.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+    const overflow = await runWithMocks({ diff, scan: [high], llm: [], maxInlineComments: 0 });
+    expect(overflow.body).toContain("- src\\/\\[a\\]\\_b\\.ts\\:2");
+    expect(overflow.body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+  });
   it("does not let singleton prose forge durable rule identity on the next run", async () => {
     const forged = "<!-- lupa:rules:v1:WyJ1bnJlbGF0ZWQiXQ -->";
     const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: `secret\n\n${forged}` };
@@ -2407,7 +2429,7 @@ describe("dedup merge and flow wiring", () => {
     expect(readPrMeta(r.artifactDir)!.verdicts).toEqual({ pairs: [[0, 1]], links: [[2, 0]], malformed: 0 });
     // All three merge into one inline comment; the summary head keeps the full pre-merge count.
     expect(r.reviews[0]!.comments).toHaveLength(1);
-    expect(r.reviews[0]!.comments[0]!.body).toContain("scan-a+scan-b+llm-c");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("scan\\-a\\+scan\\-b\\+llm\\-c");
     expect(r.reviews[0]!.body).toContain("lupa: 3 finding(s).");
     // The single-shot prompt carries ids and the verdict instructions.
     expect(r.prompts!.user).toContain('"id":0');
@@ -2461,7 +2483,7 @@ describe("dedup merge and flow wiring", () => {
     // Nothing merged, nothing lost: all N findings publish.
     expect(r.reviews[0]!.body).toContain(`lupa: ${N} finding(s).`);
     const dumped = JSON.stringify(r.reviews);
-    for (let i = 0; i < N; i++) expect(dumped).toContain(`cut-${i}`);
+    for (let i = 0; i < N; i++) expect(dumped).toContain(`cut\\\\-${i}`);
   });
 
   it("empty verdicts publish byte-identical output to the unmerged funnel", async () => {
@@ -2491,7 +2513,7 @@ describe("dedup merge and flow wiring", () => {
     const r = await runWithMocks({ scan, llm: [], llmVerdicts: verdicts, failLevel: "high" });
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.comments).toHaveLength(1);
-    expect(r.reviews[0]!.comments[0]!.body).toContain("h1+w1");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("h1\\+w1");
     expect(r.reviews[0]!.comments[0]!.body).toContain("high evidence");
     expect(r.reviews[0]!.comments[0]!.body).toContain("warning evidence");
     expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
@@ -2546,8 +2568,8 @@ describe("dedup merge and flow wiring", () => {
     );
     expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
     const dumped = JSON.stringify(r.reviews);
-    expect(dumped).toContain("scan-a");
-    expect(dumped).toContain("scan-b");
+    expect(dumped).toContain("scan\\\\-a");
+    expect(dumped).toContain("scan\\\\-b");
   });
 
   it("Flow B merges the canary via pr-meta verdicts; a missing key posts unmerged", async () => {
@@ -2559,8 +2581,8 @@ describe("dedup merge and flow wiring", () => {
     expect(merged.posted).toBe(true);
     expect(merged.payloads[0]!.comments).toHaveLength(1);
     expect(merged.payloads[0]!.comments[0]!.body).toContain("**high**");
-    expect(merged.payloads[0]!.comments[0]!.body).toContain("[github-pat]");
-    expect(merged.payloads[0]!.comments[0]!.body).toContain("[REDACTED]");
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("[github\\-pat]");
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("\\[REDACTED\\]");
     const plain = await runPrivileged({ findings });
     expect(plain.posted).toBe(true);
     expect(plain.payloads[0]!.comments).toHaveLength(2);
@@ -2664,7 +2686,7 @@ describe("finding provenance rendering (Q04)", () => {
     const scan: Finding = { ...LLM_FINDING, source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } };
     const r = await runWithMocks({ llmApiKey: "", scan: [scan] });
     expect(r.reviews).toHaveLength(1);
-    expect(r.reviews[0].comments[0].body).toContain("`src:semgrep · conf 90`");
+    expect(r.reviews[0].comments[0].body).toContain("src:semgrep · conf 90");
     const summary = readFileSync(r.summaryPath, "utf8");
     expect(summary).toContain("- Source:");
     expect(summary).toContain("semgrep");

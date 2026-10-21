@@ -12,6 +12,7 @@ import { evaluateRawGate, eventFor, partitionGate, projectRenderMarks, reopenedK
 import { groupFindings } from "../review/grouping.js";
 import { memberRuleMarker, THREAD_BODY_BYTES } from "../review/thread-identity.js";
 import { capBody, omissionMarkerFor, prioritizeFindings } from "../review/limits.js";
+import { escapeProse } from "../domain/text.js";
 
 /** Logs a line and, when a summary file exists, appends it there (skip paths must leave evidence).
  * The append is best-effort: an unwritable summary path warns but never throws, so a skip path
@@ -64,7 +65,7 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
     const key = c.rule === undefined ? null : `${c.rule}\0${c.path}\0${c.line}`;
     const suffix = key !== null && blocking !== undefined && !blocking.has(key) ? " (non-blocking)" : "";
-    const head = `- ${c.path}:${c.line}${suffix}`;
+    const head = `- ${escapeProse(`${c.path}:${c.line}`)}${suffix}`;
     if (text.trim() === "") return head;
     return `${head}\n  ${text.replace(/\n/g, "\n  ")}`;
   });

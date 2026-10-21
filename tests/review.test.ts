@@ -370,7 +370,7 @@ describe("buildBody", () => {
   it("appends general findings to the summary with file:line locators", () => {
     const body = buildBody([{ severity: "warning", file: "a.ts", line: 99, rule: "r", message: "off diff" }], "Summary");
     expect(body).toBe(
-      "Summary\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **warning** a.ts:99 [r] off diff",
+      "Summary\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **warning** a\\.ts\\:99 [r] off diff",
     );
   });
 
@@ -383,7 +383,7 @@ describe("buildBody", () => {
       "S",
     );
     expect(body).toBe(
-      "S\n\n**Note:** 2 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **info** b.ts [r] no line\n- **info** (repository) [r] repo wide",
+      "S\n\n**Note:** 2 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **info** b\\.ts [r] no line\n- **info** \\(repository\\) [r] repo wide",
     );
   });
 
@@ -409,14 +409,14 @@ describe("buildBody", () => {
     const blocking = new Set([reopenedKey(blockingItem)]);
     const body = buildBody([blockingItem, offItem], "Head", { blocking });
     expect(body).toContain("**Note:** 1 finding(s) below are outside the PR diff and do not block.");
-    expect(body).toContain("- **info** **blocking** touched.bin [binary-note] bin");
-    expect(body).toContain("- **warning** a.ts:99 [r] off diff");
+    expect(body).toContain("- **info** **blocking** touched\\.bin [binary\\-note] bin");
+    expect(body).toContain("- **warning** a\\.ts\\:99 [r] off diff");
   });
 
   it("omits the note when every body item blocks", () => {
     const item: Finding = { severity: "info", file: "touched.bin", rule: "binary-note", message: "bin" };
     const body = buildBody([item], "Head", { blocking: new Set([reopenedKey(item)]) });
-    expect(body).toBe("Head\n\n**Findings not placed inline:**\n- **info** **blocking** touched.bin [binary-note] bin");
+    expect(body).toBe("Head\n\n**Findings not placed inline:**\n- **info** **blocking** touched\\.bin [binary\\-note] bin");
     expect(body).not.toContain("outside the PR diff");
   });
 
@@ -424,7 +424,7 @@ describe("buildBody", () => {
     const item: Finding = { severity: "high", file: "a.ts", line: 99, rule: "r", message: "drifted" };
     const key = reopenedKey(item);
     const body = buildBody([item], "Head", { reopened: new Set([key]), blocking: new Set([key]) });
-    expect(body).toContain("- **high** **reopened** a.ts:99 [r] drifted");
+    expect(body).toContain("- **high** **reopened** a\\.ts\\:99 [r] drifted");
     expect(body).not.toContain("**blocking**");
     // Reopened items re-block, so nothing is outside the blocking set: no note.
     expect(body).not.toContain("outside the PR diff");
@@ -569,9 +569,9 @@ describe("Q01 patch rendering", () => {
     expect(body).toContain("Suggested: explain it");
     expect(body.indexOf("**warning**")).toBeLessThan(body.indexOf("```suggestion"));
     expect(body.indexOf("```suggestion")).toBeLessThan(body.indexOf("Suggested: explain it"));
-    expect(body.indexOf("Suggested: explain it")).toBeLessThan(body.indexOf("`src:llm · conf 70`"));
+    expect(body.indexOf("Suggested: explain it")).toBeLessThan(body.indexOf("src:llm · conf 70"));
     // Trailer is fence-external: it renders after the last fence close.
-    expect(body.indexOf("`src:llm · conf 70`")).toBeGreaterThan(body.lastIndexOf("```"));
+    expect(body.indexOf("src:llm · conf 70")).toBeGreaterThan(body.lastIndexOf("```"));
   });
 
   it("RIGHT patch renders verbatim (no trim) even when whitespace-padded", () => {
@@ -632,7 +632,7 @@ describe("Q01 patch rendering", () => {
       "Summary",
     );
     expect(body).toContain(
-      "- **warning** a.ts:99 [r] off diff\n  Suggested replacement (advice only):\n  ```\n  const x = 1;\n  ```\n  Suggested: explain it",
+      "- **warning** a\\.ts\\:99 [r] off diff\n  Suggested replacement (advice only):\n  ```\n  const x = 1;\n  ```\n  Suggested: explain it",
     );
     expect(body).not.toContain("```suggestion");
   });
@@ -698,14 +698,14 @@ describe("Q01 patch rendering", () => {
       rangeFixture(),
     );
     expect(rotation.inline[0].body).not.toContain("```");
-    expect(rotation.inline[0].body).toContain("Suggested: Rotate the leaked credential immediately and audit access logs.");
+    expect(rotation.inline[0].body).toContain("Suggested: Rotate the leaked credential immediately and audit access logs\\.");
 
     const sql = mapToComments(
       [right({ suggestion: "Use a parameterized query instead of string concatenation." })],
       rangeFixture(),
     );
     expect(sql.inline[0].body).not.toContain("```");
-    expect(sql.inline[0].body).toContain("Suggested: Use a parameterized query instead of string concatenation.");
+    expect(sql.inline[0].body).toContain("Suggested: Use a parameterized query instead of string concatenation\\.");
   });
 
   it("audit pins: a genuine one-line replacement in patch still fences", () => {
@@ -1053,19 +1053,19 @@ describe("finding provenance rendering (Q04)", () => {
       [F("warning", "a.ts", 10, "r", "m", { source: "semgrep", confidence: 90 })],
       rightHunks(),
     );
-    expect(r.inline[0].body).toContain("`src:semgrep · conf 90`");
+    expect(r.inline[0].body).toContain("src:semgrep · conf 90");
   });
 
   it("inline trailer partials: source-only, confidence-only, neither", () => {
     const srcOnly = mapToComments([F("warning", "a.ts", 10, "r", "m", { source: "semgrep" })], rightHunks());
-    expect(srcOnly.inline[0].body).toContain("`src:semgrep`");
+    expect(srcOnly.inline[0].body).toContain("src:semgrep");
     expect(srcOnly.inline[0].body).not.toContain("conf");
     const confOnly = mapToComments([F("warning", "a.ts", 10, "r", "m", { confidence: 50 })], rightHunks());
-    expect(confOnly.inline[0].body).toContain("`conf 50`");
+    expect(confOnly.inline[0].body).toContain("conf 50");
     expect(confOnly.inline[0].body).not.toContain("src:");
     const neither = mapToComments([F("warning", "a.ts", 10, "r", "m")], rightHunks());
-    expect(neither.inline[0].body).not.toContain("`src:");
-    expect(neither.inline[0].body).not.toContain("`conf");
+    expect(neither.inline[0].body).not.toContain("src:");
+    expect(neither.inline[0].body).not.toContain("conf");
   });
 
   it("confidence 0 renders (never truthiness-tested)", () => {
@@ -1073,9 +1073,9 @@ describe("finding provenance rendering (Q04)", () => {
       [F("warning", "a.ts", 10, "r", "m", { source: "llm", confidence: 0 })],
       rightHunks(),
     );
-    expect(r.inline[0].body).toContain("`src:llm · conf 0`");
+    expect(r.inline[0].body).toContain("src:llm · conf 0");
     const confZeroOnly = mapToComments([F("warning", "a.ts", 10, "r", "m", { confidence: 0 })], rightHunks());
-    expect(confZeroOnly.inline[0].body).toContain("`conf 0`");
+    expect(confZeroOnly.inline[0].body).toContain("conf 0");
   });
 
   it("trailer renders AFTER the patch fence, never inside the patch", () => {
@@ -1085,7 +1085,7 @@ describe("finding provenance rendering (Q04)", () => {
     );
     const body = r.inline[0].body;
     expect(body).toContain("```suggestion\nfixed\n```");
-    expect(body.indexOf("`src:semgrep · conf 90`")).toBeGreaterThan(body.lastIndexOf("```"));
+    expect(body.indexOf("src:semgrep · conf 90")).toBeGreaterThan(body.lastIndexOf("```"));
   });
 
   it("LEFT suggestion renders the trailer after the Suggested text", () => {
@@ -1097,7 +1097,7 @@ describe("finding provenance rendering (Q04)", () => {
     expect(r.inline[0].side).toBe("LEFT");
     const body = r.inline[0].body;
     expect(body).toContain("Suggested: fixed");
-    expect(body.indexOf("`src:fastpath · conf 50`")).toBeGreaterThan(body.indexOf("Suggested: fixed"));
+    expect(body.indexOf("src:fastpath · conf 50")).toBeGreaterThan(body.indexOf("Suggested: fixed"));
   });
 
   it("general-body items render the trailer after any Suggested block", () => {
@@ -1105,8 +1105,8 @@ describe("finding provenance rendering (Q04)", () => {
       [F("warning", "a.ts", 99, "r", "off diff", { source: "llm", confidence: 70, suggestion: "fix it" })],
       "Summary",
     );
-    expect(body).toContain("`src:llm · conf 70`");
-    expect(body.indexOf("`src:llm · conf 70`")).toBeGreaterThan(body.indexOf("Suggested: fix it"));
+    expect(body).toContain("src:llm · conf 70");
+    expect(body.indexOf("src:llm · conf 70")).toBeGreaterThan(body.indexOf("Suggested: fix it"));
   });
 
   it("trailer is part of item text: it renders BEFORE any capBody cut", () => {
@@ -1114,7 +1114,7 @@ describe("finding provenance rendering (Q04)", () => {
       [F("warning", "a.ts", 99, "r", "off diff " + "x".repeat(200), { source: "semgrep", confidence: 90 })],
       "Summary",
     );
-    expect(body).toContain("`src:semgrep · conf 90`");
+    expect(body).toContain("src:semgrep · conf 90");
     const capped = capBody(body, 120, []);
     expect(capped).toContain("truncated to the 120-character limit");
     expect(Array.from(capped).length).toBeLessThanOrEqual(120);

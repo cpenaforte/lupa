@@ -51,7 +51,7 @@ describe("review module boundaries", () => {
     const result = mergeDuplicates(findings, { pairs: [[0, 1]], links: [], malformed: 0 });
     expect(result).toEqual({ merged: [{ severity: "high", file: "a.ts", line: 99, rule: "first+second", message: "[first] warning\n\n[second] high" }], dropped: 0 });
     expect(mapToComments(result.merged, [])).toEqual({ inline: [], general: result.merged });
-    expect(buildBody(result.merged, "summary")).toBe("summary\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **high** a.ts:99 [first+second] [first] warning\n\n[second] high");
+    expect(buildBody(result.merged, "summary")).toBe("summary\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **high** a\\.ts\\:99 [first\\+second] \\[first\\] warning\n\n\\[second\\] high");
     expect(buildFallbackReport(result.merged)).toBe([
       "lupa: 1 finding(s).", "", "### Finding 1", "", "- Severity: high",
       "- Location:", "```text", "a.ts:99", "```",

@@ -136,7 +136,7 @@ function summaryFor(finding: { severity: string; file: string; line: number; rul
 function inlinePayload(finding: typeof deletionFinding, side: "LEFT" | "RIGHT") {
   return {
     commit_id: "a".repeat(40), body: "lupa: 1 finding(s).", event: "COMMENT" as const,
-    comments: [{ path: finding.file, line: finding.line, side, body: `**${finding.severity}** [${finding.rule}] ${finding.message}\n\n<!-- lupa:rules:v1:WyJyZW1vdmVkLXVuc2FmZS1icmFuY2giXQ -->` }],
+    comments: [{ path: finding.file, line: finding.line, side, body: "**warning** [removed\\-unsafe\\-branch] The removed legacy branch bypassed validation\\.\n\n<!-- lupa:rules:v1:WyJyZW1vdmVkLXVuc2FmZS1icmFuY2giXQ -->" }],
   };
 }
 
@@ -154,7 +154,7 @@ const authzReviewPayload = {
     path: "src/auth.ts",
     line: 2,
     side: "RIGHT" as const,
-    body: "**warning** [authorization-missing] " + authzFinding.message + "\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->",
+    body: "**warning** [authorization\\-missing] The new path returns a record without checking that the caller may read it\\.\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->",
   }],
 };
 
@@ -202,7 +202,7 @@ export const evalCases: readonly EvalCase[] = [
             path: "src/auth.ts",
             line: 2,
             side: "RIGHT",
-            body: "**warning** [authorization-missing] " + authzFinding.message + "\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->",
+            body: "**warning** [authorization\\-missing] The new path returns a record without checking that the caller may read it\\.\n\n<!-- lupa:rules:v1:WyJhdXRob3JpemF0aW9uLW1pc3NpbmciXQ -->",
           }],
         },
       },
@@ -229,7 +229,7 @@ export const evalCases: readonly EvalCase[] = [
             path: "src/archive.ts",
             line: 2,
             side: "RIGHT",
-            body: "**warning** [shell-argument-interpolation] " + commandFinding.message + "\n\n<!-- lupa:rules:v1:WyJzaGVsbC1hcmd1bWVudC1pbnRlcnBvbGF0aW9uIl0 -->",
+            body: "**warning** [shell\\-argument\\-interpolation] Interpolating an archive name into a shell command can allow command injection\\.\n\n<!-- lupa:rules:v1:WyJzaGVsbC1hcmd1bWVudC1pbnRlcnBvbGF0aW9uIl0 -->",
           }],
         },
       },
@@ -386,7 +386,7 @@ export const evalCases: readonly EvalCase[] = [
         kind: "review",
         payload: {
           ...authzReviewPayload,
-          body: "lupa: 2 finding(s).\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **info** (repository) [l2-note] Synthetic L2 note.",
+          body: "lupa: 2 finding(s).\n\n**Note:** 1 finding(s) below are outside the PR diff and do not block.\n\n**Findings not placed inline:**\n- **info** \\(repository\\) [l2\\-note] Synthetic L2 note\\.",
         },
       },
     },
@@ -409,7 +409,7 @@ export const evalCases: readonly EvalCase[] = [
           commit_id: HEAD_SHA,
           body: "lupa: 1 finding(s).",
           event: "REQUEST_CHANGES",
-          comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**high** [missing-auth] " + highFinding.message + "\n\n<!-- lupa:rules:v1:WyJtaXNzaW5nLWF1dGgiXQ -->" }],
+          comments: [{ path: "src/auth.ts", line: 2, side: "RIGHT", body: "**high** [missing\\-auth] The changed check runs without any authentication\\.\n\n<!-- lupa:rules:v1:WyJtaXNzaW5nLWF1dGgiXQ -->" }],
         },
       },
     },
@@ -457,7 +457,7 @@ export const evalCases: readonly EvalCase[] = [
         kind: "review",
         payload: {
           commit_id: HEAD_SHA,
-          body: "lupa: 1 finding(s).\n\n**Findings not placed inline:**\n- **high** **blocking** id_rsa [sensitive-path] Sensitive file path changed: id_rsa\n  \n  \x60src:fastpath · conf 50\x60",
+          body: "lupa: 1 finding(s).\n\n**Findings not placed inline:**\n- **high** **blocking** id\\_rsa [sensitive\\-path] Sensitive file path changed\\: id\\_rsa\n  \n  src:fastpath · conf 50",
           event: "REQUEST_CHANGES",
           comments: [],
         },

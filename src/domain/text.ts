@@ -3,6 +3,12 @@ export const MSG_CAP = 2000;
 export const RULE_CAP = 100;
 export const TRUNC_MARK = "…[truncated]";
 
+/** Plain Markdown text, preserving line breaks. Escape backslashes before punctuation. */
+export function escapeProse(text: string): string {
+  // CommonMark ASCII punctuation, excluding the backslash already doubled above.
+  return text.replace(/\\/g, "\\\\").replace(/[\x21-\x2f\x3a-\x40\x5b\x5d-\x60\x7b-\x7e]/g, "\\$&");
+}
+
 /**
  * Caps by code points (not UTF-16 units), so a cut never splits a surrogate pair.
  * The cap includes the truncation marker.

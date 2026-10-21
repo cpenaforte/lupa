@@ -181,6 +181,14 @@ describe("shouldTrigger", () => {
 });
 
 describe("postReview", () => {
+  it("escapes hostile file locators on the off-diff retry", async () => {
+    const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
+    const path = "src/[a].ts\n```suggestion\nreplace()\n```";
+    await postReview(f.octokit, 7, { ...payload, comments: [{ path, line: 2, side: "RIGHT", body: "safe prose" }] });
+    const body = String(f.reviewArgs[1].body);
+    expect(body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+    expect(body).toContain("src\\/\\[a\\]\\.ts");
+  });
   it("422 off-diff degrades to general and retries once; stale sha throws StaleHeadError", async () => {
     const calls: string[] = [];
     const r = await postReviewWithMock(calls);
@@ -208,7 +216,7 @@ describe("postReview", () => {
     await postReview(f.octokit, 7, payload);
     const retry = f.reviewArgs[1];
     expect(retry.comments).toEqual([]);
-    expect(String(retry.body)).toContain("a.ts:4");
+    expect(String(retry.body)).toContain("a\\.ts\\:4");
     expect(String(retry.body)).toContain("**high** [r] m");
     expect(retry.pull_number).toBe(7);
     expect(retry.owner).toBe("owner");
@@ -223,7 +231,7 @@ describe("postReview", () => {
     const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
     await postReview(f.octokit, 1, multi);
     const body = String(f.reviewArgs[1].body);
-    expect(body).toContain("- b.ts:9\n  **medium** [r] first\n  second line\n  third line");
+    expect(body).toContain("- b\\.ts\\:9\n  **medium** [r] first\n  second line\n  third line");
   });
 
   it("CRLF and stray CR in a comment body are normalized before the fold indent", async () => {
@@ -234,7 +242,7 @@ describe("postReview", () => {
     const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
     await postReview(f.octokit, 1, crlf);
     const body = String(f.reviewArgs[1].body);
-    expect(body).toContain("- c.ts:2\n  first\n  second\n  third");
+    expect(body).toContain("- c\\.ts\\:2\n  first\n  second\n  third");
     expect(body).not.toContain("\r");
   });
 
@@ -246,7 +254,7 @@ describe("postReview", () => {
     const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
     await postReview(f.octokit, 1, trailing);
     const body = String(f.reviewArgs[1].body);
-    expect(body.endsWith("- d.ts:5\n  only line")).toBe(true);
+    expect(body.endsWith("- d\\.ts\\:5\n  only line")).toBe(true);
     expect(body).not.toMatch(/\n[ \t]+$/);
   });
 
@@ -259,7 +267,7 @@ describe("postReview", () => {
       const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
       await postReview(f.octokit, 1, empty);
       const folded = String(f.reviewArgs[1].body);
-      expect(folded.endsWith("- e.ts:6")).toBe(true);
+      expect(folded.endsWith("- e\\.ts\\:6")).toBe(true);
       expect(folded).not.toMatch(/\n[ \t]*$/);
     }
   });
@@ -406,9 +414,9 @@ describe("postReview fold non-blocking markers", () => {
       commentKeys: [keyFor("rA", "a.ts", 4), keyFor("rB", "b.ts", 9)],
     });
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).toContain("- a.ts:4 (non-blocking)");
-    expect(body).toContain("- b.ts:9\n ");
-    expect(body).not.toContain("- b.ts:9 (non-blocking)");
+    expect(body).toContain("- a\\.ts\\:4 (non-blocking)");
+    expect(body).toContain("- b\\.ts\\:9\n ");
+    expect(body).not.toContain("- b\\.ts\\:9 (non-blocking)");
   });
 
   it("treats a null key as blocking (no marker)", async () => {
@@ -418,8 +426,8 @@ describe("postReview fold non-blocking markers", () => {
       commentKeys: [null, keyFor("rB", "b.ts", 9)],
     });
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).not.toContain("- a.ts:4 (non-blocking)");
-    expect(body).toContain("- a.ts:4\n ");
+    expect(body).not.toContain("- a\\.ts\\:4 (non-blocking)");
+    expect(body).toContain("- a\\.ts\\:4\n ");
   });
 
   it("treats a length mismatch as blocking (no marker on the unkeyed tail)", async () => {
@@ -429,15 +437,15 @@ describe("postReview fold non-blocking markers", () => {
       commentKeys: [keyFor("rA", "a.ts", 4)],
     });
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).toContain("- a.ts:4 (non-blocking)");
-    expect(body).not.toContain("- b.ts:9 (non-blocking)");
+    expect(body).toContain("- a\\.ts\\:4 (non-blocking)");
+    expect(body).not.toContain("- b\\.ts\\:9 (non-blocking)");
   });
 
   it("emits no markers without blocking keys (hand-built comments stay marker-free)", async () => {
     const f = fakeOctokit([offDiff(), "ok"]);
     await postReview(f.octokit, 1, blockingPayload);
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).toContain("- a.ts:4\n ");
+    expect(body).toContain("- a\\.ts\\:4\n ");
     expect(body).not.toContain("(non-blocking)");
   });
 });
@@ -525,7 +533,7 @@ describe("postReview fold re-cap", () => {
     expect(retry).not.toContain("99999");
     expect(noteCount(retry)).toBe(1);
     expect(retry.endsWith("> Note: review body truncated to the 500-character limit.")).toBe(true);
-    expect(retry).toContain("- a.ts:4");
+    expect(retry).toContain("- a\\.ts\\:4");
   });
 
   it("backs up before an indented folded fence when the cut lands inside it", async () => {
@@ -557,7 +565,7 @@ describe("postReview fold re-cap", () => {
     await postReview(f.octokit, 1, testPayload, { maxBodyChars: 60000 });
     const retry = String(f.reviewArgs[1].body);
     expect(noteCount(retry)).toBe(0);
-    expect(retry).toContain("- a.ts:4");
+    expect(retry).toContain("- a\\.ts\\:4");
   });
 });
 

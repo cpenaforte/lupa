@@ -2,7 +2,7 @@ import { unsafePath } from "../domain/finding.js";
 import type { Finding } from "../domain/finding.js";
 import type { ParsedHunk } from "../domain/diff.js";
 import type { InlineComment } from "../domain/review.js";
-import { redact } from "../domain/text.js";
+import { escapeProse, redact } from "../domain/text.js";
 import { hunkHit, indexHunks, isValidLine, reopenedKey } from "./policy.js";
 import { hasPatch } from "./limits.js";
 
@@ -24,19 +24,20 @@ function fenceFor(content: string): string {
 }
 
 /**
- * Provenance trailer (Q04, display-only): compact `` `src:<source> · conf <n>` ``
+ * Provenance trailer (Q04, display-only): escaped text `src:<source> · conf <n>`
  * appended after the message/suggestion/patch — AFTER any patch fence or
  * `Suggested:` block, never inside a patch. Partials: source-only renders
- * `` `src:<source>` ``, confidence-only `` `conf <n>` ``, neither renders
+ * `src:<source>`, confidence-only `conf <n>`, neither renders
  * nothing. `confidence: 0` renders (`conf 0` — presence-tested, never
  * truthiness-tested). The trailer is part of the item text: it is appended
  * before any `capBody` cut and may be truncated with the item.
  */
 function provenanceTrailer(f: Finding): string {
   const parts: string[] = [];
-  if (f.source !== undefined) parts.push(`src:${f.source}`);
+  if (f.source !== undefined) parts.push(`src:${escapeProse(f.source)}`);
   if (f.confidence !== undefined) parts.push(`conf ${f.confidence}`);
-  return parts.length === 0 ? "" : `\n\n\`${parts.join(" · ")}\``;
+  // Code spans do not honor backslash escapes, so untrusted text belongs in prose.
+  return parts.length === 0 ? "" : `\n\n${parts.join(" · ")}`;
 }
 
 /**
@@ -48,11 +49,12 @@ function provenanceTrailer(f: Finding): string {
  * when present, always renders as `Suggested:` advice text — on RIGHT hits too,
  * it no longer fences anywhere. A reopened finding renders `**reopened**`
  * between the severity and the rule (`**high** **reopened** [rule] ...`) — the
- * thread-fetch rule parser tolerates this marker, so a re-posted thread stays
- * parseable.
+ * legacy thread-fetch parser tolerates this marker; newer threads carry raw
+ * rule identity separately from the escaped display heading.
  */
 export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened = false): string {
-  let body = reopened ? `**${f.severity}** **reopened** [${f.rule}] ${f.message}` : `**${f.severity}** [${f.rule}] ${f.message}`;
+  const marker = reopened ? " **reopened**" : "";
+  let body = `**${f.severity}**${marker} [${escapeProse(f.rule)}] ${escapeProse(f.message)}`;
   if (hasPatch(f)) {
     const fence = fenceFor(f.patch);
     if (side === "RIGHT") {
@@ -62,7 +64,7 @@ export function formatBody(f: Finding, side: "LEFT" | "RIGHT", reopened = false)
     }
   }
   if (hasSuggestion(f)) {
-    body += `\n\nSuggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+    body += `\n\nSuggested: ${escapeProse(f.suggestion).replace(/\n/g, "\n  ")}`;
   }
   return body + provenanceTrailer(f);
 }
@@ -258,12 +260,12 @@ export function buildBody(
     const key = reopenedKey(f);
     const marker =
       reopened?.has(key) === true ? " **reopened**" : blocking?.has(key) === true ? " **blocking**" : "";
-    let item = `- **${f.severity}**${marker} ${locate(f)} [${f.rule}] ${f.message}`;
+    let item = `- **${f.severity}**${marker} ${escapeProse(locate(f))} [${escapeProse(f.rule)}] ${escapeProse(f.message)}`;
     if (hasPatch(f)) {
       const fence = fenceFor(f.patch);
       item += `\n  Suggested replacement (advice only):\n  ${fence}\n  ${f.patch.replace(/\n/g, "\n  ")}\n  ${fence}`;
     }
-    if (hasSuggestion(f)) item += `\n  Suggested: ${f.suggestion.replace(/\n/g, "\n  ")}`;
+    if (hasSuggestion(f)) item += `\n  Suggested: ${escapeProse(f.suggestion).replace(/\n/g, "\n  ")}`;
     return item + provenanceTrailer(f).replace(/\n/g, "\n  ");
   });
   const outside = general.filter((f) => blocking?.has(reopenedKey(f)) !== true).length;
