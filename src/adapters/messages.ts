@@ -38,8 +38,10 @@ type MessagesReply =
 /**
  * Builds the Anthropic Messages request body from a neutral conversation. Shared
  * by the single-shot `callMessages` (no turns, `allowTools:false`) and the agent
- * turn variant: `tools` only when `allowTools` (as `input_schema`); there is no
- * `response_format` on this protocol, so `allowFormat` never adds a field.
+ * turn variant: declared tools stay in the prefix after an assistant reply,
+ * with `tool_choice:none` when selection is disabled. A fresh no-tools request
+ * omits tools. There is no `response_format` on this protocol, so `allowFormat`
+ * never adds a field.
  * Consecutive tool-result turns collapse into ONE user message (the API wants
  * every `tool_result` block for a parallel call set in a single user turn).
  */
@@ -90,12 +92,16 @@ function buildMessagesBody(
     system: conv.system,
     messages,
   };
-  if (flags.allowTools && conv.tools !== undefined) {
+  // Signed thinking is bound to the established system/tools/message prefix.
+  // Disabling selection must not remove definitions from a continuation.
+  const hasAssistantHistory = conv.turns?.some((turn) => turn.role === "assistant") ?? false;
+  if (conv.tools !== undefined && (flags.allowTools || hasAssistantHistory)) {
     body.tools = conv.tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters,
     }));
+    if (!flags.allowTools) body.tool_choice = { type: "none" };
   }
   if (o.temperature !== undefined) body.temperature = o.temperature;
   if (o.topP !== undefined) body.top_p = o.topP;

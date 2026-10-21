@@ -234,6 +234,80 @@ describe("callMessagesTurn", () => {
     expect(body.tools).toEqual([
       { name: "read_file", description: "Read a file", input_schema: toolDef.parameters },
     ]);
+    expect(body).not.toHaveProperty("tool_choice");
+  });
+
+  it.each(["forced-final", "repair"])("%s retains established definitions and opaque signed history", async (mode) => {
+    const raw = [
+      { type: "thinking", thinking: "Inspect first.\n", signature: "signed+/=\nopaque" },
+      { type: "redacted_thinking", data: "encrypted+/=" },
+      { type: "text", text: "I will inspect." },
+      { type: "tool_use", id: "native-1", name: "read_file", input: { path: "a.ts" }, extra: { opaque: true } },
+    ];
+    const repairRaw = [{ type: "thinking", thinking: "", signature: "next-signature" }, { type: "text", text: "not JSON" }];
+    stubFetch((_call, n) => json(200, okMessages("", {
+      content: n === 1 ? raw : repairRaw,
+      stop_reason: n === 1 ? "tool_use" : "end_turn",
+    })));
+    const c: Conversation = {
+      system: "s", user: "u", tools: [toolDef,
+        { name: "list_files", description: "List files", parameters: { type: "object", properties: {} } },
+        { name: "search", description: "Search", parameters: { type: "object", required: ["query"], properties: { query: { type: "string" } } } },
+        { name: "read_diff", description: "Read diff", parameters: { type: "object" } },
+      ],
+    };
+    const first = await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("expected native tool reply");
+    const established = lastBody();
+    expect(established.tools).toHaveLength(4);
+    expect(established).not.toHaveProperty("tool_choice");
+    c.turns = [
+      { role: "assistant", text: first.text, toolCalls: first.toolCalls, rawItems: first.rawItems },
+      { role: "tool", id: "native-1", name: "read_file", output: '{"content":"source"}' },
+    ];
+    if (mode === "repair") {
+      const next = await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+      expect(next.ok).toBe(true);
+      expect(lastBody()).not.toHaveProperty("tool_choice");
+      expect(JSON.stringify(lastBody().tools)).toBe(JSON.stringify(established.tools));
+      if (!next.ok) throw new Error("expected invalid final reply");
+      c.turns.push({ role: "assistant", text: next.text, toolCalls: next.toolCalls, rawItems: next.rawItems });
+    }
+    c.turns.push({ role: "user", text: mode === "repair" ? "Repair JSON." : "Finalize JSON." });
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), { allowTools: false, allowFormat: true });
+    const final = lastBody();
+    expect(JSON.stringify(final.tools)).toBe(JSON.stringify(established.tools));
+    expect(final.tool_choice).toEqual({ type: "none" });
+    expect(final.system).toBe(established.system);
+    const messages = final.messages as Array<{ role: string; content: unknown }>;
+    expect(messages[0]).toEqual({ role: "user", content: "u" });
+    expect(JSON.stringify(messages[1]!.content)).toBe(JSON.stringify(raw));
+    expect(messages[2]).toEqual({ role: "user", content: [{ type: "tool_result", tool_use_id: "native-1", content: '{"content":"source"}' }] });
+    if (mode === "repair") expect(JSON.stringify(messages[3]!.content)).toBe(JSON.stringify(repairRaw));
+  });
+
+  it("no-tools first request omits tool fields even when tools are configured", async () => {
+    await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), { allowTools: false, allowFormat: true });
+    expect(lastBody()).not.toHaveProperty("tools");
+    expect(lastBody()).not.toHaveProperty("tool_choice");
+  });
+
+  it("repair after signed thinking without a tool call retains declared tools", async () => {
+    const raw = [{ type: "thinking", thinking: "", signature: "signed-no-call" }, { type: "text", text: "invalid JSON" }];
+    stubFetch(() => json(200, okMessages("", { content: raw })));
+    const c = conv();
+    const first = await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    const established = lastBody().tools;
+    if (!first.ok) throw new Error("expected native assistant reply");
+    c.turns = [
+      { role: "assistant", text: first.text, toolCalls: first.toolCalls, rawItems: first.rawItems },
+      { role: "user", text: "Repair JSON." },
+    ];
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), { allowTools: false, allowFormat: true });
+    expect(lastBody().tools).toEqual(established);
+    expect(lastBody().tool_choice).toEqual({ type: "none" });
+    expect((lastBody().messages as Array<{ content: unknown }>)[1]!.content).toEqual(raw);
   });
 
   it("never adds format fields (no structured output on this protocol)", async () => {

@@ -109,6 +109,7 @@ export async function runAgent(
     let calls = 0;
     let bytes = 0;
     let toolsUnsupported = false;
+    let toolsRejected = false;
     let usageInput = 0;
     let usageOutput = 0;
     let usageCalls = 0;
@@ -130,6 +131,9 @@ export async function runAgent(
       probeAdvance: boolean,
     ): AgentOutcome => {
       const ms = elapsedMs();
+      if (toolsUnsupported && result.ok) {
+        hooks.log("agent tools unsupported for this model: using single-shot");
+      }
       hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1000}s`);
       return {
         result,
@@ -172,7 +176,11 @@ export async function runAgent(
       // The model call starts before the race timer so a synchronous throw
       // cannot leak a live timer (async adapters are unaffected: the timer
       // still guards the in-flight promise identically).
-      const inner = hooks.call(conv, flags, { ...opts, context });
+      // A rejected first declaration established no native tool prefix. Keep
+      // its fallback and repair tools-free without changing the caller's
+      // canonical definitions or opaque assistant items.
+      const requestConv = toolsRejected ? { ...conv, tools: undefined } : conv;
+      const inner = hooks.call(requestConv, flags, { ...opts, context });
       // Adapters resolve by contract and never reject; this is timer hygiene
       // for the dangling promise after a race win.
       inner.then(undefined, () => {});
@@ -223,6 +231,7 @@ export async function runAgent(
             const retryExpired = timedOut();
             if (retryExpired) return retryExpired;
             const retryRemaining = deadline - clock();
+            toolsRejected = true;
             const retried = await callWithDeadline(
               { ...NO_TOOLS },
               { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline },
@@ -236,6 +245,9 @@ export async function runAgent(
               toolsUnsupported = true;
               return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
             }
+            // The endpoint accepted the no-tools request even if its text
+            // needs repair. Keep that capability if repair is cancelled.
+            toolsUnsupported = true;
             const parsed = tryParseFinal(retry.text);
             appendAssistant(retry);
             if (parsed.ok) {

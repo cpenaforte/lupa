@@ -29609,12 +29609,15 @@ function buildMessagesBody(conv, o, flags) {
     system: conv.system,
     messages
   };
-  if (flags.allowTools && conv.tools !== void 0) {
+  const hasAssistantHistory = conv.turns?.some((turn) => turn.role === "assistant") ?? false;
+  if (conv.tools !== void 0 && (flags.allowTools || hasAssistantHistory)) {
     body.tools = conv.tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters
     }));
+    if (!flags.allowTools)
+      body.tool_choice = { type: "none" };
   }
   if (o.temperature !== void 0)
     body.temperature = o.temperature;
@@ -30051,6 +30054,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     let calls = 0;
     let bytes = 0;
     let toolsUnsupported = false;
+    let toolsRejected = false;
     let usageInput = 0;
     let usageOutput = 0;
     let usageCalls = 0;
@@ -30064,6 +30068,9 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     };
     const finish = (result, stop, probeAdvance) => {
       const ms = elapsedMs();
+      if (toolsUnsupported && result.ok) {
+        hooks.log("agent tools unsupported for this model: using single-shot");
+      }
       hooks.log(`agent done: turns=${turns} calls=${calls} bytes=${bytes} stop=${stop} elapsed=${ms / 1e3}s`);
       return {
         result,
@@ -30090,7 +30097,8 @@ async function runAgent(conv, toolCtx, budget, hooks) {
       const ms = deadline - nowMs;
       if (requestExpired(context3) || ms <= 0)
         return Promise.resolve({ reply: timeoutReply(), raced: true });
-      const inner = hooks.call(conv, flags, { ...opts, context: context3 });
+      const requestConv = toolsRejected ? { ...conv, tools: void 0 } : conv;
+      const inner = hooks.call(requestConv, flags, { ...opts, context: context3 });
       inner.then(void 0, () => {
       });
       let timer;
@@ -30140,6 +30148,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
             if (retryExpired)
               return retryExpired;
             const retryRemaining = deadline - clock();
+            toolsRejected = true;
             const retried = await callWithDeadline({ ...NO_TOOLS }, { timeoutSeconds: timeoutFor(retryRemaining), deadlineMs: deadline }, deadline - retryRemaining);
             if (retried.raced)
               return finish(timeoutLlmResult(), "budget", false);
@@ -30150,6 +30159,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
               toolsUnsupported = true;
               return finish(retry.result, "fallback", s2 === 400 || s2 === 404);
             }
+            toolsUnsupported = true;
             const parsed = tryParseFinal(retry.text);
             appendAssistant(retry);
             if (parsed.ok) {

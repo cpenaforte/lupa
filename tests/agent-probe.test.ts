@@ -39,6 +39,11 @@ function probeBudgets(): Array<{ deadlineMs?: number }> {
 
 const FINDING = { severity: "warning", file: "src/a.ts", line: 2, rule: "logic", message: "m", suggestion: "sug" };
 const FINDINGS_JSON = JSON.stringify({ findings: [FINDING] });
+const FALLBACK_NOTICE = "agent tools unsupported for this model: using single-shot";
+
+function fallbackNotices(): string[] {
+  return vi.mocked(core.info).mock.calls.map(([message]) => String(message)).filter((message) => message === FALLBACK_NOTICE);
+}
 
 const CHAT_OK = { choices: [{ finish_reason: "stop", message: { content: FINDINGS_JSON } }] };
 const RESPONSES_OK = {
@@ -130,7 +135,9 @@ describe("callWithProbeAgent", () => {
     expect(r.result).toEqual({ ok: true, findings: [FINDING] });
     expect(r.via).toBe("openai-chat");
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+    expect(fallbackNotices()).toHaveLength(1);
     // Next call for the same model: single-shot, no tools attached.
+    vi.mocked(core.info).mockClear();
     vi.mocked(fetch).mockClear();
     const r2 = await callWithProbeAgent("opencode-zen", "ap2-model", ZEN, "k", conv(), AGENT_O, TOOL_CTX);
     // Single-shot fallback goes through callLlm, so it carries verdicts (empty here).
@@ -142,6 +149,71 @@ describe("callWithProbeAgent", () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(bodies()[0]).not.toContain('"tools"');
     expect(vi.mocked(core.info)).toHaveBeenCalledWith("agent tools unsupported for this model: using single-shot");
+    expect(fallbackNotices()).toHaveLength(1);
+  });
+
+  it.each(["openai-chat", "anthropic-messages"] as const)("explicit %s exposes the first fallback exactly once", async (style) => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (body.tools) return new Response("bad tools", { status: 400 });
+      return new Response(JSON.stringify(style === "openai-chat" ? CHAT_OK : {
+        type: "message", role: "assistant", content: [{ type: "text", text: FINDINGS_JSON }], stop_reason: "end_turn",
+      }), { status: 200 });
+    }));
+    const out = await callWithProbeAgent("opencode-zen", "explicit-fallback", ZEN, "k", conv(), AGENT_O, TOOL_CTX, style);
+    expect(out.result).toEqual({ ok: true, findings: [FINDING] });
+    expect(out.via).toBe(style);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+    expect(fallbackNotices()).toHaveLength(1);
+  });
+
+  it("native unsupported-tools fallback keeps its invalid-JSON repair tools-free", async () => {
+    const c = conv();
+    const originalTools = structuredClone(c.tools);
+    const raw = [{ type: "thinking", thinking: "", signature: "fallback-signature" }, { type: "text", text: "invalid JSON" }];
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const count = vi.mocked(fetch).mock.calls.length;
+      if (count === 1) return new Response("bad tools", { status: 400 });
+      return new Response(JSON.stringify({ type: "message", role: "assistant", content: count === 2 ? raw : [{ type: "text", text: FINDINGS_JSON }], stop_reason: "end_turn" }), { status: 200 });
+    }));
+    const out = await callWithProbeAgent("opencode-zen", "native-fallback-repair", ZEN, "k", c, AGENT_O, TOOL_CTX, "anthropic-messages");
+    expect(out.result).toEqual({ ok: true, findings: [FINDING] });
+    const sent = bodies().map((body) => JSON.parse(body) as Record<string, unknown>);
+    expect(sent).toHaveLength(3);
+    expect(sent[0]!.tools).toBeDefined();
+    for (const body of sent.slice(1)) {
+      expect(body).not.toHaveProperty("tools");
+      expect(body).not.toHaveProperty("tool_choice");
+    }
+    expect((sent[2]!.messages as Array<{ content: unknown }>)[1]!.content).toEqual(raw);
+    expect(c.tools).toEqual(originalTools);
+    expect(fallbackNotices()).toHaveLength(1);
+  });
+
+  it("direct native endpoint exposes its first successful fallback exactly once", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return body.tools ? new Response("bad tools", { status: 400 }) : new Response(JSON.stringify({
+        type: "message", role: "assistant", content: [{ type: "text", text: FINDINGS_JSON }], stop_reason: "end_turn",
+      }), { status: 200 });
+    }));
+    const result = await callByStyleAgent(
+      buildEndpointForStyle("opencode-zen", "direct-fallback", ZEN, "k", "anthropic-messages", null, false),
+      conv(), { ...AGENT_O, model: "direct-fallback", apiKey: "k", provider: "opencode-zen" }, TOOL_CTX,
+    );
+    expect(result).toEqual({ ok: true, findings: [FINDING] });
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+    expect(fallbackNotices()).toHaveLength(1);
+  });
+
+  it.each(["refusal", "invalid-json"])("failed native fallback (%s) emits no success notice", async (failure) => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (vi.mocked(fetch).mock.calls.length === 1) return new Response("bad tools", { status: 400 });
+      return new Response(JSON.stringify({ type: "message", role: "assistant", content: [{ type: "text", text: "invalid JSON" }], stop_reason: failure === "refusal" ? "refusal" : "end_turn" }), { status: 200 });
+    }));
+    const out = await callWithProbeAgent("opencode-zen", "failed-fallback", ZEN, "k", conv(), AGENT_O, TOOL_CTX, "anthropic-messages");
+    expect(out.result).toMatchObject({ ok: false, reason: failure === "refusal" ? "content-filter" : "invalid-json" });
+    expect(fallbackNotices()).toHaveLength(0);
   });
 
   it("memo single-shot path strips provenance from findings but keeps verdicts", async () => {
