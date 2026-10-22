@@ -1013,16 +1013,16 @@ var require_util = __commonJS({
     function isStream(obj) {
       return obj && typeof obj === "object" && typeof obj.pipe === "function" && typeof obj.on === "function";
     }
-    function isBlobLike(object) {
-      if (object === null) {
+    function isBlobLike(object2) {
+      if (object2 === null) {
         return false;
-      } else if (object instanceof Blob2) {
+      } else if (object2 instanceof Blob2) {
         return true;
-      } else if (typeof object !== "object") {
+      } else if (typeof object2 !== "object") {
         return false;
       } else {
-        const sTag = object[Symbol.toStringTag];
-        return (sTag === "Blob" || sTag === "File") && ("stream" in object && typeof object.stream === "function" || "arrayBuffer" in object && typeof object.arrayBuffer === "function");
+        const sTag = object2[Symbol.toStringTag];
+        return (sTag === "Blob" || sTag === "File") && ("stream" in object2 && typeof object2.stream === "function" || "arrayBuffer" in object2 && typeof object2.arrayBuffer === "function");
       }
     }
     function buildURL(url, queryParams) {
@@ -1304,8 +1304,8 @@ var require_util = __commonJS({
         }
       );
     }
-    function isFormDataLike(object) {
-      return object && typeof object === "object" && typeof object.append === "function" && typeof object.delete === "function" && typeof object.get === "function" && typeof object.getAll === "function" && typeof object.has === "function" && typeof object.set === "function" && object[Symbol.toStringTag] === "FormData";
+    function isFormDataLike(object2) {
+      return object2 && typeof object2 === "object" && typeof object2.append === "function" && typeof object2.delete === "function" && typeof object2.get === "function" && typeof object2.getAll === "function" && typeof object2.has === "function" && typeof object2.set === "function" && object2[Symbol.toStringTag] === "FormData";
     }
     function addAbortListener(signal, listener) {
       if ("addEventListener" in signal) {
@@ -4130,8 +4130,8 @@ var require_util2 = __commonJS({
       }
       return "allowed";
     }
-    function isErrorLike(object) {
-      return object instanceof Error || (object?.constructor?.name === "Error" || object?.constructor?.name === "DOMException");
+    function isErrorLike(object2) {
+      return object2 instanceof Error || (object2?.constructor?.name === "Error" || object2?.constructor?.name === "DOMException");
     }
     function isValidReasonPhrase(statusText) {
       for (let i = 0; i < statusText.length; ++i) {
@@ -4556,7 +4556,7 @@ var require_util2 = __commonJS({
         return new FastIterableIterator(target, kind);
       };
     }
-    function iteratorMixin(name, object, kInternalIterator, keyIndex = 0, valueIndex = 1) {
+    function iteratorMixin(name, object2, kInternalIterator, keyIndex = 0, valueIndex = 1) {
       const makeIterator = createIterator(name, kInternalIterator, keyIndex, valueIndex);
       const properties = {
         keys: {
@@ -4564,7 +4564,7 @@ var require_util2 = __commonJS({
           enumerable: true,
           configurable: true,
           value: function keys() {
-            webidl.brandCheck(this, object);
+            webidl.brandCheck(this, object2);
             return makeIterator(this, "key");
           }
         },
@@ -4573,7 +4573,7 @@ var require_util2 = __commonJS({
           enumerable: true,
           configurable: true,
           value: function values() {
-            webidl.brandCheck(this, object);
+            webidl.brandCheck(this, object2);
             return makeIterator(this, "value");
           }
         },
@@ -4582,7 +4582,7 @@ var require_util2 = __commonJS({
           enumerable: true,
           configurable: true,
           value: function entries() {
-            webidl.brandCheck(this, object);
+            webidl.brandCheck(this, object2);
             return makeIterator(this, "key+value");
           }
         },
@@ -4591,7 +4591,7 @@ var require_util2 = __commonJS({
           enumerable: true,
           configurable: true,
           value: function forEach(callbackfn, thisArg = globalThis) {
-            webidl.brandCheck(this, object);
+            webidl.brandCheck(this, object2);
             webidl.argumentLengthCheck(arguments, 1, `${name}.forEach`);
             if (typeof callbackfn !== "function") {
               throw new TypeError(
@@ -4604,7 +4604,7 @@ var require_util2 = __commonJS({
           }
         }
       };
-      return Object.defineProperties(object.prototype, {
+      return Object.defineProperties(object2.prototype, {
         ...properties,
         [Symbol.iterator]: {
           writable: true,
@@ -5004,8 +5004,8 @@ var require_file = __commonJS({
       }
     };
     webidl.converters.Blob = webidl.interfaceConverter(Blob2);
-    function isFileLike(object) {
-      return object instanceof File || object && (typeof object.stream === "function" || typeof object.arrayBuffer === "function") && object[Symbol.toStringTag] === "File";
+    function isFileLike(object2) {
+      return object2 instanceof File || object2 && (typeof object2.stream === "function" || typeof object2.arrayBuffer === "function") && object2[Symbol.toStringTag] === "File";
     }
     module.exports = { FileLike, isFileLike };
   }
@@ -5453,12 +5453,12 @@ var require_body = __commonJS({
         }
       });
     }
-    function extractBody(object, keepalive = false) {
+    function extractBody(object2, keepalive = false) {
       let stream = null;
-      if (object instanceof ReadableStream) {
-        stream = object;
-      } else if (isBlobLike(object)) {
-        stream = object.stream();
+      if (object2 instanceof ReadableStream) {
+        stream = object2;
+      } else if (isBlobLike(object2)) {
+        stream = object2.stream();
       } else {
         stream = new ReadableStream({
           async pull(controller) {
@@ -5478,17 +5478,17 @@ var require_body = __commonJS({
       let source = null;
       let length = null;
       let type = null;
-      if (typeof object === "string") {
-        source = object;
+      if (typeof object2 === "string") {
+        source = object2;
         type = "text/plain;charset=UTF-8";
-      } else if (object instanceof URLSearchParams) {
-        source = object.toString();
+      } else if (object2 instanceof URLSearchParams) {
+        source = object2.toString();
         type = "application/x-www-form-urlencoded;charset=UTF-8";
-      } else if (isArrayBuffer(object)) {
-        source = new Uint8Array(object.slice());
-      } else if (ArrayBuffer.isView(object)) {
-        source = new Uint8Array(object.buffer.slice(object.byteOffset, object.byteOffset + object.byteLength));
-      } else if (util.isFormDataLike(object)) {
+      } else if (isArrayBuffer(object2)) {
+        source = new Uint8Array(object2.slice());
+      } else if (ArrayBuffer.isView(object2)) {
+        source = new Uint8Array(object2.buffer.slice(object2.byteOffset, object2.byteOffset + object2.byteLength));
+      } else if (util.isFormDataLike(object2)) {
         const boundary = `----formdata-undici-0${`${random(1e11)}`.padStart(11, "0")}`;
         const prefix = `--${boundary}\r
 Content-Disposition: form-data`;
@@ -5498,7 +5498,7 @@ Content-Disposition: form-data`;
         const rn = new Uint8Array([13, 10]);
         length = 0;
         let hasUnknownSizeValue = false;
-        for (const [name, value] of object) {
+        for (const [name, value] of object2) {
           if (typeof value === "string") {
             const chunk2 = textEncoder.encode(prefix + `; name="${escape(normalizeLinefeeds(name))}"\r
 \r
@@ -5526,7 +5526,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r
         if (hasUnknownSizeValue) {
           length = null;
         }
-        source = object;
+        source = object2;
         action = async function* () {
           for (const part of blobParts) {
             if (part.stream) {
@@ -5537,22 +5537,22 @@ Content-Type: ${value.type || "application/octet-stream"}\r
           }
         };
         type = `multipart/form-data; boundary=${boundary}`;
-      } else if (isBlobLike(object)) {
-        source = object;
-        length = object.size;
-        if (object.type) {
-          type = object.type;
+      } else if (isBlobLike(object2)) {
+        source = object2;
+        length = object2.size;
+        if (object2.type) {
+          type = object2.type;
         }
-      } else if (typeof object[Symbol.asyncIterator] === "function") {
+      } else if (typeof object2[Symbol.asyncIterator] === "function") {
         if (keepalive) {
           throw new TypeError("keepalive");
         }
-        if (util.isDisturbed(object) || object.locked) {
+        if (util.isDisturbed(object2) || object2.locked) {
           throw new TypeError(
             "Response body object should not be disturbed or locked"
           );
         }
-        stream = object instanceof ReadableStream ? object : ReadableStreamFrom(object);
+        stream = object2 instanceof ReadableStream ? object2 : ReadableStreamFrom(object2);
       }
       if (typeof source === "string" || util.isBuffer(source)) {
         length = Buffer.byteLength(source);
@@ -5561,7 +5561,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r
         let iterator2;
         stream = new ReadableStream({
           async start() {
-            iterator2 = action(object)[Symbol.asyncIterator]();
+            iterator2 = action(object2)[Symbol.asyncIterator]();
           },
           async pull(controller) {
             const { value, done } = await iterator2.next();
@@ -5589,12 +5589,12 @@ Content-Type: ${value.type || "application/octet-stream"}\r
       const body = { stream, source, length };
       return [body, type];
     }
-    function safelyExtractBody(object, keepalive = false) {
-      if (object instanceof ReadableStream) {
-        assert(!util.isDisturbed(object), "The body has already been consumed.");
-        assert(!object.locked, "The stream is locked.");
+    function safelyExtractBody(object2, keepalive = false) {
+      if (object2 instanceof ReadableStream) {
+        assert(!util.isDisturbed(object2), "The body has already been consumed.");
+        assert(!object2.locked, "The stream is locked.");
       }
-      return extractBody(object, keepalive);
+      return extractBody(object2, keepalive);
     }
     function cloneBody(instance, body) {
       const [out1, out2] = body.stream.tee();
@@ -5674,12 +5674,12 @@ Content-Type: ${value.type || "application/octet-stream"}\r
     function mixinBody(prototype) {
       Object.assign(prototype.prototype, bodyMixinMethods(prototype));
     }
-    async function consumeBody(object, convertBytesToJSValue, instance) {
-      webidl.brandCheck(object, instance);
-      if (bodyUnusable(object)) {
+    async function consumeBody(object2, convertBytesToJSValue, instance) {
+      webidl.brandCheck(object2, instance);
+      if (bodyUnusable(object2)) {
         throw new TypeError("Body is unusable: Body has already been read");
       }
-      throwIfAborted(object[kState]);
+      throwIfAborted(object2[kState]);
       const promise = createDeferredPromise();
       const errorSteps = (error2) => promise.reject(error2);
       const successSteps = (data) => {
@@ -5689,15 +5689,15 @@ Content-Type: ${value.type || "application/octet-stream"}\r
           errorSteps(e);
         }
       };
-      if (object[kState].body == null) {
+      if (object2[kState].body == null) {
         successSteps(Buffer.allocUnsafe(0));
         return promise.promise;
       }
-      await fullyReadBody(object[kState].body, successSteps, errorSteps);
+      await fullyReadBody(object2[kState].body, successSteps, errorSteps);
       return promise.promise;
     }
-    function bodyUnusable(object) {
-      const body = object[kState].body;
+    function bodyUnusable(object2) {
+      const body = object2[kState].body;
       return body != null && (body.stream.locked || util.isDisturbed(body.stream));
     }
     function parseJSONFromBytes(bytes) {
@@ -11227,11 +11227,11 @@ var require_pluralizer = __commonJS({
         this.singular = singular;
         this.plural = plural;
       }
-      pluralize(count) {
-        const one = count === 1;
+      pluralize(count2) {
+        const one = count2 === 1;
         const keys = one ? singulars : plurals;
         const noun = one ? this.singular : this.plural;
-        return { ...keys, count, noun };
+        return { ...keys, count: count2, noun };
       }
     };
   }
@@ -11942,10 +11942,10 @@ var require_headers = __commonJS({
       while (j > i && isHTTPWhiteSpaceCharCode(potentialValue.charCodeAt(i))) ++i;
       return i === 0 && j === potentialValue.length ? potentialValue : potentialValue.substring(i, j);
     }
-    function fill(headers, object) {
-      if (Array.isArray(object)) {
-        for (let i = 0; i < object.length; ++i) {
-          const header = object[i];
+    function fill(headers, object2) {
+      if (Array.isArray(object2)) {
+        for (let i = 0; i < object2.length; ++i) {
+          const header = object2[i];
           if (header.length !== 2) {
             throw webidl.errors.exception({
               header: "Headers constructor",
@@ -11954,10 +11954,10 @@ var require_headers = __commonJS({
           }
           appendHeader(headers, header[0], header[1]);
         }
-      } else if (typeof object === "object" && object !== null) {
-        const keys = Object.keys(object);
+      } else if (typeof object2 === "object" && object2 !== null) {
+        const keys = Object.keys(object2);
         for (let i = 0; i < keys.length; ++i) {
-          appendHeader(headers, keys[i], object[keys[i]]);
+          appendHeader(headers, keys[i], object2[keys[i]]);
         }
       } else {
         throw webidl.errors.conversionFailed({
@@ -18577,15 +18577,15 @@ ${value}`;
           pos = 0;
         }
       }
-      discardLeadingBytes(count) {
-        while (count > 0 && this.lineChunkIndex < this.chunks.length) {
+      discardLeadingBytes(count2) {
+        while (count2 > 0 && this.lineChunkIndex < this.chunks.length) {
           const chunk = this.chunks[this.lineChunkIndex];
           const remaining = chunk.length - this.linePos;
-          if (count < remaining) {
-            this.linePos += count;
-            count = 0;
+          if (count2 < remaining) {
+            this.linePos += count2;
+            count2 = 0;
           } else {
-            count -= remaining;
+            count2 -= remaining;
             this.lineChunkIndex++;
             this.linePos = 0;
           }
@@ -20412,8 +20412,27 @@ function sanitizeFinding(f) {
   return out;
 }
 
-// lib/src/fastpath.js
-import { basename as basename2 } from "node:path";
+// lib/src/domain/assessment.js
+function assessAnalysis(input) {
+  if (!input.triggered)
+    return "skipped";
+  const required = input.stages.filter((stage) => stage.applicable && stage.required);
+  if (required.some((stage) => stage.status === "failed"))
+    return "failed";
+  if (required.some((stage) => stage.status === "unsupported"))
+    return "unsupported";
+  const { coverage } = input;
+  if (required.some((stage) => stage.status === "skipped") || coverage.issues.length > 0 || coverage.issuesOmitted > 0 || input.scope === "semantic" && (coverage.filesReviewed < coverage.filesTotal || coverage.hunksReviewed < coverage.hunksTotal))
+    return "incomplete";
+  return "complete";
+}
+function assessmentExit(policy = "advisory", status, severityExit) {
+  if (status === "skipped")
+    return 0;
+  if (policy === "required" && status !== "complete")
+    return 3;
+  return severityExit;
+}
 
 // lib/src/diff/patch.js
 import { statSync } from "node:fs";
@@ -20664,7 +20683,41 @@ ${f.hunks}
   return { text: parts.join(""), skipped };
 }
 
+// lib/src/analysis/coverage.js
+function projectDiff(files, maxChars, perFile) {
+  const eligible = filterForPrompt(files);
+  const projected = truncateDiff(eligible, maxChars, perFile);
+  const issues = files.filter((f) => !eligible.includes(f) && !isLockfile(f.file)).map((f) => ({ code: "unsupported-path", file: f.file, message: "Filtered content has no applicable semantic analyzer." }));
+  let eligibleHunks = 0, includedHunks = 0, includedFiles = 0, used = 0;
+  for (const f of eligible) {
+    const starts = [...f.hunks.matchAll(/^@@ .*@@.*$/gm)].map((m) => m.index);
+    eligibleHunks += starts.length;
+    const section = `--- ${f.file}
+${f.hunks}
+`;
+    const size = Math.min(section.length, perFile);
+    if (used + size > maxChars) {
+      issues.push({ code: "file-omitted", file: f.file, message: `${starts.length} hunk(s) omitted by the total diff budget.` });
+      continue;
+    }
+    used += size;
+    const available = section.length > perFile ? Math.max(0, perFile - "\n[... truncated ...]\n".length) - `--- ${f.file}
+`.length : f.hunks.length;
+    const count2 = starts.filter((_, n) => (starts[n + 1] ?? f.hunks.length) <= available).length;
+    includedHunks += count2;
+    if (count2 === starts.length && !f.truncated)
+      includedFiles += 1;
+    else
+      issues.push({ code: "hunk-clipped", file: f.file, message: `${starts.length - count2} hunk(s) not fully included in the prompt.` });
+  }
+  return { ...projected, eligibleFiles: eligible.length, eligibleHunks, includedFiles, includedHunks, issues };
+}
+function finalizeAssessment(a) {
+  return { ...a, status: assessAnalysis({ ...a, triggered: a.status !== "skipped" }) };
+}
+
 // lib/src/fastpath.js
+import { basename as basename2 } from "node:path";
 var LARGE_FILE_BYTES = 500 * 1024;
 var TODO_RE = /\b(TODO|FIXME|XXX)\b/;
 var ENV_TEMPLATES = /* @__PURE__ */ new Set([".env.example", ".env.sample", ".env.template"]);
@@ -21059,6 +21112,79 @@ function byteCheck(text, max, source) {
 
 // lib/src/artifacts/review-store.js
 var SEVERITIES = /* @__PURE__ */ new Set(["info", "warning", "high"]);
+function assessmentCopy(a, secrets = []) {
+  const mask = (s) => secrets.filter(Boolean).reduce((value, key) => redact(value, key), s);
+  return {
+    version: 1,
+    baseSha: a.baseSha,
+    headSha: a.headSha,
+    policy: a.policy,
+    scope: a.scope,
+    status: a.status,
+    stages: a.stages.map((s) => ({
+      stage: mask(s.stage),
+      status: s.status,
+      applicable: s.applicable,
+      required: s.required,
+      ...s.reason === void 0 ? {} : { reason: mask(s.reason) }
+    })),
+    coverage: {
+      filesTotal: a.coverage.filesTotal,
+      hunksTotal: a.coverage.hunksTotal,
+      filesReviewed: a.coverage.filesReviewed,
+      hunksReviewed: a.coverage.hunksReviewed,
+      issuesOmitted: a.coverage.issuesOmitted,
+      issues: a.coverage.issues.map((i) => ({ code: mask(i.code), message: mask(i.message), ...i.file === void 0 ? {} : { file: mask(i.file) } }))
+    }
+  };
+}
+function writeAssessment(dir, assessment, maxBytes, secrets) {
+  let a = assessmentCopy(assessment, secrets);
+  const omittedStages = Math.max(0, a.stages.length - 32);
+  a.stages = a.stages.slice(0, 32);
+  if (omittedStages)
+    a.coverage.issues.unshift({ code: "stages-omitted", message: `${omittedStages} stage records omitted.` });
+  a.coverage.issuesOmitted += Math.max(0, a.coverage.issues.length - 200);
+  a.coverage.issues = a.coverage.issues.slice(0, 200);
+  a = finalizeAssessment(a);
+  let raw = JSON.stringify(a) + "\n";
+  if (Buffer.byteLength(raw) > maxBytes) {
+    a = { ...a, status: "incomplete", stages: [], coverage: {
+      ...a.coverage,
+      issuesOmitted: a.coverage.issuesOmitted + a.coverage.issues.length + a.stages.length,
+      issues: [{ code: "assessment-overflow", message: "Assessment exceeded the artifact byte limit; accounting unavailable." }]
+    } };
+    raw = JSON.stringify(a) + "\n";
+  }
+  if (Buffer.byteLength(raw) > maxBytes)
+    throw new Error("analysis.json byte limit cannot hold the minimal assessment");
+  writeFileSync(join2(dir, "analysis.json"), raw, "utf8");
+}
+var object = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var count = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+function isStage(v) {
+  return object(v) && typeof v.stage === "string" && ["ok", "failed", "skipped", "unsupported"].includes(String(v.status)) && typeof v.applicable === "boolean" && typeof v.required === "boolean" && (v.reason === void 0 || typeof v.reason === "string");
+}
+function isIssue(v) {
+  return object(v) && typeof v.code === "string" && typeof v.message === "string" && (v.file === void 0 || typeof v.file === "string");
+}
+function readAssessment(dir, maxBytes) {
+  try {
+    const raw = readCappedFileSync(join2(dir, "analysis.json"), maxBytes);
+    if (!raw.ok)
+      return void 0;
+    const a = JSON.parse(raw.text);
+    const meta = readPrMeta(dir, maxBytes);
+    if (!meta || !object(a) || a.version !== 1 || typeof a.baseSha !== "string" || typeof a.headSha !== "string" || a.baseSha !== meta.base_sha || a.headSha !== meta.head_sha || !["advisory", "required"].includes(String(a.policy)) || !["deterministic", "semantic"].includes(String(a.scope)) || !["complete", "incomplete", "unsupported", "failed", "skipped"].includes(String(a.status)) || !Array.isArray(a.stages) || a.stages.length > 32 || !a.stages.every(isStage) || !object(a.coverage))
+      return void 0;
+    const c = a.coverage;
+    if (![c.filesTotal, c.hunksTotal, c.filesReviewed, c.hunksReviewed, c.issuesOmitted].every(count) || c.filesReviewed > c.filesTotal || c.hunksReviewed > c.hunksTotal || !Array.isArray(c.issues) || c.issues.length > 200 || !c.issues.every(isIssue))
+      return void 0;
+    return assessmentCopy(a);
+  } catch {
+    return void 0;
+  }
+}
 function readDiff(dir) {
   const path = join2(dir, "diff.patch");
   if (!existsSync2(path))
@@ -21390,12 +21516,12 @@ var DEFAULTS = {
     format: ""
   }
 };
-function lowercaseKeys(object) {
-  if (!object) {
+function lowercaseKeys(object2) {
+  if (!object2) {
     return {};
   }
-  return Object.keys(object).reduce((newObj, key) => {
-    newObj[key.toLowerCase()] = object[key];
+  return Object.keys(object2).reduce((newObj, key) => {
+    newObj[key.toLowerCase()] = object2[key];
     return newObj;
   }, {});
 }
@@ -21472,11 +21598,11 @@ function extractUrlVariableNames(url) {
   }
   return matches.map(removeNonChars).reduce((a, b) => a.concat(b), []);
 }
-function omit(object, keysToOmit) {
+function omit(object2, keysToOmit) {
   const result = { __proto__: null };
-  for (const key of Object.keys(object)) {
+  for (const key of Object.keys(object2)) {
     if (keysToOmit.indexOf(key) === -1) {
-      result[key] = object[key];
+      result[key] = object2[key];
     }
   }
   return result;
@@ -25332,15 +25458,15 @@ function wholeLineCut(candidate) {
 function fenceBackup(text) {
   let lines = text.split("\n");
   for (; ; ) {
-    let count = 0;
+    let count2 = 0;
     let last = -1;
     for (let i = 0; i < lines.length; i++) {
       if (isFenceLine(lines[i])) {
-        count++;
+        count2++;
         last = i;
       }
     }
-    if (count % 2 === 0 || last === -1)
+    if (count2 % 2 === 0 || last === -1)
       return lines.join("\n");
     lines = lines.slice(0, last);
   }
@@ -26338,6 +26464,21 @@ function toSarif(findings) {
     runs: [{ tool: { driver: { name: "pr-reviewer" } }, results }]
   };
 }
+function renderAssessment(a) {
+  const c = a.coverage;
+  const lines = [
+    `Analysis: ${a.status}; scope: ${a.scope}.`,
+    `Semantic coverage: ${c.filesReviewed}/${c.filesTotal} files, ${c.hunksReviewed}/${c.hunksTotal} hunks; ${c.hunksTotal - c.hunksReviewed} unreviewed hunks.`
+  ];
+  for (const s of a.stages)
+    if (s.status !== "ok")
+      lines.push(`${s.stage}: ${s.status}${s.reason ? ` (${s.reason})` : ""}.`);
+  for (const i of c.issues)
+    lines.push(`${i.code}${i.file ? ` [${i.file}]` : ""}: ${i.message}`);
+  if (c.issuesOmitted)
+    lines.push(`${c.issuesOmitted} coverage issue record(s) omitted.`);
+  return lines.map(escapeProse).join("\n");
+}
 
 // lib/src/review/grouping.js
 var MERGE_SEVERITY_RANK = { info: 0, warning: 1, high: 2 };
@@ -27103,7 +27244,7 @@ function validateToolArgs(name, args) {
   }
   return { ok: true, args: values };
 }
-async function executeTool(name, args, ctx, limits) {
+async function dispatchTool(name, args, ctx, limits) {
   const context3 = limits?.context ?? ctx.context;
   if (requestExpired(context3))
     return errorResult("tool request cancelled");
@@ -27131,6 +27272,16 @@ async function executeTool(name, args, ctx, limits) {
   } catch (e) {
     return errorResult(e instanceof Error ? e.message : String(e));
   }
+}
+async function executeTool(name, args, ctx, limits) {
+  const result = await dispatchTool(name, args, ctx, limits);
+  let truncated = false;
+  try {
+    truncated = JSON.parse(result.output).truncated === true;
+  } catch {
+  }
+  ctx.observe?.({ tool: name, isError: result.isError, truncated });
+  return result;
 }
 
 // lib/src/providers.js
@@ -27728,6 +27879,19 @@ ${items.join("\n")}` : `
 ${items.join("\n")}`;
 }
 async function publishReview(a) {
+  let assessment = a.assessment;
+  const persist = () => {
+    assessment = finalizeAssessment(assessment);
+    writeAssessment(a.env.artifactDir, assessment, a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
+    assessment = readAssessment(a.env.artifactDir, a.env.inputs.maxArtifactBytes) ?? assessment;
+    a.out.analysis = assessment;
+  };
+  const stale = () => {
+    assessment.coverage.issues.push({ code: "stale-head", message: "The PR head changed; analysis applies only to the recorded head." });
+    a.out.staleSkipped = true;
+    persist();
+    note(a.env, a.out, renderAssessment(assessment));
+  };
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
   const parsed = parseHunks(a.hunks);
@@ -27738,15 +27902,21 @@ async function publishReview(a) {
     try {
       actor = await a.deps.gh.getActor(a.pr);
       if (actor === void 0) {
+        assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
         warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
       } else {
         threads = await a.deps.gh.listReviewThreads(a.pr);
       }
     } catch {
+      assessment.coverage.issues.push({ code: "actor-context", message: "Needed review-thread context is unavailable." });
       warning("lupa: review-thread re-read failed; gating on diff membership only");
       threads = [];
     }
   }
+  if (introduced.length < fullSet.length && a.env.inputs.githubToken === "") {
+    assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck has no token." });
+  }
+  persist();
   const decision = evaluateRawGate(fullSet, parsed, a.hunks, threads, actor);
   const blocking = decision.blocking;
   const { groups: proposedGroups, dropped } = groupFindings(fullSet, a.verdicts ?? { pairs: [], links: [], malformed: 0 });
@@ -27775,10 +27945,14 @@ async function publishReview(a) {
   const { inline, general } = mapToComments(retained, parsed, reopened, identityMarkers);
   const postedInline = inline.slice(0, inputs.maxInlineComments);
   const excessInline = inline.slice(inputs.maxInlineComments);
-  let body = buildBody(general, summaryFor(fullSet), { reopened, blocking: blockingKeys });
+  const coverageReport = capBody(renderAssessment(assessment), Math.min(16384, Math.floor(inputs.maxReviewBodyChars / 2)), []);
+  let body = buildBody(general, `${summaryFor(fullSet)}
+
+${coverageReport}`, { reopened, blocking: blockingKeys });
   if (excessInline.length > 0)
     body += foldExcessInline(general.length === 0, excessInline, blockingKeys);
-  const capped = capBody(body, inputs.maxReviewBodyChars, omissionMarker === void 0 ? [] : [omissionMarker]);
+  const coverageMarker = `Analysis: ${assessment.status}; scope: ${assessment.scope}; ${assessment.coverage.hunksTotal - assessment.coverage.hunksReviewed} unreviewed hunks.`;
+  const capped = capBody(body, inputs.maxReviewBodyChars, [...Array.from(body).length > inputs.maxReviewBodyChars ? [coverageMarker] : [], ...omissionMarker === void 0 ? [] : [omissionMarker]]);
   const commentKeys = postedInline.map((c) => c.rule === void 0 ? null : `${c.rule}\0${c.path}\0${c.line}`);
   const payload = {
     commit_id: a.headSha,
@@ -27794,7 +27968,7 @@ async function publishReview(a) {
       existing = 0;
     }
     try {
-      const report = buildFallbackReport(fullSet, { maxBytes: 1048576 - existing - 1 });
+      const report = coverageReport + "\n\n" + buildFallbackReport(fullSet, { maxBytes: 1048576 - existing - Buffer.byteLength(coverageReport) - 3 });
       appendFileSync2(a.env.summaryPath, report + "\n", "utf8");
       a.out.summaryWritten = true;
     } catch (e) {
@@ -27804,27 +27978,29 @@ async function publishReview(a) {
   if (!a.env.inputs.postComment) {
     const high = fullSet.filter((f) => f.severity === "high").length;
     info(`post_comment is false: dry-run, nothing posted (would post event=${payload.event}, inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${merged.filter((f) => blockingKeys.has(reopenedKey(f))).length}, omitted=${omitted})`);
-    return { blocking };
+    return { blocking, assessment };
   }
   const canWrite = !a.isFork || a.env.tokenType === "app" || a.env.tokenType === "workflow-run";
   if (!canWrite) {
     warning("fork PR with a read-only token: review not posted; summary and artifact only");
-    return { blocking };
+    return { blocking, assessment };
   }
   const live = await a.deps.gh.getPr(a.pr);
   if (live.headSha !== a.headSha) {
+    stale();
     warning(`PR head moved from ${a.headSha} to ${live.headSha}: skipping review for the stale head`);
-    return { blocking };
+    return { blocking, assessment };
   }
   try {
     await a.deps.gh.createReview(a.pr, payload, { canWrite: true, maxBodyChars: inputs.maxReviewBodyChars, blocking: blockingKeys, commentKeys });
     a.out.posted = true;
   } catch (e) {
     if (e instanceof StaleHeadError) {
+      stale();
       note(a.env, a.out, `lupa: PR head moved during posting; analyzed ${e.analyzedSha}, live ${e.liveSha}; skipping review for the stale head \u2014 a fresh run will cover the new head.`);
       a.out.staleSkipped = true;
       a.out.exitCode = 0;
-      return { blocking };
+      return { blocking, assessment };
     }
     if (!(e instanceof ReadonlyTokenError))
       throw e;
@@ -27832,26 +28008,45 @@ async function publishReview(a) {
     const issuesWrite = a.env.issueFallback && canWrite;
     if (!issuesWrite) {
       warning("issue fallback unavailable (not enabled, or token lacks issues: write); nothing posted");
-      return { blocking };
+      return { blocking, assessment };
     }
     try {
       const budget = omissionMarker === void 0 ? inputs.maxReviewBodyChars : inputs.maxReviewBodyChars - Buffer.byteLength(omissionMarker, "utf8") - 2;
       const fallbackReport = buildFallbackReport(retained, { maxBytes: budget });
-      const fallbackBody = omissionMarker === void 0 ? fallbackReport : `${omissionMarker}
+      const fallbackBody = capBody(`${coverageReport}
 
-${fallbackReport}`;
+${fallbackReport}`, inputs.maxReviewBodyChars, [...Array.from(coverageReport + fallbackReport).length + 2 > inputs.maxReviewBodyChars ? [coverageMarker] : [], ...omissionMarker === void 0 ? [] : [omissionMarker]]);
       await a.deps.gh.createIssueComment(a.pr, fallbackBody, { enabled: a.env.issueFallback, issuesWrite });
       a.out.posted = true;
     } catch (fallbackErr) {
       warning(`issue fallback failed: ${fallbackErr.message}`);
     }
   }
-  return { blocking };
+  return { blocking, assessment };
 }
 
 // lib/src/application/slow-path.js
-async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped, prBody) {
+async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped, prBody, assessment) {
   const i = env.inputs;
+  const semantic = { stage: "semantic", applicable: true, required: assessment?.scope !== "deterministic", status: "skipped", reason: "not-executed" };
+  assessment?.stages.push(semantic);
+  const unavailable = (reason, status = "unsupported") => {
+    semantic.status = status;
+    semantic.reason = reason;
+  };
+  const observed = (r) => {
+    if (!r.ok) {
+      unavailable(`${r.reason}: ${r.detail}`, r.reason === "no-key" || r.reason === "unsupported" ? "unsupported" : "failed");
+      return;
+    }
+    if (!r.execution) {
+      unavailable("unknown-health");
+      return;
+    }
+    unavailable(r.execution.reason ?? r.execution.status, r.execution.status === "completed" ? "ok" : r.execution.status === "fallback" ? "unsupported" : r.execution.status === "budget" ? "skipped" : "failed");
+    if (i.llmAgent && r.execution.mode !== "agent")
+      unavailable("tools-unsupported");
+  };
   const noteUsage = (result) => {
     if (result.ok && result.usage !== void 0) {
       const u = result.usage;
@@ -27859,14 +28054,18 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
     }
   };
   if (i.llmApiKey === "") {
+    unavailable("no-key; semantic review did not run", semantic.required ? "unsupported" : "skipped");
     info("no llm_api_key: slow path skipped");
     return void 0;
   }
   if (promptText.trim() === "") {
+    semantic.applicable = false;
+    semantic.reason = "no-prompt-eligible-content";
     info("no prompt-able files in this change: slow path skipped");
     return void 0;
   }
   if (i.llmModel === "") {
+    unavailable("missing-model");
     warning("llm_model is empty: slow path skipped");
     return void 0;
   }
@@ -27882,6 +28081,7 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
       prNumber: pr
     });
   } catch (e) {
+    unavailable(`invalid-endpoint: ${e.message}`);
     warning(`slow path skipped: ${e.message}`);
     return void 0;
   }
@@ -27889,12 +28089,14 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
     try {
       await deps.analysis.ensureOllama(ep.baseUrl, i.llmModel, { timeoutSeconds: i.timeoutSeconds, apiKey: i.llmApiKey });
     } catch (e) {
+      unavailable(`model-setup: ${e.message}`, "failed");
       warning(`slow path skipped: ${e.message}`);
       return void 0;
     }
   }
   const check = await deps.analysis.checkModelListed(ep.baseUrl, i.llmModel, i.llmApiKey, catalogProtocolFor(i.llmProvider, ep.apiStyle));
   if (check.status === "absent") {
+    unavailable("model-not-listed");
     warning(`slow path skipped: model "${i.llmModel}" is not listed by the provider`);
     return void 0;
   }
@@ -27906,12 +28108,16 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
   const messages = buildMessages(b.fast, b.promptText, b.issueBody, b.skipped, i.llmAgent ? { maxTurns: i.llmAgentMaxTurns } : void 0, b.findingsOmitted, { withIds: !i.llmAgent });
   const promptBytes = Buffer.byteLength(messages.user, "utf8");
   if (promptBytes > i.maxPromptChars) {
+    unavailable("prompt-budget", "skipped");
     warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
     note(env, out, `lupa: prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts \u2014 LLM review skipped, gate uses fast findings only.`);
     return void 0;
   }
   if (b.issueDropped) {
     info(`linked issue context dropped to fit the ${i.maxPromptChars}-byte prompt budget`);
+  }
+  if (issueBody !== void 0 && (b.issueDropped || b.issueBody?.endsWith(ISSUE_TRUNCATION_MARKER))) {
+    assessment?.coverage.issues.push({ code: "issue-context", message: "Linked issue context was truncated or omitted by the prompt budget." });
   }
   const llmOpts = {
     model: i.llmModel,
@@ -27934,6 +28140,10 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
       if (linked.length > 0)
         info(`agent linked repositories: ${linked.join(", ")}`);
       const toolCtx = {
+        observe: (event) => {
+          if (event.isError || event.truncated)
+            assessment?.coverage.issues.push({ code: event.isError ? "tool-error" : "tool-truncated", message: `${event.tool}: ${event.isError ? "inspection failed" : "inspection truncated"}` });
+        },
         roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
         ensureLinked: async (alias, opts) => {
           if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
@@ -27973,6 +28183,7 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
         ];
       const agentOpts = { ...llmOpts, context: owned.context, maxTurns: i.llmAgentMaxTurns, maxSeconds: i.llmAgentMaxSeconds };
       const res2 = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbeAgent(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, conv, agentOpts, toolCtx) : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
+      observed(res2);
       if (!res2.ok) {
         warning(`slow path failed (${res2.reason}): ${res2.detail}`);
         return void 0;
@@ -27984,6 +28195,7 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
     }
   }
   const res = i.llmApiStyle === "auto" && i.llmPath === "" ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts) : await deps.analysis.callByStyle(ep, messages, llmOpts);
+  observed(res);
   if (!res.ok) {
     warning(`slow path failed (${res.reason}): ${res.detail}`);
     return void 0;
@@ -28098,6 +28310,17 @@ function prNumberFor(env) {
 }
 async function runAnalysisFlow(env, deps, out) {
   out.slowPathSkipped = true;
+  const assessment = {
+    version: 1,
+    baseSha: env.baseSha,
+    headSha: env.headSha,
+    policy: env.inputs.analysisPolicy ?? "advisory",
+    scope: env.inputs.analysisPolicy === "required" || env.inputs.llmApiKey !== "" ? "semantic" : "deterministic",
+    status: "skipped",
+    stages: [],
+    coverage: { filesTotal: 0, hunksTotal: 0, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 }
+  };
+  out.analysis = assessment;
   if (!triggerFor(env)) {
     note(env, out, `lupa: event "${env.eventName}" does not trigger a review; nothing to do.`);
     return;
@@ -28127,6 +28350,18 @@ async function runAnalysisFlow(env, deps, out) {
     is_fork: pull.isFork
   };
   writePrMeta(meta, env.artifactDir);
+  const prompt = projectDiff(files, env.inputs.maxDiffChars, PER_FILE_CAP);
+  assessment.status = "incomplete";
+  assessment.coverage = {
+    ...assessment.coverage,
+    filesTotal: prompt.eligibleFiles,
+    hunksTotal: prompt.eligibleHunks,
+    issues: [...prompt.issues, ...issues.map((i) => ({ code: "patch-unparsed", message: i.message }))]
+  };
+  if (prompt.issues.some((i) => i.code === "unsupported-path"))
+    assessment.stages.push({ stage: "filtered-paths", required: true, applicable: true, status: "unsupported", reason: "content-without-analyzer" });
+  assessment.stages.push({ stage: "analysis", required: true, applicable: true, status: "skipped", reason: "execution-pending" });
+  writeAssessment(env.artifactDir, assessment, env.inputs.maxArtifactBytes, runtimeSecrets(env));
   const changedNames = new Set(files.map((f) => basename3(f.file)));
   const l0 = runL0(files, {
     hasManifestFor: (lock) => {
@@ -28149,11 +28384,24 @@ async function runAnalysisFlow(env, deps, out) {
     }, execution);
     if (forkWithSecrets) {
       warning("fork PR with secrets in scope: L2 native toolchains skipped");
+      assessment.stages.push({ stage: "l2", applicable: true, required: true, status: "skipped", reason: "fork-with-secrets" });
       return { scan: s, l2: [L2_SKIPPED] };
     }
+    if (deps.analysis.runL2Detailed) {
+      const l3 = await deps.analysis.runL2Detailed(env.workDir, new Set(files.map((f) => f.file)), execution);
+      assessment.stages.push(...l3.stages);
+      return { scan: s, l2: l3.findings };
+    }
     const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)), execution);
+    assessment.stages.push({ stage: "l2", applicable: true, required: true, status: "unsupported", reason: "unknown-health" });
     return { scan: s, l2: l };
   })();
+  const expectedScanners = ["semgrep", "gitleaks", "trivy", ...lockfiles.length ? ["osv-scanner"] : []];
+  assessment.stages.push(...scan.stages ?? []);
+  for (const stage of expectedScanners)
+    if (!scan.stages?.some((s) => s.stage === stage)) {
+      assessment.stages.push({ stage, applicable: true, required: true, status: "unsupported", reason: "unknown-health" });
+    }
   if (scan.sbomPath !== void 0) {
     try {
       copyFileSync(scan.sbomPath, join6(env.artifactDir, "sbom.cdx.json"));
@@ -28165,7 +28413,6 @@ async function runAnalysisFlow(env, deps, out) {
   }
   const fast = [...patchWarnings, ...l0, ...scan.findings, ...l2];
   writeFindings(env.artifactDir, redactFindings(fast, runtimeSecrets(env)));
-  const prompt = truncateDiff(filterForPrompt(files), env.inputs.maxDiffChars, PER_FILE_CAP);
   let issueBody;
   const issueNo = linkedIssueNumber(pull.body);
   if (issueNo !== null) {
@@ -28173,10 +28420,17 @@ async function runAnalysisFlow(env, deps, out) {
       issueBody = await deps.gh.getIssueBody(issueNo);
       out.issueBodyFetched = issueNo;
     } catch (e) {
+      if (assessment.scope === "semantic")
+        assessment.coverage.issues.push({ code: "issue-context", message: `Linked issue #${issueNo} could not be fetched.` });
       warning(`linked issue #${issueNo} not fetched: ${e.message}`);
     }
   }
-  const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
+  const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body, assessment);
+  assessment.stages = assessment.stages.filter((s) => s.stage !== "analysis");
+  if (assessment.stages.some((s) => s.stage === "semantic" && s.status === "ok")) {
+    assessment.coverage.filesReviewed = prompt.includedFiles;
+    assessment.coverage.hunksReviewed = prompt.includedHunks;
+  }
   if (llm === void 0) {
     note(env, out, "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged");
   }
@@ -28189,9 +28443,8 @@ async function runAnalysisFlow(env, deps, out) {
   writePrMeta(verdicts === void 0 ? meta : { ...meta, verdicts }, env.artifactDir);
   const { merged: sarifSet } = verdicts === void 0 ? { merged: redacted } : mergeDuplicates(redacted, verdicts);
   writeFileSync3(join6(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(sarifSet), null, 2) + "\n", "utf8");
-  const { blocking } = await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts });
-  if (!out.staleSkipped)
-    out.exitCode = exitFor(env.inputs.failLevel, blocking);
+  const result = await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts, assessment: finalizeAssessment(assessment) });
+  out.exitCode = assessmentExit(env.inputs.analysisPolicy, result.assessment.status, out.staleSkipped ? 0 : exitFor(env.inputs.failLevel, result.blocking));
 }
 
 // lib/src/application/publish-artifact.js
@@ -28234,6 +28487,35 @@ async function runArtifactFlow(env, deps, out) {
   }
   const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
   const { files: hunks, issues } = parsePatch(readDiff(env.artifactDir));
+  const producer = readAssessment(env.artifactDir, env.inputs.maxArtifactBytes);
+  const projection = projectDiff(hunks, env.inputs.maxDiffChars, 8e3);
+  const assessment = producer ?? {
+    version: 1,
+    baseSha: meta.base_sha,
+    headSha: meta.head_sha,
+    policy: env.inputs.analysisPolicy ?? "advisory",
+    scope: "semantic",
+    status: "unsupported",
+    stages: [{ stage: "artifact-assessment", status: "unsupported", applicable: true, required: true, reason: "coverage-unavailable" }],
+    coverage: { filesTotal: projection.eligibleFiles, hunksTotal: projection.eligibleHunks, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 }
+  };
+  assessment.policy = env.inputs.analysisPolicy ?? "advisory";
+  assessment.status = "incomplete";
+  if (assessment.policy === "required") {
+    assessment.scope = "semantic";
+    if (!assessment.stages.some((s) => s.stage === "semantic" && s.applicable && s.required && s.status === "ok")) {
+      assessment.stages.push({ stage: "semantic", applicable: true, required: true, status: "unsupported", reason: "semantic-coverage-unavailable" });
+    }
+    assessment.coverage.filesTotal = projection.eligibleFiles;
+    assessment.coverage.hunksTotal = projection.eligibleHunks;
+    assessment.coverage.filesReviewed = Math.min(assessment.coverage.filesReviewed, projection.eligibleFiles);
+    assessment.coverage.hunksReviewed = Math.min(assessment.coverage.hunksReviewed, projection.eligibleHunks);
+    for (const stage of ["semgrep", "gitleaks", "trivy"])
+      if (!assessment.stages.some((s) => s.stage === stage && s.applicable && s.required)) {
+        assessment.stages.push({ stage, applicable: true, required: true, status: "unsupported", reason: "unknown-health" });
+      }
+  }
+  assessment.coverage.issues.push(...issues.map((i) => ({ code: "patch-unparsed", message: i.message })));
   if (issues.length > 0) {
     const message = `${issues.length} patch section(s) could not be attributed to a file; review coverage is incomplete.`;
     warning(`diff-unparsed: ${message}`);
@@ -28241,9 +28523,8 @@ async function runArtifactFlow(env, deps, out) {
       findings.push({ severity: "warning", file: "", rule: "diff-unparsed", message });
     }
   }
-  const { blocking } = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
-  if (!out.staleSkipped)
-    out.exitCode = exitFor(env.inputs.failLevel, blocking);
+  const result = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts, assessment: finalizeAssessment(assessment) });
+  out.exitCode = assessmentExit(env.inputs.analysisPolicy, result.assessment.status, out.staleSkipped ? 0 : exitFor(env.inputs.failLevel, result.blocking));
 }
 
 // lib/src/application/run.js
@@ -28678,7 +28959,7 @@ async function runExec(file, args, cwd, env, timeoutMs = TOOL_TIMEOUT_MS, execut
     code: r.exitCode,
     stdout: r.stdout,
     timedOut: r.timedOut,
-    ...r.cancelled || r.cleanupFailed || r.exitCode === null && !r.missing && !r.timedOut ? { failed: true } : {}
+    ...r.cancelled || r.cleanupFailed || r.errorCode !== void 0 && !r.missing || r.exitCode === null && !r.missing && !r.timedOut ? { failed: true } : {}
   };
 }
 function warning2(rule, message, source) {
@@ -28773,23 +29054,51 @@ async function runDocker(dir, image, digest, args, env, timeoutMs, execution, ex
 }
 async function runScanners(o, execution = {}) {
   const findings = [];
+  const stages = [];
+  const record = (label, r) => {
+    stages.push(scannerStage(label, r, o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES));
+  };
   const env = cleanEnvForExec(execution.env ?? process.env);
   const jobs = o.jobs ?? resolveJobs();
   const dir = resolvePath(o.dir);
   const timeoutMs = o.timeoutMs ?? TOOL_TIMEOUT_MS;
   const maxArtifactBytes = o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
   const sg = semgrepArgv({ baselineSha: o.baselineSha, jobs, hasToken: !!o.hasSemgrepToken });
-  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, { ...env, ...sg.env }, timeoutMs, execution), timeoutMs, maxArtifactBytes));
+  const semgrep = await runExec("semgrep", sg.argv, dir, { ...env, ...sg.env }, timeoutMs, execution);
+  record("semgrep", semgrep);
+  findings.push(...fromStdout("semgrep", "semgrep", semgrep, timeoutMs, maxArtifactBytes));
   const tv = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv("."), env, timeoutMs, execution);
+  record("trivy", tv);
   findings.push(...fromStdout("docker", "trivy", tv, timeoutMs, maxArtifactBytes));
-  findings.push(...await runGitleaks(dir, timeoutMs, maxArtifactBytes, env, execution));
+  findings.push(...await runGitleaks(dir, timeoutMs, maxArtifactBytes, env, execution, stages));
+  const osvStages = [];
   for (const lock of o.lockfiles ?? []) {
     const osv = await runDocker(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock), env, timeoutMs, execution);
+    osvStages.push(scannerStage("osv-scanner", osv, maxArtifactBytes));
     findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs, maxArtifactBytes));
+  }
+  if (osvStages.length) {
+    const failed = osvStages.filter((s) => s.status === "failed").length;
+    const unsupported = osvStages.filter((s) => s.status === "unsupported").length;
+    stages.push({
+      stage: "osv-scanner",
+      required: true,
+      applicable: true,
+      status: failed ? "failed" : unsupported ? "unsupported" : "ok",
+      reason: `${osvStages.length} lockfile(s): ${failed} failed, ${unsupported} unsupported, ${osvStages.length - failed - unsupported} completed.`
+    });
   }
   let sbomPath;
   if (o.sbom) {
     const sb = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv("."), env, timeoutMs, execution);
+    const sbStage = {
+      stage: "sbom",
+      required: false,
+      applicable: true,
+      status: sb.missing ? "unsupported" : "failed",
+      reason: sb.missing ? "missing-binary" : "SBOM not generated"
+    };
+    stages.push(sbStage);
     if (sb.missing) {
       findings.push(warning2("scanner-missing", "sbom unavailable: docker not found", "sbom"));
     } else if (sb.timedOut || sb.failed) {
@@ -28807,6 +29116,8 @@ async function runScanners(o, execution = {}) {
           const out = join9(sbomDir, "sbom.cdx.json");
           await writeFile2(out, sb.stdout, "utf8");
           sbomPath = out;
+          sbStage.status = "ok";
+          delete sbStage.reason;
         } catch (e) {
           if (sbomDir)
             await rm2(sbomDir, { recursive: true, force: true }).catch(() => void 0);
@@ -28815,7 +29126,11 @@ async function runScanners(o, execution = {}) {
       }
     }
   }
-  return { findings, sbomPath };
+  return { findings, sbomPath, stages };
+}
+function scannerStage(stage, r, maxBytes) {
+  const reason = r.missing ? "missing-binary" : r.timedOut ? "timeout" : r.failed ? "execution-incomplete" : Buffer.byteLength(r.stdout) > maxBytes ? "artifact-overflow" : !parseSarif(r.stdout) ? "invalid-SARIF" : invocationFailed(r.stdout) === true ? "unsuccessful-invocation" : invocationFailed(r.stdout) !== false && r.code !== 0 && (r.code === null || !findingsExitCodes(stage).includes(r.code)) ? "unsuccessful-exit" : void 0;
+  return { stage, applicable: true, required: true, status: r.missing ? "unsupported" : reason ? "failed" : "ok", ...reason ? { reason } : {} };
 }
 function isCycloneDx(text) {
   try {
@@ -28825,7 +29140,9 @@ function isCycloneDx(text) {
     return false;
   }
 }
-async function runGitleaks(dir, timeoutMs, maxBytes, env, execution) {
+async function runGitleaks(dir, timeoutMs, maxBytes, env, execution, stages) {
+  const stage = { stage: "gitleaks", required: true, applicable: true, status: "failed", reason: "report-unavailable" };
+  stages.push(stage);
   let reportDir;
   try {
     reportDir = await mkdtemp(join9(os5.tmpdir(), "gitleaks-"));
@@ -28835,8 +29152,13 @@ async function runGitleaks(dir, timeoutMs, maxBytes, env, execution) {
   const hostReport = join9(reportDir, "report.sarif");
   try {
     const gl = await runDocker(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), env, timeoutMs, execution, [`${reportDir}:/out`]);
-    if (gl.missing)
+    if (gl.missing) {
+      stage.status = "unsupported";
+      stage.reason = "missing-binary";
       return [warning2("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
+    }
+    if (gl.timedOut || gl.failed)
+      stage.reason = gl.timedOut ? "timeout" : "execution-incomplete";
     const interruption = gl.timedOut ? warning2("scanner-failed", `gitleaks timed out after ${timeoutMs / 1e3}s`, "gitleaks") : gl.failed ? warning2("scanner-failed", "gitleaks execution incomplete", "gitleaks") : void 0;
     let text;
     try {
@@ -28854,6 +29176,10 @@ async function runGitleaks(dir, timeoutMs, maxBytes, env, execution) {
     if (text === void 0) {
       if (interruption)
         return [interruption];
+      if (gl.code === 0) {
+        stage.status = "ok";
+        delete stage.reason;
+      }
       return gl.code === 0 ? [] : [warning2("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`, "gitleaks")];
     }
     const parsed = parseSarif(text);
@@ -28862,9 +29188,16 @@ async function runGitleaks(dir, timeoutMs, maxBytes, env, execution) {
     const provenanced = parsed.map((f) => ({ ...f, source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" } }));
     if (interruption)
       return [...provenanced, interruption];
+    if (gl.code !== 0 && gl.code !== 1) {
+      stage.reason = "unsuccessful-exit";
+      return [...provenanced, warning2("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"}`, "gitleaks")];
+    }
     if (invocationFailed(text) === true) {
+      stage.reason = "unsuccessful-invocation";
       return [...provenanced, warning2("scanner-failed", "gitleaks reported an unsuccessful run", "gitleaks")];
     }
+    stage.status = "ok";
+    delete stage.reason;
     return provenanced;
   } finally {
     await rm2(reportDir, { recursive: true, force: true }).catch(() => void 0);
@@ -28943,7 +29276,7 @@ var execTool = async (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS, execution = {})
     maxBufferBytes: MAX_BUFFER2,
     signal: execution.signal
   });
-  const incomplete = r.cancelled || r.cleanupFailed === true || r.exitCode === null && !r.missing;
+  const incomplete = r.cancelled || r.cleanupFailed === true || r.errorCode !== void 0 && !r.missing || r.exitCode === null && !r.missing;
   return {
     stdout: r.stdout,
     failure: r.exitCode === 0 && !r.timedOut && !incomplete ? void 0 : {
@@ -29008,20 +29341,25 @@ function interpretGofmt(name, failure, stdout, changed, timeoutMs = L2_TIMEOUT_M
 var interpreters = {
   gofmt: interpretGofmt
 };
-async function runOne(name, dir, spawn, timeoutMs, changed, execution) {
-  const { cmd, args } = l2Argv(name);
-  const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
-  if (failure?.code === "ENOENT")
-    return [];
-  const interpret = interpreters[name] ?? interpretDefault;
-  return interpret(name, failure, stdout, changed, timeoutMs);
-}
 async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set(), execution) {
+  return (await runL2Detailed(dir, spawn, timeoutMs, changedFiles, execution)).findings;
+}
+async function runL2Detailed(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set(), execution) {
   const findings = [];
+  const stages = [];
   for (const name of detectL2Tools(dir)) {
-    findings.push(...await runOne(name, dir, spawn, timeoutMs, changedFiles, execution));
+    const { cmd, args } = l2Argv(name);
+    const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
+    stages.push({
+      stage: `l2:${name}`,
+      applicable: true,
+      required: true,
+      status: failure?.code === "ENOENT" ? "unsupported" : failure ? "failed" : "ok",
+      ...failure ? { reason: failure.code === "ENOENT" ? "missing-binary" : describeFailure(name, failure, timeoutMs) } : {}
+    });
+    findings.push(...(interpreters[name] ?? interpretDefault)(name, failure, stdout, changedFiles, timeoutMs));
   }
-  return findings;
+  return { findings, stages };
 }
 
 // lib/src/llm/transport.js
@@ -30243,6 +30581,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           return finish(timeoutLlmResult(), "budget", false);
         const call = reply.toolCalls[i];
         if (i >= maxCalls) {
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: false });
           turnsArr.push({
             role: "tool",
             id: call.id,
@@ -30254,6 +30593,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
         }
         const remainingBytes = maxTotalBytes - bytes;
         if (remainingBytes < MARKER_BYTES) {
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true });
           turnsArr.push({
             role: "tool",
             id: call.id,
@@ -30272,6 +30612,8 @@ async function runAgent(conv, toolCtx, budget, hooks) {
         calls += 1;
         const output = capToolResult(res.output, effective);
         const replaced = output !== res.output;
+        if (replaced)
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true });
         const isError = res.isError || replaced;
         if (!replaced) {
           const n = Buffer.byteLength(output, "utf8");
@@ -30484,15 +30826,19 @@ async function callChatTurn(ep, conv, o, flags) {
 
 // lib/src/llm/router.js
 async function callByStyle(ep, messages, o) {
+  const observed = async (result) => {
+    const r = await result;
+    return { ...r, execution: { mode: "single-shot", status: r.ok ? "completed" : "failed" } };
+  };
   switch (ep.apiStyle) {
     case "openai-responses":
-      return callResponses(ep, messages, o);
+      return observed(callResponses(ep, messages, o));
     case "anthropic-messages":
-      return callMessages(ep, messages, o);
+      return observed(callMessages(ep, messages, o));
     case "google-models":
-      return callGoogle(ep, o.model, messages, o);
+      return observed(callGoogle(ep, o.model, messages, o));
     case "openai-chat":
-      return callLlm(ep, messages, o);
+      return observed(callLlm(ep, messages, o));
     default:
       throw new Error("unsupported apiStyle: " + String(ep.apiStyle));
   }
@@ -30585,9 +30931,15 @@ function agentCallFor(ep, o) {
   }, flags);
 }
 function withAgentUsage(outcome, result) {
-  if (result.ok && outcome.usage !== void 0)
-    return { ...result, usage: outcome.usage };
-  return result;
+  return {
+    ...result,
+    ...result.ok && outcome.usage !== void 0 ? { usage: outcome.usage } : {},
+    execution: {
+      mode: "agent",
+      status: !result.ok ? "failed" : outcome.toolsUnsupported ? "fallback" : outcome.stop === "budget" ? "budget" : "completed",
+      ...outcome.toolsUnsupported ? { reason: "tools-unsupported" } : {}
+    }
+  };
 }
 async function callByStyleAgent(ep, conv, o, toolCtx) {
   const outcome = await runAgent(conv, toolCtx, { maxTurns: o.maxTurns, maxSeconds: o.maxSeconds, timeoutSeconds: o.timeoutSeconds, context: o.context }, { call: agentCallFor(ep, o), log: info });
@@ -30607,6 +30959,7 @@ async function callWithProbeAgent(provider, model, baseUrl2, key, conv, o, toolC
       if (out.result.ok) {
         out.result.findings = out.result.findings.map(stripProvenance);
       }
+      out.result = { ...out.result, execution: { mode: "agent", status: out.result.ok ? "fallback" : "failed", reason: "tools-unsupported" } };
       return out;
     }
     const agentOpts = {
@@ -30675,6 +31028,7 @@ function createAnalysis() {
   return {
     runScanners,
     runL2: (dir, changedFiles, execution) => runL2(dir, void 0, void 0, changedFiles, execution),
+    runL2Detailed: (dir, changedFiles, execution) => runL2Detailed(dir, void 0, void 0, changedFiles, execution),
     ensureOllama,
     checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved
@@ -30706,6 +31060,7 @@ async function main() {
   const env = readRunEnv();
   const out = await run(env, { gh: createGateway(env.inputs.githubToken, { trustedLogin: env.inputs.reviewActor }), analysis: createAnalysis() });
   setOutput("exit-code", String(out.exitCode));
+  setOutput("analysis-status", out.analysis?.status ?? "unsupported");
   process.exitCode = out.exitCode;
 }
 var isEntry = process.argv[1] !== void 0 && import.meta.url === pathToFileURL(process.argv[1]).href;

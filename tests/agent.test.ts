@@ -7,6 +7,7 @@ import type { LlmUsage } from "../src/llm.js";
 import type { Conversation, ToolCall } from "../src/agent-types.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import { capToolResult, runAgent } from "../src/agent.js";
+import { callWithProbeAgent, resetProbeMemo, resetToolsMemo } from "../src/llm/router.js";
 import type { AgentBudget, AgentHooks } from "../src/agent.js";
 
 const created: string[] = [];
@@ -16,6 +17,7 @@ function tempRoot(): string {
   return d;
 }
 afterEach(() => {
+  vi.unstubAllGlobals(); resetProbeMemo(); resetToolsMemo();
   while (created.length) rmSync(created.pop()!, { recursive: true, force: true });
 });
 
@@ -109,7 +111,10 @@ describe("runAgent", () => {
     writeFileSync(join(root, "a.txt"), "hello\n");
     const six = Array.from({ length: 6 }, (_, i) => tc(String(i + 1), "read_file", { path: "a.txt" }));
     const h = harness(root, [okText("", six), okText(FINDINGS)]);
+    const observed: { isError: boolean }[] = [];
+    h.toolCtx.observe = event => observed.push(event);
     const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(observed.filter(event => event.isError)).toHaveLength(2);
     expect(out.stop).toBe("final");
     expect(out.calls).toBe(4);
     const toolTurns = h.conv.turns!.filter((t) => t.role === "tool");
@@ -187,6 +192,14 @@ describe("runAgent", () => {
   });
 
   it("turn-0 400 retries without tools: ok → fallback + toolsUnsupported", async () => {
+    resetProbeMemo(); resetToolsMemo();
+    let requests = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => ++requests === 1 ? new Response("unsupported tools", { status: 400 }) :
+      new Response(JSON.stringify({ choices: [{ message: { content: FINDINGS } }] }))));
+    const call = () => callWithProbeAgent("openai", "test", "https://example.test/v1", "key", { system: "s", user: "u" },
+      { maxTokens: 100, timeoutSeconds: 5, maxTurns: 2, maxSeconds: 30 }, { roots: { self: "/tmp" } });
+    expect((await call()).result.execution).toMatchObject({ mode: "agent", status: "fallback", reason: "tools-unsupported" });
+    expect((await call()).result.execution).toMatchObject({ mode: "agent", status: "fallback", reason: "tools-unsupported" });
     const root = tempRoot();
     const h = harness(root, [fail(400), okText(FINDINGS)]);
     const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);

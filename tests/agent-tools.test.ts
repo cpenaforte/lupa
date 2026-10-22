@@ -805,6 +805,15 @@ describe("F11 tool-layer deadlines and byte caps", () => {
     expect(gp.paths.length).toBeLessThan(10);
     expect(Buffer.byteLength(g.output, "utf8")).toBeLessThanOrEqual(100);
   });
+  it("observes errors and truncation without arguments or file contents", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "private.txt"), "secret-content".repeat(100));
+    const events: unknown[] = [];
+    const ctx = { roots: { self: root }, observe: (event: unknown) => { events.push(event); } };
+    await executeTool("read_file", { path: "private.txt" }, ctx, { maxResultBytes: 200 });
+    await executeTool("read_file", {}, ctx);
+    expect(events).toEqual([{ tool: "read_file", isError: false, truncated: true }, { tool: "read_file", isError: true, truncated: false }]);
+  });
   it("resolveRoot forwards the deadline to ensureLinked", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "hello\n");

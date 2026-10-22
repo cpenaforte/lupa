@@ -180,7 +180,7 @@ const staleSkipNote =
   `lupa: PR head moved during posting; analyzed ${HEAD_SHA}, live ${"c".repeat(40)}; ` +
   "skipping review for the stale head — a fresh run will cover the new head.";
 
-export const evalCases: readonly EvalCase[] = [
+const cases: readonly EvalCase[] = [
   {
     id: "synthetic-positive-authz-unguarded-record-read",
     categories: ["positive"],
@@ -481,6 +481,29 @@ export const evalCases: readonly EvalCase[] = [
 ];
 
 /** Flow B's artifact-binding refusal: run() rejects, so it never joins evalCases/it.each. */
+// Independent literal coverage expectations for the scripted producer evidence.
+// Existing finding content, locations and severity gates above remain the reference.
+const completeCoverage = "Analysis\\: complete\\; scope\\: semantic\\.\nSemantic coverage\\: 1\\/1 files\\, 1\\/1 hunks\\; 0 unreviewed hunks\\.";
+const incompleteCoverage = "Analysis\\: incomplete\\; scope\\: semantic\\.\nSemantic coverage\\: 1\\/1 files\\, 1\\/1 hunks\\; 0 unreviewed hunks\\.";
+const staleCoverage = incompleteCoverage + "\nstale\\-head\\: The PR head changed\\; analysis applies only to the recorded head\\.";
+export const evalCases: readonly EvalCase[] = cases.map(c => {
+  if (c.categories.includes("non-trigger")) return c;
+  let coverage = completeCoverage;
+  if (c.categories.includes("fork-readonly")) coverage = incompleteCoverage + "\nl2\\: skipped \\(fork\\-with\\-secrets\\)\\.";
+  if (c.categories.includes("flow-b")) coverage = "Analysis\\: unsupported\\; scope\\: semantic\\.\nSemantic coverage\\: 0\\/1 files\\, 0\\/1 hunks\\; 1 unreviewed hunks\\.\nartifact\\-assessment\\: unsupported \\(coverage\\-unavailable\\)\\.";
+  if (c.id === "synthetic-large-diff-per-file-cap") coverage = "Analysis\\: incomplete\\; scope\\: semantic\\.\nSemantic coverage\\: 0\\/1 files\\, 0\\/1 hunks\\; 1 unreviewed hunks\\.\nhunk\\-clipped \\[src\\/large\\.ts\\]\\: 1 hunk\\(s\\) not fully included in the prompt\\.";
+  if (c.id === "synthetic-large-diff-global-budget") coverage = "Analysis\\: incomplete\\; scope\\: semantic\\.\nSemantic coverage\\: 1\\/2 files\\, 1\\/2 hunks\\; 1 unreviewed hunks\\.\nfile\\-omitted \\[src\\/omitted\\.ts\\]\\: 1 hunk\\(s\\) omitted by the total diff budget\\.";
+  if (c.categories.includes("llm-failure")) coverage = "Analysis\\: failed\\; scope\\: semantic\\.\nSemantic coverage\\: 0\\/1 files\\, 0\\/1 hunks\\; 1 unreviewed hunks\\.\nsemantic\\: failed \\(content\\-filter\\: synthetic refusal\\)\\.";
+  let summary = coverage + "\n\n" + c.expected.summary;
+  if (c.categories.includes("llm-failure")) summary = "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged\n" + coverage + "\n\nlupa: no findings.";
+  if (c.categories.includes("force-push")) summary += "\n" + staleCoverage;
+  if (c.categories.includes("stale-post")) summary = coverage + "\n\n" + authzSummary + "\n" + staleCoverage + "\n" + staleSkipNote;
+  const p = c.expected.publication;
+  const publication = p.kind === "review" ? { ...p, payload: { ...p.payload, body: p.payload.body.replace(/^(lupa: [^\n]+)/, `$1\n\n${coverage}`) } } :
+    p.kind === "issue-comment" ? { ...p, body: coverage + "\n\n" + p.body } : p;
+  return { ...c, expected: { ...c.expected, summary, publication, ...(c.categories.includes("force-push") ? { exitCode: 0 } : {}) } };
+});
+
 export const flowBRefusalCase: EvalCase = {
   id: "synthetic-flow-b-refusal-pr-mismatch",
   categories: ["flow-b"],

@@ -2,6 +2,10 @@ import * as core from "@actions/core";
 import { appendFileSync, statSync } from "node:fs";
 import type { RunEnv, Deps, Outcome } from "./contracts.js";
 import type { Finding } from "../domain/finding.js";
+import type { AnalysisAssessment } from "../domain/assessment.js";
+import { finalizeAssessment } from "../analysis/coverage.js";
+import { readAssessment, writeAssessment } from "../artifacts/review-store.js";
+import { renderAssessment } from "../review/render.js";
 import type { FileDiff } from "../domain/diff.js";
 import type { InlineComment, ReviewPayload } from "../domain/review.js";
 import type { DedupVerdicts } from "../llm/types.js";
@@ -50,6 +54,7 @@ interface PublishArgs {
   hunks: FileDiff[];
   headSha: string;
   verdicts?: DedupVerdicts;
+  assessment: AnalysisAssessment;
 }
 
 /**
@@ -85,7 +90,21 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
  * configured (empty token: no call, no warn), and any thread/infra
  * failure falls back to diff-only gating without throwing.
  */
-export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[] }> {
+export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[]; assessment: AnalysisAssessment }> {
+  let assessment = a.assessment;
+  const persist = () => {
+    assessment = finalizeAssessment(assessment);
+    writeAssessment(a.env.artifactDir, assessment, a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
+    // Reuse the bounded/redacted reporting record, including serialization omissions.
+    assessment = readAssessment(a.env.artifactDir, a.env.inputs.maxArtifactBytes) ?? assessment;
+    a.out.analysis = assessment;
+  };
+  const stale = () => {
+    assessment.coverage.issues.push({ code: "stale-head", message: "The PR head changed; analysis applies only to the recorded head." });
+    a.out.staleSkipped = true;
+    persist();
+    note(a.env, a.out, renderAssessment(assessment));
+  };
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
   const parsed = parseHunks(a.hunks);
@@ -96,15 +115,21 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
     try {
       actor = await a.deps.gh.getActor(a.pr);
       if (actor === undefined) {
+        assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
         core.warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
       } else {
         threads = await a.deps.gh.listReviewThreads(a.pr);
       }
     } catch {
+      assessment.coverage.issues.push({ code: "actor-context", message: "Needed review-thread context is unavailable." });
       core.warning("lupa: review-thread re-read failed; gating on diff membership only");
       threads = [];
     }
   }
+  if (introduced.length < fullSet.length && a.env.inputs.githubToken === "") {
+    assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck has no token." });
+  }
+  persist();
   const decision = evaluateRawGate(fullSet, parsed, a.hunks, threads, actor);
   const blocking = decision.blocking;
   const { groups: proposedGroups, dropped } = groupFindings(fullSet, a.verdicts ?? { pairs: [], links: [], malformed: 0 });
@@ -138,9 +163,11 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
   const { inline, general } = mapToComments(retained, parsed, reopened, identityMarkers);
   const postedInline = inline.slice(0, inputs.maxInlineComments);
   const excessInline = inline.slice(inputs.maxInlineComments);
-  let body = buildBody(general, summaryFor(fullSet), { reopened, blocking: blockingKeys });
+  const coverageReport = capBody(renderAssessment(assessment), Math.min(16384, Math.floor(inputs.maxReviewBodyChars / 2)), []);
+  let body = buildBody(general, `${summaryFor(fullSet)}\n\n${coverageReport}`, { reopened, blocking: blockingKeys });
   if (excessInline.length > 0) body += foldExcessInline(general.length === 0, excessInline, blockingKeys);
-  const capped = capBody(body, inputs.maxReviewBodyChars, omissionMarker === undefined ? [] : [omissionMarker]);
+  const coverageMarker = `Analysis: ${assessment.status}; scope: ${assessment.scope}; ${assessment.coverage.hunksTotal - assessment.coverage.hunksReviewed} unreviewed hunks.`;
+  const capped = capBody(body, inputs.maxReviewBodyChars, [...(Array.from(body).length > inputs.maxReviewBodyChars ? [coverageMarker] : []), ...(omissionMarker === undefined ? [] : [omissionMarker])]);
   // commentKeys ride index-aligned with the posted comments for the 422 fold path;
   // rule is internal (fold keys only) and never ships in the payload.
   const commentKeys = postedInline.map((c) => (c.rule === undefined ? null : `${c.rule}\0${c.path}\0${c.line}`));
@@ -160,7 +187,7 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
       existing = 0;
     }
     try {
-      const report = buildFallbackReport(fullSet, { maxBytes: 1048576 - existing - 1 });
+      const report = coverageReport + "\n\n" + buildFallbackReport(fullSet, { maxBytes: 1048576 - existing - Buffer.byteLength(coverageReport) - 3 });
       appendFileSync(a.env.summaryPath, report + "\n", "utf8");
       a.out.summaryWritten = true;
     } catch (e) {
@@ -173,23 +200,25 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
       `post_comment is false: dry-run, nothing posted (would post event=${payload.event}, ` +
         `inline=${postedInline.length}, general=${general.length + excessInline.length}, high=${high}, blocking=${merged.filter((f) => blockingKeys.has(reopenedKey(f))).length}, omitted=${omitted})`,
     );
-    return { blocking };
+    return { blocking, assessment };
   }
   const canWrite = !a.isFork || a.env.tokenType === "app" || a.env.tokenType === "workflow-run";
   if (!canWrite) {
     core.warning("fork PR with a read-only token: review not posted; summary and artifact only");
-    return { blocking };
+    return { blocking, assessment };
   }
   const live = await a.deps.gh.getPr(a.pr);
   if (live.headSha !== a.headSha) {
+    stale();
     core.warning(`PR head moved from ${a.headSha} to ${live.headSha}: skipping review for the stale head`);
-    return { blocking };
+    return { blocking, assessment };
   }
   try {
     await a.deps.gh.createReview(a.pr, payload, { canWrite: true, maxBodyChars: inputs.maxReviewBodyChars, blocking: blockingKeys, commentKeys });
     a.out.posted = true;
   } catch (e) {
     if (e instanceof StaleHeadError) {
+      stale();
       note(
         a.env,
         a.out,
@@ -197,7 +226,7 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
       );
       a.out.staleSkipped = true;
       a.out.exitCode = 0;
-      return { blocking };
+      return { blocking, assessment };
     }
     if (!(e instanceof ReadonlyTokenError)) throw e;
     core.error(`review post refused by GitHub: ${e.detail !== "" ? e.detail : e.message}`);
@@ -206,7 +235,7 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
     const issuesWrite = a.env.issueFallback && canWrite;
     if (!issuesWrite) {
       core.warning("issue fallback unavailable (not enabled, or token lacks issues: write); nothing posted");
-      return { blocking };
+      return { blocking, assessment };
     }
     try {
       // The fallback publishes the retained (publication-capped) set with the
@@ -218,12 +247,13 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
           ? inputs.maxReviewBodyChars
           : inputs.maxReviewBodyChars - Buffer.byteLength(omissionMarker, "utf8") - 2;
       const fallbackReport = buildFallbackReport(retained, { maxBytes: budget });
-      const fallbackBody = omissionMarker === undefined ? fallbackReport : `${omissionMarker}\n\n${fallbackReport}`;
+      const fallbackBody = capBody(`${coverageReport}\n\n${fallbackReport}`, inputs.maxReviewBodyChars,
+        [...(Array.from(coverageReport + fallbackReport).length + 2 > inputs.maxReviewBodyChars ? [coverageMarker] : []), ...(omissionMarker === undefined ? [] : [omissionMarker])]);
       await a.deps.gh.createIssueComment(a.pr, fallbackBody, { enabled: a.env.issueFallback, issuesWrite });
       a.out.posted = true;
     } catch (fallbackErr) {
       core.warning(`issue fallback failed: ${(fallbackErr as Error).message}`);
     }
   }
-  return { blocking };
+  return { blocking, assessment };
 }

@@ -121,8 +121,8 @@ describe("synthetic bundle regression cases", () => {
     expect(result.gatewayCalls.filter(({ method }) => method === "getPr")).toHaveLength(2);
     expect(result.gatewayCalls.filter(({ method }) => method === "createReview")).toHaveLength(0);
     expect(result.outcome.posted).toBe(false);
-    expect(result.outcome.staleSkipped).toBeUndefined();
-    expect(result.outcome.exitCode).toBe(2);
+    expect(result.outcome.staleSkipped).toBe(true);
+    expect(result.outcome.exitCode).toBe(0);
   });
 
   it("keeps read-only fork review runs summary-only", async () => {

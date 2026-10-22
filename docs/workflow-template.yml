@@ -179,6 +179,7 @@ jobs:
             ${{ runner.temp }}/pr-reviewer-out/diff.patch
             ${{ runner.temp }}/pr-reviewer-out/pr-meta.json
             ${{ runner.temp }}/pr-reviewer-out/findings.json
+            ${{ runner.temp }}/pr-reviewer-out/analysis.json
             ${{ runner.temp }}/pr-reviewer-out/sarif.json
             ${{ runner.temp }}/pr-reviewer-out/sbom.cdx.json
 

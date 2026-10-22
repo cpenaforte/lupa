@@ -19,6 +19,7 @@ export async function main(): Promise<void> {
   const env = readRunEnv();
   const out = await run(env, { gh: createGateway(env.inputs.githubToken, { trustedLogin: env.inputs.reviewActor }), analysis: createAnalysis() });
   core.setOutput("exit-code", String(out.exitCode));
+  core.setOutput("analysis-status", out.analysis?.status ?? "unsupported");
   process.exitCode = out.exitCode;
 }
 

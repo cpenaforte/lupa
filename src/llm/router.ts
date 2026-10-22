@@ -33,18 +33,22 @@ export async function callByStyle(
     provider: string;
   },
 ): Promise<LlmResult> {
+  const observed = async (result: Promise<LlmResult>): Promise<LlmResult> => {
+    const r = await result;
+    return { ...r, execution: { mode: "single-shot", status: r.ok ? "completed" : "failed" } };
+  };
   // No fallback for a missing/malformed apiStyle: resolveEndpoint always sets it,
   // so an endpoint without one is a programming error that should fail loudly.
   switch (ep.apiStyle) {
     case "openai-responses":
-      return callResponses(ep, messages, o);
+      return observed(callResponses(ep, messages, o));
     case "anthropic-messages":
-      return callMessages(ep, messages, o);
+      return observed(callMessages(ep, messages, o));
     case "google-models":
       // Google posts to {base}/models/<id>:generateContent: the model id rides the path.
-      return callGoogle(ep, o.model, messages, o);
+      return observed(callGoogle(ep, o.model, messages, o));
     case "openai-chat":
-      return callLlm(ep, messages, o);
+      return observed(callLlm(ep, messages, o));
     default:
       // Unreachable by type; guards forged/malformed endpoints at runtime.
       throw new Error("unsupported apiStyle: " + String(ep.apiStyle));
@@ -255,8 +259,9 @@ function agentCallFor(ep: ResolvedEndpoint, o: AgentCallOptions) {
  * `usage: undefined` key is written; ok:false results never carry usage.
  */
 function withAgentUsage(outcome: AgentOutcome, result: LlmResult): LlmResult {
-  if (result.ok && outcome.usage !== undefined) return { ...result, usage: outcome.usage };
-  return result;
+  return { ...result, ...(result.ok && outcome.usage !== undefined ? { usage: outcome.usage } : {}),
+    execution: { mode: "agent", status: !result.ok ? "failed" : outcome.toolsUnsupported ? "fallback" : outcome.stop === "budget" ? "budget" : "completed",
+      ...(outcome.toolsUnsupported ? { reason: "tools-unsupported" } : {}) } };
 }
 
 /**
@@ -320,6 +325,7 @@ export async function callWithProbeAgent(
       if (out.result.ok) {
         out.result.findings = out.result.findings.map(stripProvenance);
       }
+      out.result = { ...out.result, execution: { mode: "agent", status: out.result.ok ? "fallback" : "failed", reason: "tools-unsupported" } };
       return out;
     }
 

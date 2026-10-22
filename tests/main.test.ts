@@ -233,7 +233,78 @@ function inputsFor(o: MockOpts): ActionInputs {
   };
 }
 
+const healthy = (_env: RunEnv, deps: Deps) => {
+  deps.analysis.runScanners = async () => ({ findings: [], stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok" as const, applicable: true, required: true })) });
+  deps.analysis.runL2Detailed = async () => ({ findings: [], stages: [] });
+  deps.analysis.callWithProbe = async () => ({ ok: true, findings: [], execution: { mode: "single-shot", status: "completed" } });
+};
+
+describe("analysis assurance orchestration", () => {
+  it("accounts for clipped hunks without claiming the model saw the absent danger", async () => {
+    const diff = "diff --git a/large.ts b/large.ts\n--- /dev/null\n+++ b/large.ts\n@@ -0,0 +1,121 @@\n" + Array.from({ length: 120 }, () => "+" + "x".repeat(100)).join("\n") + "\n+DANGER\n";
+    let prompt = "";
+    const r = await runWithMocks({ diff, analysisPolicy: "required", failLevel: "none", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async (_p, _m, _b, _k, messages) => {
+        prompt = messages.user;
+        expect(JSON.parse(readFileSync(join(env.artifactDir, "analysis.json"), "utf8")).status).toBe("incomplete");
+        return { ok: true, findings: [], execution: { mode: "single-shot", status: "completed" } };
+      };
+    } });
+    expect(prompt).not.toContain("DANGER");
+    expect(r.analysis).toMatchObject({ status: "incomplete", coverage: { hunksTotal: 1, hunksReviewed: 0 } });
+    expect(r.exitCode).toBe(3); expect(r.reviews[0]?.event).toBe("COMMENT");
+    expect(r.body).toContain("incomplete"); expect(readFileSync(r.summaryPath, "utf8")).toContain("incomplete");
+  });
+  it.each(["failed", "unsupported", "skipped"] as const)("records %s execution while retaining scanner findings", async status => {
+    const r = await runWithMocks({ analysisPolicy: "required", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.runScanners = async () => ({ findings: [LLM_FINDING], stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status, applicable: true, required: true })) });
+    } });
+    expect(r.analysis?.status).toBe(status === "skipped" ? "incomplete" : status);
+    expect(r.exitCode).toBe(3); expect(readFileSync(join(r.artifactDir, "findings.json"), "utf8")).toContain(LLM_FINDING.rule);
+  });
+  it("does not treat legacy zero-findings ports as healthy", async () => {
+    const r = await runWithMocks({ llm: [], scan: [], analysisPolicy: "required" });
+    expect(r.analysis?.stages).toContainEqual(expect.objectContaining({ status: "unsupported", reason: "unknown-health", required: true }));
+    expect(r.exitCode).toBe(3);
+  });
+  it("reports timeout with redacted evidence and unchanged advisory severity exit", async () => {
+    const r = await runWithMocks({ configure: (env, deps) => { healthy(env, deps); deps.analysis.callWithProbe = async () => ({ ok: false, reason: "timeout", detail: "timeout test-llm-key" }); } });
+    expect(r.analysis?.status).toBe("failed"); expect(r.exitCode).toBe(0);
+    expect(readFileSync(join(r.artifactDir, "analysis.json"), "utf8")).not.toContain("test-llm-key");
+  });
+  it.each(["fallback", "budget"] as const)("retains partial agent findings with %s status", async status => {
+    const r = await runWithMocks({ llmAgent: true, analysisPolicy: "required", configure: (env, deps) => {
+      healthy(env, deps); deps.analysis.callWithProbeAgent = async () => ({ ok: true, findings: [LLM_FINDING], execution: { mode: "agent", status } });
+    } });
+    expect(r.analysis?.status).toBe(status === "fallback" ? "unsupported" : "incomplete"); expect(r.exitCode).toBe(3);
+    expect(readFileSync(join(r.artifactDir, "findings.json"), "utf8")).toContain(LLM_FINDING.rule);
+  });
+  it("records linked issue and needed actor failures", async () => {
+    const r = await runWithMocks({ prBody: "Fixes #42", analysisPolicy: "required", actorMissing: true, configure: (env, deps) => {
+      healthy(env, deps); deps.gh.getIssueBody = async () => { throw Error("unavailable"); };
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [{ ...LLM_FINDING, file: "untouched.ts" }], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues.map(i => i.code)).toEqual(expect.arrayContaining(["issue-context", "actor-context"]));
+  });
+  it("keeps advisory keyless deterministic scope and required semantic scope distinct", async () => {
+    const a = await runWithMocks({ llmApiKey: "", configure: healthy });
+    expect(a.analysis).toMatchObject({ scope: "deterministic", status: "complete" });
+    expect(a.analysis?.stages).toContainEqual(expect.objectContaining({ stage: "semantic", status: "skipped", required: false }));
+    const b = await runWithMocks({ llmApiKey: "", analysisPolicy: "required", configure: healthy });
+    expect(b.analysis).toMatchObject({ scope: "semantic", status: "unsupported" }); expect(b.exitCode).toBe(3);
+  });
+  it.each(["advisory", "required"] as const)("marks stale heads incomplete for %s", async analysisPolicy => {
+    const r = await runWithMocks({ analysisPolicy, headMoves: true, configure: healthy });
+    expect(r.analysis?.status).toBe("incomplete"); expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0); expect(r.reviews).toHaveLength(0);
+  });
+});
+
 interface MockOpts {
+  analysisPolicy?: "advisory" | "required";
+  configure?: (env: RunEnv, deps: Deps) => void;
   githubToken?: string;
   llmAgent?: boolean;
   /** Drive one linked-repo tool call through the agent ToolContext (clone is expected to fail). */
@@ -440,6 +511,8 @@ async function runWithMocks(o: MockOpts = {}) {
     },
   };
 
+  if (o.analysisPolicy) env.inputs.analysisPolicy = o.analysisPolicy;
+  o.configure?.(env, deps);
   const out = await run(env, deps);
   return {
     ...out,
@@ -479,6 +552,8 @@ async function runWithMocks(o: MockOpts = {}) {
 }
 
 interface PrivOpts {
+  analysisPolicy?: "advisory" | "required";
+  assessment?: unknown;
   metaPr?: number;
   prsByHead?: number[];
   findings?: unknown[];
@@ -520,6 +595,7 @@ async function runPrivileged(o: PrivOpts = {}) {
     }),
   );
   writeFileSync(join(artifactDir, "findings.json"), JSON.stringify(o.findings ?? [LLM_FINDING]));
+  if (o.assessment !== undefined) writeFileSync(join(artifactDir, "analysis.json"), JSON.stringify(o.assessment));
   writeFileSync(join(artifactDir, "diff.patch"), o.diff ?? DIFF);
   const summaryPath = join(root, "summary.md");
   writeFileSync(summaryPath, "");
@@ -554,6 +630,7 @@ async function runPrivileged(o: PrivOpts = {}) {
   const spyFail = (name: string) => () => {
     throw new Error(`${name} must not be invoked in the privileged flow`);
   };
+  env.inputs.analysisPolicy = o.analysisPolicy ?? "advisory";
   const deps: Deps = {
     gh: gatewayFor(rec, {
       prsByHead: o.prsByHead,
@@ -576,6 +653,38 @@ async function runPrivileged(o: PrivOpts = {}) {
 }
 
 describe("run() orchestration", () => {
+  it("Flow B cannot turn a deterministic producer claim into required semantic coverage", async () => {
+    const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "advisory", scope: "deterministic", status: "complete",
+      stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 } };
+    const r = await runPrivileged({ assessment, analysisPolicy: "required", findings: [], failLevel: "none" });
+    expect(r.analysis).toMatchObject({ policy: "required", scope: "semantic", status: "unsupported" });
+    expect(r.exitCode).toBe(3); expect(r.reviews[0]?.event).toBe("COMMENT");
+    const a = await runPrivileged({ assessment: { ...assessment, policy: "required" }, findings: [], failLevel: "none" });
+    expect(a.analysis?.policy).toBe("advisory"); expect(a.exitCode).toBe(0);
+  });
+  it("Flow B reports mismatched and legacy assessment coverage unavailable", async () => {
+    for (const assessment of [undefined, { version: 1, headSha: "c".repeat(40) }]) {
+      const r = await runPrivileged({ assessment, analysisPolicy: "required", findings: [] });
+      expect(r.analysis?.stages).toContainEqual(expect.objectContaining({ stage: "artifact-assessment", reason: "coverage-unavailable" }));
+      expect(r.exitCode).toBe(3);
+    }
+  });
+  it("a required successful single shot accounts for every included semantic unit", async () => {
+    const r = await runWithMocks({ analysisPolicy: "required", configure: healthy });
+    expect(r.analysis).toMatchObject({ status: "complete", coverage: { filesReviewed: 1, hunksReviewed: 1 } });
+    expect(r.exitCode).toBe(0);
+  });
+  it("tool failures remain incomplete even after a valid agent final response", async () => {
+    const r = await runWithMocks({ analysisPolicy: "required", llmAgent: true, configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbeAgent = async (_p, _m, _b, _k, _c, _o, ctx) => {
+        await executeTool("read_file", { path: "missing.ts" }, ctx);
+        return { ok: true, findings: [], execution: { mode: "agent", status: "completed" } };
+      };
+    } });
+    expect(r.analysis?.status).toBe("incomplete"); expect(r.analysis?.coverage.issues).toContainEqual({ code: "tool-error", message: "read_file: inspection failed" });
+  });
   it("no llm key still posts fast-path review", async () => {
     const r = await runWithMocks({ llmApiKey: "" });
     expect(r.posted).toBe(true);
@@ -1390,7 +1499,8 @@ index 111..222 100644
     expect(r.exitCode).toBe(0);
     expect(r.reviews[0]!.comments).toHaveLength(1);
     expect(r.reviews[0]!.comments[0]).toMatchObject({ path: "src/a.ts", line: 3, side: "RIGHT" });
-    expect(r.reviews[0]!.body).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body.split("\n\nAnalysis")[0]).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body).not.toContain("Findings not placed inline");
   });
 
   it("LEFT-only high stays inline LEFT but never gates: COMMENT + exit 0, no body item, no note", async () => {
@@ -1401,7 +1511,8 @@ index 111..222 100644
     expect(r.exitCode).toBe(0);
     expect(r.reviews[0]!.comments).toHaveLength(1);
     expect(r.reviews[0]!.comments[0]).toMatchObject({ path: "src/a.ts", line: 2, side: "LEFT" });
-    expect(r.reviews[0]!.body).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body.split("\n\nAnalysis")[0]).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body).not.toContain("Findings not placed inline");
   });
 
   it("lineless sensitive-path high on a touched file still blocks: REQUEST_CHANGES + exit 1", async () => {
@@ -1420,7 +1531,8 @@ index 111..222 100644
     expect(r.reviews[0]!.event).toBe("COMMENT");
     expect(r.exitCode).toBe(0);
     expect(r.reviews[0]!.comments).toEqual([]);
-    expect(r.reviews[0]!.body).toBe("lupa: no findings.");
+    expect(r.reviews[0]!.body.split("\n\nAnalysis")[0]).toBe("lupa: no findings.");
+    expect(r.reviews[0]!.body).not.toContain("Findings not placed inline");
   });
 
   it("posted payload comments carry no rule key", async () => {
@@ -2326,8 +2438,9 @@ ${FUNNEL_DIFF_LINES.join("\n")}
     expect(r.issueComments).toHaveLength(1);
     const fallback = r.issueComments[0]!;
     expect(
-      fallback.startsWith("> Omitted: 50 finding(s) omitted to fit the 200-finding publication limit.\n\nlupa: 200 finding(s)."),
+      fallback.includes("> Omitted: 50 finding(s) omitted to fit the 200-finding publication limit."),
     ).toBe(true);
+    expect(fallback).toContain("lupa: 200 finding(s).");
   });
 
   it("forwards maxReviewBodyChars to the review gateway", async () => {

@@ -10,7 +10,9 @@ export interface ToolRoots {
   linked?: Map<string, string>;
 }
 
+export type ToolObservation = { tool: string; isError: boolean; truncated: boolean };
 export interface ToolContext {
+  observe?: (event: ToolObservation) => void;
   context?: RequestContext;
   roots: ToolRoots;
   ensureLinked?: (alias: string, opts?: { deadlineMs?: number; context?: RequestContext }) => Promise<{ dir: string; sha: string } | { error: string }>;
@@ -844,7 +846,7 @@ export function validateToolArgs(name: string, args: unknown):
   return { ok: true, args: values };
 }
 
-export async function executeTool(
+async function dispatchTool(
   name: string,
   args: unknown,
   ctx: ToolContext,
@@ -875,4 +877,15 @@ export async function executeTool(
   } catch (e) {
     return errorResult(e instanceof Error ? e.message : String(e));
   }
+}
+
+export async function executeTool(
+  name: string, args: unknown, ctx: ToolContext,
+  limits?: { deadlineMs?: number; maxResultBytes?: number; context?: RequestContext },
+): Promise<{ output: string; isError: boolean }> {
+  const result = await dispatchTool(name, args, ctx, limits);
+  let truncated = false;
+  try { truncated = JSON.parse(result.output).truncated === true; } catch { /* error envelope */ }
+  ctx.observe?.({ tool: name, isError: result.isError, truncated });
+  return result;
 }

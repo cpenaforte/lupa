@@ -72,6 +72,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
     const r = await callWithProbe("opencode-zen", "alpha-model", ZEN, "k", msgs, o);
     expect(r.result).toEqual({
       ok: true,
+      execution: { mode: "single-shot", status: "completed" },
       findings: [LLM_FINDING],
       verdicts: { pairs: [], links: [], malformed: 0 },
     });
@@ -100,6 +101,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
     // verdicts equal ONLY the winner's — the loser's [[7, 8]] is absent.
     expect(r.result).toEqual({
       ok: true,
+      execution: { mode: "single-shot", status: "completed" },
       findings: [LLM_FINDING],
       verdicts: { pairs: [[0, 1]], links: [[0, 0]], malformed: 0 },
     });
@@ -117,7 +119,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
     stubProbe(misses, okBody);
     const model = `probe-${style}`;
     const r = await callWithProbe("opencode-zen", model, ZEN, "k", msgs, o);
-    expect(r.result).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r.result).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(r.via).toBe(style);
     const called = urls();
     expect(called).toHaveLength(misses + 1);
@@ -153,7 +155,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
       }),
     );
     const r = await callWithProbe("opencode-zen", "nu-model", ZEN, "k", msgs, o);
-    expect(r.result).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r.result).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(r.via).toBe("anthropic-messages");
     // chat 404 (1 fetch) + responses 400 with and without the strict format (2) + messages (1).
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(4);
@@ -166,7 +168,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
       vi.fn(async () => new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "", refusal: "no" } }] }), { status: 200 })),
     );
     const r = await callWithProbe("opencode-zen", "zeta-refusal", ZEN, "k", msgs, o);
-    expect(r.result).toEqual({ ok: false, reason: "content-filter", detail: "model refused the request" });
+    expect(r.result).toEqual({ execution: { mode: "single-shot", status: "failed" }, ok: false, reason: "content-filter", detail: "model refused the request" });
     expect(r.via).toBe("openai-chat");
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(warnings()).toHaveLength(0);
@@ -193,7 +195,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
     expect(first.via).toBe("openai-responses");
     expect(urls()).toHaveLength(2);
     const second = await callWithProbe("opencode-zen", "theta-model", ZEN, "k", msgs, o);
-    expect(second.result).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(second.result).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(second.via).toBe("openai-responses");
     // The memoized style is tried directly: one more fetch, straight to /responses.
     expect(urls()).toHaveLength(3);
@@ -225,7 +227,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
     // The contract drifts: the memoized style now answers a persistent 400.
     drifted = true;
     const second = await callWithProbe("opencode-zen", "stale-memo-model", ZEN, "k", msgs, o);
-    expect(second.result).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(second.result).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(second.via).toBe("openai-chat");
     // The memo now points at the new winner: one fetch, straight to chat.
     const before = vi.mocked(fetch).mock.calls.length;
@@ -323,7 +325,7 @@ describe("callWithProbe: auto discovers the style from 400/404 errors", () => {
       msgs,
       o,
     );
-    expect(r.result).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r.result).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     expect(r.via).toBe("google-models");
     expect(urls().at(-1)).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/probe-google-misfire:generateContent",

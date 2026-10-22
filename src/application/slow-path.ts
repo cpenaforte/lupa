@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunEnv, Outcome, Deps } from "./contracts.js";
 import type { Finding } from "../domain/finding.js";
+import type { AnalysisAssessment, StageResult } from "../domain/assessment.js";
 import { sanitizeFinding } from "../domain/finding.js";
 import type { DedupVerdicts, LlmResult } from "../llm/types.js";
 import { TOOL_DEFS, type ToolContext } from "../agent-tools.js";
 import { AGENT_LIMITS, type Conversation } from "../agent-types.js";
 import { catalogProtocolFor, resolveEndpoint, type ResolvedEndpoint } from "../providers.js";
 import { ensureLinkedRepo, parseLinkedRepos } from "../linked-repos.js";
-import { buildMessages } from "../prompt.js";
+import { buildMessages, ISSUE_TRUNCATION_MARKER } from "../prompt.js";
 import { budgetPrompt } from "../prompt/budget.js";
 import { note } from "./publish.js";
 
@@ -31,8 +32,21 @@ export async function slowPath(
   issueBody: string | undefined,
   skipped: string[],
   prBody: string,
+  assessment?: AnalysisAssessment,
 ): Promise<{ findings: Finding[]; verdicts?: DedupVerdicts } | undefined> {
   const i = env.inputs;
+  const semantic: StageResult = { stage: "semantic", applicable: true, required: assessment?.scope !== "deterministic", status: "skipped", reason: "not-executed" };
+  assessment?.stages.push(semantic);
+  const unavailable = (reason: string, status: StageResult["status"] = "unsupported") => {
+    semantic.status = status; semantic.reason = reason;
+  };
+  const observed = (r: LlmResult) => {
+    if (!r.ok) { unavailable(`${r.reason}: ${r.detail}`, r.reason === "no-key" || r.reason === "unsupported" ? "unsupported" : "failed"); return; }
+    if (!r.execution) { unavailable("unknown-health"); return; }
+    unavailable(r.execution.reason ?? r.execution.status,
+      r.execution.status === "completed" ? "ok" : r.execution.status === "fallback" ? "unsupported" : r.execution.status === "budget" ? "skipped" : "failed");
+    if (i.llmAgent && r.execution.mode !== "agent") unavailable("tools-unsupported");
+  };
   /** One aggregate-usage line when the consumed result observed usage; silent otherwise. */
   const noteUsage = (result: LlmResult): void => {
     if (result.ok && result.usage !== undefined) {
@@ -41,14 +55,17 @@ export async function slowPath(
     }
   };
   if (i.llmApiKey === "") {
+    unavailable("no-key; semantic review did not run", semantic.required ? "unsupported" : "skipped");
     core.info("no llm_api_key: slow path skipped");
     return undefined;
   }
   if (promptText.trim() === "") {
+    semantic.applicable = false; semantic.reason = "no-prompt-eligible-content";
     core.info("no prompt-able files in this change: slow path skipped");
     return undefined;
   }
   if (i.llmModel === "") {
+    unavailable("missing-model");
     core.warning("llm_model is empty: slow path skipped");
     return undefined;
   }
@@ -64,6 +81,7 @@ export async function slowPath(
       prNumber: pr,
     });
   } catch (e) {
+    unavailable(`invalid-endpoint: ${(e as Error).message}`);
     core.warning(`slow path skipped: ${(e as Error).message}`);
     return undefined;
   }
@@ -71,6 +89,7 @@ export async function slowPath(
     try {
       await deps.analysis.ensureOllama(ep.baseUrl, i.llmModel, { timeoutSeconds: i.timeoutSeconds, apiKey: i.llmApiKey });
     } catch (e) {
+      unavailable(`model-setup: ${(e as Error).message}`, "failed");
       core.warning(`slow path skipped: ${(e as Error).message}`);
       return undefined;
     }
@@ -79,6 +98,7 @@ export async function slowPath(
     ep.baseUrl, i.llmModel, i.llmApiKey, catalogProtocolFor(i.llmProvider, ep.apiStyle),
   );
   if (check.status === "absent") {
+    unavailable("model-not-listed");
     core.warning(`slow path skipped: model "${i.llmModel}" is not listed by the provider`);
     return undefined;
   }
@@ -98,12 +118,16 @@ export async function slowPath(
   );
   const promptBytes = Buffer.byteLength(messages.user, "utf8");
   if (promptBytes > i.maxPromptChars) {
+    unavailable("prompt-budget", "skipped");
     core.warning(`prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts`);
     note(env, out, `lupa: prompt ${promptBytes} exceeds max_prompt_chars ${i.maxPromptChars} after bounded cuts — LLM review skipped, gate uses fast findings only.`);
     return undefined;
   }
   if (b.issueDropped) {
     core.info(`linked issue context dropped to fit the ${i.maxPromptChars}-byte prompt budget`);
+  }
+  if (issueBody !== undefined && (b.issueDropped || b.issueBody?.endsWith(ISSUE_TRUNCATION_MARKER))) {
+    assessment?.coverage.issues.push({ code: "issue-context", message: "Linked issue context was truncated or omitted by the prompt budget." });
   }
   const llmOpts = {
     model: i.llmModel,
@@ -129,6 +153,9 @@ export async function slowPath(
       const linked = parseLinkedRepos(prBody, selfRepo);
       if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
       const toolCtx: ToolContext = {
+        observe: event => {
+          if (event.isError || event.truncated) assessment?.coverage.issues.push({ code: event.isError ? "tool-error" : "tool-truncated", message: `${event.tool}: ${event.isError ? "inspection failed" : "inspection truncated"}` });
+        },
         roots: { self: env.workDir, linked: new Map() },
         ensureLinked: async (alias, opts?) => {
           if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
@@ -180,6 +207,7 @@ export async function slowPath(
               toolCtx,
             )
           : await deps.analysis.callByStyleAgent(ep, conv, agentOpts, toolCtx);
+      observed(res);
       if (!res.ok) {
         core.warning(`slow path failed (${res.reason}): ${res.detail}`);
         return undefined;
@@ -194,6 +222,7 @@ export async function slowPath(
     i.llmApiStyle === "auto" && i.llmPath === ""
       ? await deps.analysis.callWithProbe(i.llmProvider, i.llmModel, ep.baseUrl, i.llmApiKey, messages, llmOpts)
       : await deps.analysis.callByStyle(ep, messages, llmOpts);
+  observed(res);
   if (!res.ok) {
     core.warning(`slow path failed (${res.reason}): ${res.detail}`);
     return undefined;

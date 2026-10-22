@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectL2Tools, execTool, L2_TIMEOUT_MS, l2Argv, runL2 } from "../src/l2.js";
+import { detectL2Tools, execTool, L2_TIMEOUT_MS, l2Argv, runL2, runL2Detailed } from "../src/l2.js";
+
+it("distinguishes a missing configured binary from completed native checks", async () => {
+  const dir = makeTmp({ "package.json": "{}" });
+  const r = await runL2Detailed(dir, async () => ({ stdout: "", failure: { code: "ENOENT", signal: null, output: "" } }));
+  expect(r.findings).toEqual([]);
+  expect(r.stages).toEqual([{ stage: "l2:prettier", status: "unsupported", applicable: true, required: true, reason: "missing-binary" }]);
+});
 
 it("execTool strips secrets from explicit child env and preserves zero-exit stdout", async () => {
   const result = await execTool(process.execPath, ["-e", "console.log(JSON.stringify(process.env))"], process.cwd(), 5000,

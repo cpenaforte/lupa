@@ -3,6 +3,7 @@ import { cleanEnvForExec, type ExecutionOptions } from "./runtime/exec-env.js";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Finding } from "./domain/finding.js";
+import type { StageResult } from "./domain/assessment.js";
 
 export interface L2Tool {
   name: string;
@@ -126,7 +127,7 @@ export const execTool: Spawner = async (cmd, args, cwd, timeoutMs = L2_TIMEOUT_M
     cwd, env: cleanEnvForExec(execution.env ?? process.env),
     timeoutMs, maxBufferBytes: MAX_BUFFER, signal: execution.signal,
   });
-  const incomplete = r.cancelled || r.cleanupFailed === true || (r.exitCode === null && !r.missing);
+  const incomplete = r.cancelled || r.cleanupFailed === true || (r.errorCode !== undefined && !r.missing) || (r.exitCode === null && !r.missing);
   return {
     stdout: r.stdout,
     failure: r.exitCode === 0 && !r.timedOut && !incomplete ? undefined : {
@@ -257,9 +258,22 @@ export async function runL2(
   changedFiles: Set<string> = new Set(),
   execution?: ExecutionOptions,
 ): Promise<Finding[]> {
+  return (await runL2Detailed(dir, spawn, timeoutMs, changedFiles, execution)).findings;
+}
+
+export async function runL2Detailed(
+  dir: string, spawn: Spawner = execTool, timeoutMs: number = L2_TIMEOUT_MS,
+  changedFiles: Set<string> = new Set(), execution?: ExecutionOptions,
+): Promise<{ findings: Finding[]; stages: StageResult[] }> {
   const findings: Finding[] = [];
+  const stages: StageResult[] = [];
   for (const name of detectL2Tools(dir)) {
-    findings.push(...(await runOne(name, dir, spawn, timeoutMs, changedFiles, execution)));
+    const { cmd, args } = l2Argv(name);
+    const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
+    stages.push({ stage: `l2:${name}`, applicable: true, required: true,
+      status: failure?.code === "ENOENT" ? "unsupported" : failure ? "failed" : "ok",
+      ...(failure ? { reason: failure.code === "ENOENT" ? "missing-binary" : describeFailure(name, failure, timeoutMs) } : {}) });
+    findings.push(...(interpreters[name] ?? interpretDefault)(name, failure, stdout, changedFiles, timeoutMs));
   }
-  return findings;
+  return { findings, stages };
 }

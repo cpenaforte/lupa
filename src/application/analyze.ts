@@ -5,10 +5,13 @@ import type { RunEnv, Deps, Outcome, EventFields } from "./contracts.js";
 import type { Finding } from "../domain/finding.js";
 import { sanitizeFinding } from "../domain/finding.js";
 import type { PrMeta } from "../domain/diff.js";
+import type { AnalysisAssessment } from "../domain/assessment.js";
+import { assessmentExit } from "../domain/assessment.js";
+import { projectDiff, finalizeAssessment } from "../analysis/coverage.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { runL0 } from "../fastpath.js";
-import { filterForPrompt, isLockfile, parsePatch, PER_FILE_CAP, truncateDiff } from "../diff/patch.js";
-import { readDiff, writeFindings, writePrMeta } from "../artifacts/review-store.js";
+import { isLockfile, parsePatch, PER_FILE_CAP } from "../diff/patch.js";
+import { readDiff, writeFindings, writePrMeta, writeAssessment } from "../artifacts/review-store.js";
 import { resolvePrNumber, shouldTrigger } from "../github.js";
 import { linkedIssueNumber } from "../prompt.js";
 import { redactFindings, toSarif } from "../review/render.js";
@@ -79,6 +82,10 @@ function prNumberFor(env: RunEnv): number | null {
 /** Fluxo A: pull_request / issue_comment / review / dispatch. The diff comes from the template. */
 export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Promise<void> {
   out.slowPathSkipped = true;
+  const assessment: AnalysisAssessment = { version: 1, baseSha: env.baseSha, headSha: env.headSha,
+    policy: env.inputs.analysisPolicy ?? "advisory", scope: env.inputs.analysisPolicy === "required" || env.inputs.llmApiKey !== "" ? "semantic" : "deterministic",
+    status: "skipped", stages: [], coverage: { filesTotal: 0, hunksTotal: 0, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 } };
+  out.analysis = assessment;
   if (!triggerFor(env)) {
     note(env, out, `lupa: event "${env.eventName}" does not trigger a review; nothing to do.`);
     return;
@@ -107,6 +114,13 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
     is_fork: pull.isFork,
   };
   writePrMeta(meta, env.artifactDir);
+  const prompt = projectDiff(files, env.inputs.maxDiffChars, PER_FILE_CAP);
+  assessment.status = "incomplete";
+  assessment.coverage = { ...assessment.coverage, filesTotal: prompt.eligibleFiles, hunksTotal: prompt.eligibleHunks,
+    issues: [...prompt.issues, ...issues.map(i => ({ code: "patch-unparsed", message: i.message }))] };
+  if (prompt.issues.some(i => i.code === "unsupported-path")) assessment.stages.push({ stage: "filtered-paths", required: true, applicable: true, status: "unsupported", reason: "content-without-analyzer" });
+  assessment.stages.push({ stage: "analysis", required: true, applicable: true, status: "skipped", reason: "execution-pending" });
+  writeAssessment(env.artifactDir, assessment, env.inputs.maxArtifactBytes, runtimeSecrets(env));
 
   const changedNames = new Set(files.map((f) => basename(f.file)));
   const l0 = runL0(files, {
@@ -137,11 +151,23 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
     }, execution);
     if (forkWithSecrets) {
       core.warning("fork PR with secrets in scope: L2 native toolchains skipped");
+      assessment.stages.push({ stage: "l2", applicable: true, required: true, status: "skipped", reason: "fork-with-secrets" });
       return { scan: s, l2: [L2_SKIPPED] };
     }
-    const l = await deps.analysis.runL2(env.workDir, new Set(files.map((f) => f.file)), execution);
+    if (deps.analysis.runL2Detailed) {
+      const l = await deps.analysis.runL2Detailed(env.workDir, new Set(files.map(f => f.file)), execution);
+      assessment.stages.push(...l.stages);
+      return { scan: s, l2: l.findings };
+    }
+    const l = await deps.analysis.runL2(env.workDir, new Set(files.map(f => f.file)), execution);
+    assessment.stages.push({ stage: "l2", applicable: true, required: true, status: "unsupported", reason: "unknown-health" });
     return { scan: s, l2: l };
   })();
+  const expectedScanners = ["semgrep", "gitleaks", "trivy", ...(lockfiles.length ? ["osv-scanner"] : [])];
+  assessment.stages.push(...(scan.stages ?? []));
+  for (const stage of expectedScanners) if (!scan.stages?.some(s => s.stage === stage)) {
+    assessment.stages.push({ stage, applicable: true, required: true, status: "unsupported", reason: "unknown-health" });
+  }
   if (scan.sbomPath !== undefined) {
     try {
       copyFileSync(scan.sbomPath, join(env.artifactDir, "sbom.cdx.json"));
@@ -155,7 +181,6 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   // Written before the LLM call so a later failure still leaves the fast results uploadable.
   writeFindings(env.artifactDir, redactFindings(fast, runtimeSecrets(env)));
 
-  const prompt = truncateDiff(filterForPrompt(files), env.inputs.maxDiffChars, PER_FILE_CAP);
   let issueBody: string | undefined;
   const issueNo = linkedIssueNumber(pull.body);
   if (issueNo !== null) {
@@ -163,11 +188,17 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
       issueBody = await deps.gh.getIssueBody(issueNo);
       out.issueBodyFetched = issueNo;
     } catch (e) {
+      if (assessment.scope === "semantic") assessment.coverage.issues.push({ code: "issue-context", message: `Linked issue #${issueNo} could not be fetched.` });
       core.warning(`linked issue #${issueNo} not fetched: ${(e as Error).message}`);
     }
   }
 
-  const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body);
+  const llm = await slowPath(env, out, deps, pr, fast, prompt.text, issueBody, prompt.skipped, pull.body, assessment);
+  assessment.stages = assessment.stages.filter(s => s.stage !== "analysis");
+  if (assessment.stages.some(s => s.stage === "semantic" && s.status === "ok")) {
+    assessment.coverage.filesReviewed = prompt.includedFiles;
+    assessment.coverage.hunksReviewed = prompt.includedHunks;
+  }
   if (llm === undefined) {
     note(env, out, "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged");
   }
@@ -185,6 +216,6 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   const { merged: sarifSet } = verdicts === undefined ? { merged: redacted } : mergeDuplicates(redacted, verdicts);
   writeFileSync(join(env.artifactDir, "sarif.json"), JSON.stringify(toSarif(sarifSet), null, 2) + "\n", "utf8");
 
-  const { blocking } = await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts });
-  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, blocking);
+  const result = await publishReview({ env, deps, out, pr, isFork: pull.isFork, findings: all, hunks: files, headSha: env.headSha, verdicts, assessment: finalizeAssessment(assessment) });
+  out.exitCode = assessmentExit(env.inputs.analysisPolicy, result.assessment.status, out.staleSkipped ? 0 : exitFor(env.inputs.failLevel, result.blocking));
 }

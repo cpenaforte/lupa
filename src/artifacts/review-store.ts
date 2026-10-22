@@ -5,8 +5,71 @@ import type { PrMeta } from "../domain/diff.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { readCappedFileSync } from "../artifact-limits.js";
 import { DEFAULT_MAX_ARTIFACT_BYTES } from "../inputs.js";
+import type { AnalysisAssessment, StageResult, CoverageIssue } from "../domain/assessment.js";
+import { finalizeAssessment } from "../analysis/coverage.js";
+import { redact } from "../domain/text.js";
 
 const SEVERITIES: ReadonlySet<string> = new Set(["info", "warning", "high"]);
+
+/** Copy only the public contract: never serialize accidental tool data or credentials. */
+function assessmentCopy(a: AnalysisAssessment, secrets: readonly string[] = []): AnalysisAssessment {
+  const mask = (s: string) => secrets.filter(Boolean).reduce((value, key) => redact(value, key), s);
+  return {
+    version: 1, baseSha: a.baseSha, headSha: a.headSha, policy: a.policy, scope: a.scope, status: a.status,
+    stages: a.stages.map(s => ({ stage: mask(s.stage), status: s.status, applicable: s.applicable, required: s.required,
+      ...(s.reason === undefined ? {} : { reason: mask(s.reason) }) })),
+    coverage: { filesTotal: a.coverage.filesTotal, hunksTotal: a.coverage.hunksTotal,
+      filesReviewed: a.coverage.filesReviewed, hunksReviewed: a.coverage.hunksReviewed,
+      issuesOmitted: a.coverage.issuesOmitted,
+      issues: a.coverage.issues.map(i => ({ code: mask(i.code), message: mask(i.message), ...(i.file === undefined ? {} : { file: mask(i.file) }) })) },
+  };
+}
+
+export function writeAssessment(dir: string, assessment: AnalysisAssessment, maxBytes: number, secrets: readonly string[]): void {
+  let a = assessmentCopy(assessment, secrets);
+  const omittedStages = Math.max(0, a.stages.length - 32);
+  a.stages = a.stages.slice(0, 32);
+  if (omittedStages) a.coverage.issues.unshift({ code: "stages-omitted", message: `${omittedStages} stage records omitted.` });
+  a.coverage.issuesOmitted += Math.max(0, a.coverage.issues.length - 200);
+  a.coverage.issues = a.coverage.issues.slice(0, 200);
+  a = finalizeAssessment(a);
+  let raw = JSON.stringify(a) + "\n";
+  if (Buffer.byteLength(raw) > maxBytes) {
+    a = { ...a, status: "incomplete", stages: [], coverage: { ...a.coverage,
+      issuesOmitted: a.coverage.issuesOmitted + a.coverage.issues.length + a.stages.length,
+      issues: [{ code: "assessment-overflow", message: "Assessment exceeded the artifact byte limit; accounting unavailable." }] } };
+    raw = JSON.stringify(a) + "\n";
+  }
+  if (Buffer.byteLength(raw) > maxBytes) throw new Error("analysis.json byte limit cannot hold the minimal assessment");
+  writeFileSync(join(dir, "analysis.json"), raw, "utf8");
+}
+
+const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const count = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+function isStage(v: unknown): v is StageResult {
+  return object(v) && typeof v.stage === "string" && ["ok", "failed", "skipped", "unsupported"].includes(String(v.status)) &&
+    typeof v.applicable === "boolean" && typeof v.required === "boolean" && (v.reason === undefined || typeof v.reason === "string");
+}
+function isIssue(v: unknown): v is CoverageIssue {
+  return object(v) && typeof v.code === "string" && typeof v.message === "string" && (v.file === undefined || typeof v.file === "string");
+}
+export function readAssessment(dir: string, maxBytes: number): AnalysisAssessment | undefined {
+  try {
+    const raw = readCappedFileSync(join(dir, "analysis.json"), maxBytes);
+    if (!raw.ok) return undefined;
+    const a: unknown = JSON.parse(raw.text);
+    const meta = readPrMeta(dir, maxBytes);
+    if (!meta || !object(a) || a.version !== 1 || typeof a.baseSha !== "string" || typeof a.headSha !== "string" ||
+      a.baseSha !== meta.base_sha || a.headSha !== meta.head_sha || !["advisory", "required"].includes(String(a.policy)) ||
+      !["deterministic", "semantic"].includes(String(a.scope)) || !["complete", "incomplete", "unsupported", "failed", "skipped"].includes(String(a.status)) ||
+      !Array.isArray(a.stages) || a.stages.length > 32 || !a.stages.every(isStage) || !object(a.coverage)) return undefined;
+    const c = a.coverage;
+    if (![c.filesTotal, c.hunksTotal, c.filesReviewed, c.hunksReviewed, c.issuesOmitted].every(count) ||
+      (c.filesReviewed as number) > (c.filesTotal as number) || (c.hunksReviewed as number) > (c.hunksTotal as number) ||
+      !Array.isArray(c.issues) || c.issues.length > 200 || !c.issues.every(isIssue)) return undefined;
+    return assessmentCopy(a as unknown as AnalysisAssessment);
+  } catch { return undefined; }
+}
 
 export function readDiff(dir: string): string {
   const path = join(dir, "diff.patch");

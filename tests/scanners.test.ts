@@ -104,6 +104,44 @@ const CLEAN_PROCESS: ProcessResult = {
   exitCode: 0, signal: null, stdout: '{"runs":[]}', stderr: "", missing: false, timedOut: false, cancelled: false,
 };
 
+it.each([0, 1, 2, null])("retains gitleaks report findings and records health for exit %s", async exitCode => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  const report = JSON.parse(INTERRUPTED_SARIF);
+  delete report.runs[0].invocations;
+  try {
+    vi.mocked(runProcess).mockImplementation(async (_command, args) => {
+      const mount = args.find(arg => arg.endsWith(":/out"));
+      if (!mount) return CLEAN_PROCESS;
+      writeFileSync(join(mount.slice(0, -":/out".length), "report.sarif"), JSON.stringify(report));
+      return { ...CLEAN_PROCESS, exitCode };
+    });
+    const r = await runScanners({ dir: ".", baselineSha: "abc" });
+    expect(r.findings).toContainEqual(expect.objectContaining({ rule: "retained-high", severity: "high", source: "gitleaks" }));
+    if (exitCode === 0 || exitCode === 1) {
+      expect(r.stages).toContainEqual({ stage: "gitleaks", status: "ok", required: true, applicable: true });
+      expect(r.findings.some(f => f.rule === "scanner-failed")).toBe(false);
+    } else {
+      expect(r.stages).toContainEqual({ stage: "gitleaks", status: "failed", required: true, applicable: true, reason: exitCode === null ? "execution-incomplete" : "unsuccessful-exit" });
+      expect(r.findings).toContainEqual(expect.objectContaining({ rule: "scanner-failed", source: "gitleaks" }));
+    }
+  } finally { vi.mocked(runProcess).mockImplementation(original); }
+});
+
+it("records structured interruptions, aggregated lockfile failures and optional SBOM failure", async () => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  try {
+    vi.mocked(runProcess).mockResolvedValue({ ...CLEAN_PROCESS, stdout: INTERRUPTED_SARIF, cleanupFailed: true });
+    const r = await runScanners({ dir: ".", baselineSha: "abc", sbom: true, lockfiles: ["a/package-lock.json", "b/package-lock.json"] });
+    expect(r.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "semgrep", status: "failed", required: true }),
+      expect.objectContaining({ stage: "gitleaks", status: "failed", required: true }),
+      expect.objectContaining({ stage: "osv-scanner", status: "failed", reason: expect.stringContaining("2 failed") }),
+      expect.objectContaining({ stage: "sbom", status: "failed", required: false }),
+    ]));
+    expect(r.findings.some(f => f.rule === "retained-high")).toBe(true);
+  } finally { vi.mocked(runProcess).mockImplementation(original); }
+});
+
 it.each(INTERRUPTIONS)("retains bounded stdout findings and failure on $name", async ({ result }) => {
   const original = vi.mocked(runProcess).getMockImplementation()!;
   try {

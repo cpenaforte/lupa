@@ -1,7 +1,7 @@
 import type { ExecutionOptions } from "../runtime/exec-env.js";
 import type { ActionInputs } from "../inputs.js";
 import type { Finding } from "../domain/finding.js";
-import type { AnalysisAssessment } from "../domain/assessment.js";
+import type { AnalysisAssessment, StageResult } from "../domain/assessment.js";
 import type { ReviewPayload } from "../domain/review.js";
 import type { ReviewThread } from "../github.js";
 import type { ToolContext } from "../agent-tools.js";
@@ -62,6 +62,7 @@ export interface Gateway {
 export interface Analysis {
   runScanners(o: Parameters<typeof runScanners>[0], execution?: ExecutionOptions): Promise<ScannerResult>;
   runL2(dir: string, changedFiles?: Set<string>, execution?: ExecutionOptions): Promise<Finding[]>;
+  runL2Detailed?(dir: string, changedFiles?: Set<string>, execution?: ExecutionOptions): Promise<{ findings: Finding[]; stages: StageResult[] }>;
   ensureOllama(baseUrl: string, model: string, o: { timeoutSeconds?: number; apiKey?: string }): Promise<void>;
   checkModelListed(baseUrl: string, model: string, apiKey: string, protocol: CatalogProtocol): Promise<{ status: "listed" | "absent" | "unknown"; detail?: string }>;
   /** Single call to the endpoint's already-resolved style (explicit style / llm_path override). */

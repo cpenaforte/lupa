@@ -141,7 +141,7 @@ describe("callByStyle dispatches to the adapter of the resolved style", () => {
     stubFetch(() => new Response(JSON.stringify(CHAT_OK), { status: 200 }));
     const ep = resolveEndpoint({ ...base, llmProvider: "openai", llmModel: "m", llmApiStyle: "openai-chat" });
     const r = await callByStyle(ep, msgs, { ...opts, model: "m", provider: "openai" });
-    expect(r).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     const [url, init] = lastCall();
     expect(url).toBe("https://api.openai.com/v1/chat/completions");
     expect(init.method).toBe("POST");
@@ -159,7 +159,7 @@ describe("callByStyle dispatches to the adapter of the resolved style", () => {
     stubFetch(() => new Response(JSON.stringify(RESPONSES_OK), { status: 200 }));
     const ep = resolveEndpoint({ ...base, llmProvider: "opencode-zen", llmModel: "gpt-6-luna", llmApiStyle: "openai-responses" });
     const r = await callByStyle(ep, msgs, { ...opts, model: "gpt-6-luna" });
-    expect(r).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     const [url, init] = lastCall();
     expect(url).toBe("https://opencode.ai/zen/v1/responses");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer k");
@@ -177,7 +177,7 @@ describe("callByStyle dispatches to the adapter of the resolved style", () => {
     stubFetch(() => new Response(JSON.stringify(MESSAGES_OK), { status: 200 }));
     const ep = resolveEndpoint({ ...base, llmProvider: "opencode-zen", llmModel: "claude-sonnet-5-5", llmApiStyle: "anthropic-messages" });
     const r = await callByStyle(ep, msgs, { ...opts, model: "claude-sonnet-5-5" });
-    expect(r).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     const [url, init] = lastCall();
     expect(url).toBe("https://opencode.ai/zen/v1/messages");
     const headers = init.headers as Record<string, string>;
@@ -196,7 +196,7 @@ describe("callByStyle dispatches to the adapter of the resolved style", () => {
     stubFetch(() => new Response(JSON.stringify(GOOGLE_OK), { status: 200 }));
     const ep = resolveEndpoint({ ...base, llmProvider: "opencode-zen", llmModel: "gemini-3.8-flash", llmApiStyle: "google-models" });
     const r = await callByStyle(ep, msgs, { ...opts, model: "gemini-3.8-flash" });
-    expect(r).toEqual({ ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
+    expect(r).toEqual({ execution: { mode: "single-shot", status: "completed" }, ok: true, findings: [LLM_FINDING], verdicts: { pairs: [], links: [], malformed: 0 } });
     const [url, init] = lastCall();
     expect(url).toBe("https://opencode.ai/zen/v1/models/gemini-3.8-flash:generateContent");
     const headers = init.headers as Record<string, string>;

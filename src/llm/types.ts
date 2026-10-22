@@ -3,7 +3,7 @@ import type { Finding } from "../domain/finding.js";
 import type { ToolCall } from "../agent-types.js";
 import type { ResolvedApiStyle } from "../providers.js";
 
-export type LlmResult =
+export type LlmResult = (
   | { ok: true; findings: Finding[]; verdicts?: DedupVerdicts; usage?: LlmUsage }
   | {
       ok: false;
@@ -16,7 +16,7 @@ export type LlmResult =
       detail: string;
       /** HTTP status behind the error, when a response existed; drives the style probe. */
       status?: number;
-    };
+    }) & { execution?: { mode: "single-shot" | "agent"; status: "completed" | "failed" | "fallback" | "budget"; reason?: string } };
 
 /**
  * Aggregate LLM token usage (numbers only — never model text or prompts).

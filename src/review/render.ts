@@ -311,3 +311,15 @@ export function toSarif(findings: Finding[]): unknown {
     runs: [{ tool: { driver: { name: "pr-reviewer" } }, results }],
   };
 }
+import type { AnalysisAssessment } from "../domain/assessment.js";
+
+/** Execution coverage is independent from severity and never an approval claim. */
+export function renderAssessment(a: AnalysisAssessment): string {
+  const c = a.coverage;
+  const lines = [`Analysis: ${a.status}; scope: ${a.scope}.`,
+    `Semantic coverage: ${c.filesReviewed}/${c.filesTotal} files, ${c.hunksReviewed}/${c.hunksTotal} hunks; ${c.hunksTotal - c.hunksReviewed} unreviewed hunks.`];
+  for (const s of a.stages) if (s.status !== "ok") lines.push(`${s.stage}: ${s.status}${s.reason ? ` (${s.reason})` : ""}.`);
+  for (const i of c.issues) lines.push(`${i.code}${i.file ? ` [${i.file}]` : ""}: ${i.message}`);
+  if (c.issuesOmitted) lines.push(`${c.issuesOmitted} coverage issue record(s) omitted.`);
+  return lines.map(escapeProse).join("\n");
+}

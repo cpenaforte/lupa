@@ -1,7 +1,9 @@
 import * as core from "@actions/core";
 import type { RunEnv, Deps, Outcome, EventFields } from "./contracts.js";
 import { sanitizeFinding } from "../domain/finding.js";
-import { readDiff, readFindings, readPrMeta } from "../artifacts/review-store.js";
+import { readDiff, readFindings, readPrMeta, readAssessment } from "../artifacts/review-store.js";
+import { assessmentExit, type AnalysisAssessment } from "../domain/assessment.js";
+import { finalizeAssessment, projectDiff } from "../analysis/coverage.js";
 import { parsePatch } from "../diff/patch.js";
 import { exitFor } from "../review/policy.js";
 import { publishReview } from "./publish.js";
@@ -59,6 +61,30 @@ export async function runArtifactFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   }
   const findings = readFindings(env.artifactDir, env.inputs.maxArtifactBytes).map(sanitizeFinding);
   const { files: hunks, issues } = parsePatch(readDiff(env.artifactDir));
+  // All producer content is read only after the trusted workflow/PR binding above.
+  const producer = readAssessment(env.artifactDir, env.inputs.maxArtifactBytes);
+  const projection = projectDiff(hunks, env.inputs.maxDiffChars, 8000);
+  const assessment: AnalysisAssessment = producer ?? {
+    version: 1, baseSha: meta.base_sha, headSha: meta.head_sha, policy: env.inputs.analysisPolicy ?? "advisory", scope: "semantic", status: "unsupported",
+    stages: [{ stage: "artifact-assessment", status: "unsupported", applicable: true, required: true, reason: "coverage-unavailable" }],
+    coverage: { filesTotal: projection.eligibleFiles, hunksTotal: projection.eligibleHunks, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 },
+  };
+  assessment.policy = env.inputs.analysisPolicy ?? "advisory";
+  assessment.status = "incomplete"; // A triggered publication cannot inherit a producer's skipped claim.
+  if (assessment.policy === "required") {
+    assessment.scope = "semantic";
+    if (!assessment.stages.some(s => s.stage === "semantic" && s.applicable && s.required && s.status === "ok")) {
+      assessment.stages.push({ stage: "semantic", applicable: true, required: true, status: "unsupported", reason: "semantic-coverage-unavailable" });
+    }
+    assessment.coverage.filesTotal = projection.eligibleFiles;
+    assessment.coverage.hunksTotal = projection.eligibleHunks;
+    assessment.coverage.filesReviewed = Math.min(assessment.coverage.filesReviewed, projection.eligibleFiles);
+    assessment.coverage.hunksReviewed = Math.min(assessment.coverage.hunksReviewed, projection.eligibleHunks);
+    for (const stage of ["semgrep", "gitleaks", "trivy"]) if (!assessment.stages.some(s => s.stage === stage && s.applicable && s.required)) {
+      assessment.stages.push({ stage, applicable: true, required: true, status: "unsupported", reason: "unknown-health" });
+    }
+  }
+  assessment.coverage.issues.push(...issues.map(i => ({ code: "patch-unparsed", message: i.message })));
   if (issues.length > 0) {
     const message = `${issues.length} patch section(s) could not be attributed to a file; review coverage is incomplete.`;
     core.warning(`diff-unparsed: ${message}`);
@@ -68,6 +94,6 @@ export async function runArtifactFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   }
   // A missing verdicts key means no judge ran: silent no-merge. Out-of-range indices
   // range-check inside the publishReview merge (dropped with the count).
-  const { blocking } = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts });
-  if (!out.staleSkipped) out.exitCode = exitFor(env.inputs.failLevel, blocking);
+  const result = await publishReview({ env, deps, out, pr, isFork: live.isFork, findings, hunks, headSha, verdicts: meta.verdicts, assessment: finalizeAssessment(assessment) });
+  out.exitCode = assessmentExit(env.inputs.analysisPolicy, result.assessment.status, out.staleSkipped ? 0 : exitFor(env.inputs.failLevel, result.blocking));
 }

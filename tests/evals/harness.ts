@@ -193,16 +193,20 @@ async function runEval(
       const error = testCase.llmError;
       return { ok: false as const, reason: error.reason, detail: error.detail } as LlmResult;
     }
-    return { ok: true as const, findings: [...(testCase.llmFindings ?? [])] };
+    return { ok: true as const, findings: [...(testCase.llmFindings ?? [])], execution: { mode: "single-shot", status: "completed" } };
   };
   const analysis: Analysis = {
     async runScanners(options) {
       analysisCalls.push({ method: "runScanners", args: [options] });
-      return { findings: [...(testCase.scannerFindings ?? [])] };
+      return { findings: [...(testCase.scannerFindings ?? [])], stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok" as const, required: true, applicable: true })) };
     },
     async runL2(dir) {
       analysisCalls.push({ method: "runL2", args: [dir] });
       return [...(testCase.l2Findings ?? [])];
+    },
+    async runL2Detailed(dir) {
+      analysisCalls.push({ method: "runL2", args: [dir] });
+      return { findings: [...(testCase.l2Findings ?? [])], stages: [{ stage: "l2:fixture", status: "ok", required: true, applicable: true }] };
     },
     async ensureOllama(...args) {
       analysisCalls.push({ method: "ensureOllama", args });

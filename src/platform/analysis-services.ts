@@ -1,7 +1,7 @@
 import * as core from "@actions/core";
 import type { Analysis } from "../application/contracts.js";
 import { runScanners } from "../scanners.js";
-import { runL2 } from "../l2.js";
+import { runL2, runL2Detailed } from "../l2.js";
 import { ensureOllama } from "../llm/transport.js";
 import { callByStyle, callWithProbe, callByStyleAgent as runStyleAgent, callWithProbeAgent as runProbeAgent } from "../llm/router.js";
 import { checkModelListed } from "../providers.js";
@@ -10,6 +10,7 @@ export function createAnalysis(): Analysis {
   return {
     runScanners,
     runL2: (dir, changedFiles, execution) => runL2(dir, undefined, undefined, changedFiles, execution),
+    runL2Detailed: (dir, changedFiles, execution) => runL2Detailed(dir, undefined, undefined, changedFiles, execution),
     ensureOllama,
     checkModelListed,
     // Explicit styles (and llm_path overrides) dispatch straight to the resolved
