@@ -653,6 +653,54 @@ async function runPrivileged(o: PrivOpts = {}) {
 }
 
 describe("run() orchestration", () => {
+  it("Flow B rejects array scanner health instead of passing required coverage", async () => {
+    const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "required", scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: stage === "semgrep" ? ["failed"] : "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 } };
+    const r = await runPrivileged({ assessment, analysisPolicy: "required", findings: [], failLevel: "none" });
+    expect(r.analysis?.stages).toContainEqual(expect.objectContaining({ stage: "artifact-assessment", reason: "coverage-unavailable" }));
+    expect(r.analysis?.status).toBe("unsupported");
+    expect(r.exitCode).toBe(3);
+    expect(r.reviews[0]?.event).toBe("COMMENT");
+    expect(r.reviews[0]?.body).toContain("unsupported");
+  });
+  it.each([
+    { maxBytes: 1000, extraStages: 40 },
+    { maxBytes: 100000, extraStages: 40 },
+    { maxBytes: 100000, extraStages: 0 },
+  ])("keeps persisted coverage safe when oversized metadata prevents readback ($maxBytes bytes, $extraStages extra stages)", async ({ maxBytes, extraStages }) => {
+    const secret = "synthetic-assessment-runtime-secret";
+    const r = await runWithMocks({ analysisPolicy: "required", failLevel: "none", llmApiKey: secret, maxArtifactBytes: maxBytes,
+      configure: (env, deps) => {
+        healthy(env, deps);
+        deps.analysis.runScanners = async () => ({ findings: [{ severity: "info", file: "src/a.ts", line: 2, rule: "fixture", message: "Retained scanner evidence" }], stages: ["semgrep", "gitleaks", "trivy", ...Array.from({ length: extraStages }, (_, i) => `extra-${i}`)]
+          .map(stage => ({ stage, status: "ok", applicable: true, required: true, reason: secret })) });
+        deps.analysis.callWithProbe = async () => ({ ok: true, findings: [], execution: { mode: "single-shot", status: "completed" },
+          verdicts: { pairs: Array.from({ length: 10000 }, () => [0, 0] as [number, number]), links: [], malformed: 0 } });
+      } });
+    const raw = readFileSync(join(r.artifactDir, "analysis.json"), "utf8");
+    const persisted = JSON.parse(raw);
+    expect(Buffer.byteLength(readFileSync(join(r.artifactDir, "pr-meta.json")))).toBeGreaterThan(maxBytes);
+    expect(r.analysis).toEqual(persisted);
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.exitCode).toBe(3);
+    expect(r.reviews[0]?.event).toBe("COMMENT");
+    expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(maxBytes);
+    expect(r.reviews[0]?.comments).toHaveLength(1);
+    expect(r.reviews[0]?.comments[0]?.body).toContain("Retained scanner evidence");
+    if (maxBytes === 100000) expect(r.analysis?.coverage.issues).toContainEqual({
+      code: "assessment-unavailable", message: "Persisted assessment could not be validated against PR metadata.",
+    });
+    expect(r.analysis!.stages.length).toBeLessThanOrEqual(32);
+    expect(r.analysis!.coverage.issues.length).toBeLessThanOrEqual(200);
+    expect(r.analysis!.coverage.issuesOmitted + r.analysis!.coverage.issues.length).toBeGreaterThan(0);
+    for (const text of [raw, JSON.stringify(r.analysis), r.body!, readFileSync(r.summaryPath, "utf8")]) {
+      expect(text).not.toContain(secret);
+      expect(text).toContain("incomplete");
+    }
+    expect(readFileSync(r.summaryPath, "utf8").length).toBeLessThanOrEqual(DEFAULT_MAX_REVIEW_BODY_CHARS);
+    expect(r.body!.length).toBeLessThanOrEqual(DEFAULT_MAX_REVIEW_BODY_CHARS);
+  });
   it("Flow B cannot turn a deterministic producer claim into required semantic coverage", async () => {
     const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "advisory", scope: "deterministic", status: "complete",
       stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),

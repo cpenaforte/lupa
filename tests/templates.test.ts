@@ -2,6 +2,22 @@ import * as fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("workflow templates", () => {
+  it("uploads analysis.json with the review artifact on unsuccessful analysis runs", () => {
+    const text = fs.readFileSync("docs/workflow-template.yml", "utf8");
+    const upload = text.split(/^      - name: /m).find(step => step.startsWith("Upload review artifact\n"))!;
+    expect(upload).toMatch(/^        if: always\(\)$/m);
+    expect(upload).toMatch(/^        uses: actions\/upload-artifact@[0-9a-f]{40}/m);
+    expect(upload).toMatch(/^          name: pr-reviewer-out$/m);
+    const paths = upload.split("          path: |\n")[1]!.trim().split("\n").map(line => line.trim());
+    expect(paths).toEqual([
+      "${{ runner.temp }}/pr-reviewer-out/diff.patch",
+      "${{ runner.temp }}/pr-reviewer-out/pr-meta.json",
+      "${{ runner.temp }}/pr-reviewer-out/findings.json",
+      "${{ runner.temp }}/pr-reviewer-out/analysis.json",
+      "${{ runner.temp }}/pr-reviewer-out/sarif.json",
+      "${{ runner.temp }}/pr-reviewer-out/sbom.cdx.json",
+    ]);
+  });
   it("consumer jobs have a 30 minute wall-clock backstop", () => {
     for (const file of ["docs/workflow-template.yml", "docs/workflow-template-privileged.yml"]) {
       const text = fs.readFileSync(file, "utf8");

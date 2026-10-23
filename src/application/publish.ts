@@ -93,10 +93,12 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
 export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[]; assessment: AnalysisAssessment }> {
   let assessment = a.assessment;
   const persist = () => {
-    assessment = finalizeAssessment(assessment);
-    writeAssessment(a.env.artifactDir, assessment, a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
-    // Reuse the bounded/redacted reporting record, including serialization omissions.
-    assessment = readAssessment(a.env.artifactDir, a.env.inputs.maxArtifactBytes) ?? assessment;
+    assessment = writeAssessment(a.env.artifactDir, finalizeAssessment(assessment), a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
+    // A failed SHA-bound readback must retain sanitized accounting and disclose the loss.
+    if (readAssessment(a.env.artifactDir, a.env.inputs.maxArtifactBytes) === undefined) {
+      assessment.coverage.issues.push({ code: "assessment-unavailable", message: "Persisted assessment could not be validated against PR metadata." });
+      assessment = writeAssessment(a.env.artifactDir, assessment, a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
+    }
     a.out.analysis = assessment;
   };
   const stale = () => {

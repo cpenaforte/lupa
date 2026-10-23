@@ -21159,11 +21159,12 @@ function writeAssessment(dir, assessment, maxBytes, secrets) {
   if (Buffer.byteLength(raw) > maxBytes)
     throw new Error("analysis.json byte limit cannot hold the minimal assessment");
   writeFileSync(join2(dir, "analysis.json"), raw, "utf8");
+  return a;
 }
 var object = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var count = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 function isStage(v) {
-  return object(v) && typeof v.stage === "string" && ["ok", "failed", "skipped", "unsupported"].includes(String(v.status)) && typeof v.applicable === "boolean" && typeof v.required === "boolean" && (v.reason === void 0 || typeof v.reason === "string");
+  return object(v) && typeof v.stage === "string" && typeof v.status === "string" && ["ok", "failed", "skipped", "unsupported"].includes(v.status) && typeof v.applicable === "boolean" && typeof v.required === "boolean" && (v.reason === void 0 || typeof v.reason === "string");
 }
 function isIssue(v) {
   return object(v) && typeof v.code === "string" && typeof v.message === "string" && (v.file === void 0 || typeof v.file === "string");
@@ -21175,7 +21176,7 @@ function readAssessment(dir, maxBytes) {
       return void 0;
     const a = JSON.parse(raw.text);
     const meta = readPrMeta(dir, maxBytes);
-    if (!meta || !object(a) || a.version !== 1 || typeof a.baseSha !== "string" || typeof a.headSha !== "string" || a.baseSha !== meta.base_sha || a.headSha !== meta.head_sha || !["advisory", "required"].includes(String(a.policy)) || !["deterministic", "semantic"].includes(String(a.scope)) || !["complete", "incomplete", "unsupported", "failed", "skipped"].includes(String(a.status)) || !Array.isArray(a.stages) || a.stages.length > 32 || !a.stages.every(isStage) || !object(a.coverage))
+    if (!meta || !object(a) || a.version !== 1 || typeof a.baseSha !== "string" || typeof a.headSha !== "string" || a.baseSha !== meta.base_sha || a.headSha !== meta.head_sha || typeof a.policy !== "string" || !["advisory", "required"].includes(a.policy) || typeof a.scope !== "string" || !["deterministic", "semantic"].includes(a.scope) || typeof a.status !== "string" || !["complete", "incomplete", "unsupported", "failed", "skipped"].includes(a.status) || !Array.isArray(a.stages) || a.stages.length > 32 || !a.stages.every(isStage) || !object(a.coverage))
       return void 0;
     const c = a.coverage;
     if (![c.filesTotal, c.hunksTotal, c.filesReviewed, c.hunksReviewed, c.issuesOmitted].every(count) || c.filesReviewed > c.filesTotal || c.hunksReviewed > c.hunksTotal || !Array.isArray(c.issues) || c.issues.length > 200 || !c.issues.every(isIssue))
@@ -27881,9 +27882,11 @@ ${items.join("\n")}`;
 async function publishReview(a) {
   let assessment = a.assessment;
   const persist = () => {
-    assessment = finalizeAssessment(assessment);
-    writeAssessment(a.env.artifactDir, assessment, a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
-    assessment = readAssessment(a.env.artifactDir, a.env.inputs.maxArtifactBytes) ?? assessment;
+    assessment = writeAssessment(a.env.artifactDir, finalizeAssessment(assessment), a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
+    if (readAssessment(a.env.artifactDir, a.env.inputs.maxArtifactBytes) === void 0) {
+      assessment.coverage.issues.push({ code: "assessment-unavailable", message: "Persisted assessment could not be validated against PR metadata." });
+      assessment = writeAssessment(a.env.artifactDir, assessment, a.env.inputs.maxArtifactBytes, runtimeSecrets(a.env));
+    }
     a.out.analysis = assessment;
   };
   const stale = () => {

@@ -25,7 +25,8 @@ function assessmentCopy(a: AnalysisAssessment, secrets: readonly string[] = []):
   };
 }
 
-export function writeAssessment(dir: string, assessment: AnalysisAssessment, maxBytes: number, secrets: readonly string[]): void {
+/** Return the exact bounded/redacted record persisted for publication and reporting. */
+export function writeAssessment(dir: string, assessment: AnalysisAssessment, maxBytes: number, secrets: readonly string[]): AnalysisAssessment {
   let a = assessmentCopy(assessment, secrets);
   const omittedStages = Math.max(0, a.stages.length - 32);
   a.stages = a.stages.slice(0, 32);
@@ -42,12 +43,13 @@ export function writeAssessment(dir: string, assessment: AnalysisAssessment, max
   }
   if (Buffer.byteLength(raw) > maxBytes) throw new Error("analysis.json byte limit cannot hold the minimal assessment");
   writeFileSync(join(dir, "analysis.json"), raw, "utf8");
+  return a;
 }
 
 const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const count = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 function isStage(v: unknown): v is StageResult {
-  return object(v) && typeof v.stage === "string" && ["ok", "failed", "skipped", "unsupported"].includes(String(v.status)) &&
+  return object(v) && typeof v.stage === "string" && typeof v.status === "string" && ["ok", "failed", "skipped", "unsupported"].includes(v.status) &&
     typeof v.applicable === "boolean" && typeof v.required === "boolean" && (v.reason === undefined || typeof v.reason === "string");
 }
 function isIssue(v: unknown): v is CoverageIssue {
@@ -60,8 +62,9 @@ export function readAssessment(dir: string, maxBytes: number): AnalysisAssessmen
     const a: unknown = JSON.parse(raw.text);
     const meta = readPrMeta(dir, maxBytes);
     if (!meta || !object(a) || a.version !== 1 || typeof a.baseSha !== "string" || typeof a.headSha !== "string" ||
-      a.baseSha !== meta.base_sha || a.headSha !== meta.head_sha || !["advisory", "required"].includes(String(a.policy)) ||
-      !["deterministic", "semantic"].includes(String(a.scope)) || !["complete", "incomplete", "unsupported", "failed", "skipped"].includes(String(a.status)) ||
+      a.baseSha !== meta.base_sha || a.headSha !== meta.head_sha || typeof a.policy !== "string" || !["advisory", "required"].includes(a.policy) ||
+      typeof a.scope !== "string" || !["deterministic", "semantic"].includes(a.scope) ||
+      typeof a.status !== "string" || !["complete", "incomplete", "unsupported", "failed", "skipped"].includes(a.status) ||
       !Array.isArray(a.stages) || a.stages.length > 32 || !a.stages.every(isStage) || !object(a.coverage)) return undefined;
     const c = a.coverage;
     if (![c.filesTotal, c.hunksTotal, c.filesReviewed, c.hunksReviewed, c.issuesOmitted].every(count) ||

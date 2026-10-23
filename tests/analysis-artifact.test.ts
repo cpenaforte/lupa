@@ -30,8 +30,9 @@ describe("assessment artifacts", () => {
     assessment.coverage.issues = Array.from({ length: 205 }, () => ({ code: "x", message: "secret-key" }));
     assessment.coverage.issuesOmitted = 3;
     assessment.stages = Array.from({ length: 40 }, () => ({ stage: "check", status: "ok", applicable: true, required: true, reason: "secret-key" }));
-    writeAssessment(dir, assessment, 100000, ["secret-key"]);
+    const persisted = writeAssessment(dir, assessment, 100000, ["secret-key"]);
     const r = readAssessment(dir, 100000)!;
+    expect(persisted).toEqual(r);
     expect(r.status).toBe("incomplete"); expect(r.stages).toHaveLength(32);
     expect(r.coverage.issues).toHaveLength(200); expect(r.coverage.issuesOmitted).toBeGreaterThanOrEqual(8);
     expect(JSON.stringify(r)).toContain("8 stage");
@@ -39,8 +40,17 @@ describe("assessment artifacts", () => {
   });
   it("writes a small incomplete overflow record", () => {
     const { dir, assessment } = setup(); assessment.stages[0]!.reason = "x".repeat(10000);
-    writeAssessment(dir, assessment, 1000, []);
+    const persisted = writeAssessment(dir, assessment, 1000, []);
     const raw = readFileSync(join(dir, "analysis.json"), "utf8"); expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(1000);
+    expect(persisted).toEqual(JSON.parse(raw));
     expect(readAssessment(dir, 1000)).toMatchObject({ status: "incomplete", coverage: { issues: [expect.objectContaining({ code: "assessment-overflow" })] } });
+  });
+  it.each(["policy", "scope", "status", "stage status"])("rejects an array in the %s enum field", (field) => {
+    const { dir, assessment } = setup();
+    const bad = field === "stage status"
+      ? { ...assessment, stages: [{ ...assessment.stages[0], status: ["failed"] }] }
+      : { ...assessment, [field]: [assessment[field as "policy" | "scope" | "status"]] };
+    writeFileSync(join(dir, "analysis.json"), JSON.stringify(bad));
+    expect(readAssessment(dir, 10000)).toBeUndefined();
   });
 });
