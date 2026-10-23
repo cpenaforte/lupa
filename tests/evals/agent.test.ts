@@ -24,6 +24,19 @@ function okText(text: string, toolCalls: ToolCall[] = []): AgentReply {
 }
 
 describe("deterministic agent tool-round evaluation", () => {
+  it("preserves removal attribution and invalid claims through the agent final parser", async () => {
+    const change = { file: "src/auth.ts", line: 2, side: "LEFT" };
+    const f = { severity: "high", file: "src/auth.ts", line: 3, rule: "removed-guard", message: "Removed authorization guard", suggestion: null };
+    const outcome = await runAgent({ system: "s", user: "u" }, { roots: { self: "/tmp" } }, { maxTurns: 2, maxSeconds: 120, timeoutSeconds: 5 }, {
+      call: async () => okText(JSON.stringify({ findings: [{ ...f, change }, { ...f, change: { ...change, line: 0 } }] })),
+      log: () => {},
+    });
+    expect(outcome.result).toMatchObject({ ok: true, findings: [{ change }, { changeInvalid: true }] });
+    if (outcome.result.ok) {
+      expect(outcome.result.findings[0]).not.toHaveProperty("source");
+      expect(outcome.result.findings[1]).not.toHaveProperty("change");
+    }
+  });
   it("retains accepted no-tools capability and shared cancellation during fallback repair", async () => {
     const controller = new AbortController();
     const context = { deadlineMs: Date.now() + 120_000, signal: controller.signal };

@@ -240,6 +240,45 @@ const healthy = (_env: RunEnv, deps: Deps) => {
 };
 
 describe("analysis assurance orchestration", () => {
+  it.each(["required", "advisory"] as const)("Flow B validates causal claims under current %s policy", async analysisPolicy => {
+    const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: analysisPolicy === "required" ? "advisory" : "required", scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 } };
+    const finding = { severity: "high", file: "src/auth.ts", line: 3, rule: "removed-guard", message: "Removed authorization", change: { file: "src/auth.ts", line: 2, side: "LEFT" } };
+    const diff = readFileSync(new URL("./fixtures/evals/deleted-authorization.patch", import.meta.url), "utf8");
+    const r = await runPrivileged({ diff, assessment, analysisPolicy, failLevel: "high", findings: [finding] });
+    expect(r.analysis?.status).toBe("complete");
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 1 : 0);
+    expect(r.reviews[0]?.event).toBe(analysisPolicy === "required" ? "REQUEST_CHANGES" : "COMMENT");
+    const malformed = await runPrivileged({ diff, assessment, analysisPolicy, failLevel: "high", findings: [{ ...finding, file: "untouched.ts", change: { line: 2 } }] });
+    expect(malformed.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+    expect(malformed.reviews[0]?.event).toBe("COMMENT");
+    expect(malformed.reviews[0]?.body).toContain("Removed authorization");
+  });
+  it.each(["required", "advisory"] as const)("publishes deletion anchors under %s policy independently of display context", async analysisPolicy => {
+    const diff = readFileSync(new URL("./fixtures/evals/deleted-authorization.patch", import.meta.url), "utf8");
+    const f: Finding = { severity: "high", file: "src/auth.ts", line: 3, rule: "missing-auth", message: "Removed authorization guard", change: { file: "src/auth.ts", line: 2, side: "LEFT" } };
+    const r = await runWithMocks({ diff, analysisPolicy, failLevel: "high", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [f], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("complete");
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 1 : 0);
+    expect(r.reviews[0]?.event).toBe(analysisPolicy === "required" ? "REQUEST_CHANGES" : "COMMENT");
+    expect(r.reviews[0]?.comments[0]).toMatchObject({ path: "src/auth.ts", line: 3, side: "RIGHT" });
+    expect(readFindings(r.artifactDir)[0]?.change).toEqual(f.change);
+  });
+  it("persists unresolved required attribution before reporting or publishing", async () => {
+    const r = await runWithMocks({ analysisPolicy: "required", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [{ ...LLM_FINDING, line: 1, severity: "high" }], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.exitCode).toBe(3);
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(JSON.parse(readFileSync(join(r.artifactDir, "analysis.json"), "utf8")).status).toBe("incomplete");
+    expect(r.body).toContain("incomplete");
+    expect(r.reviews[0]?.event).toBe("COMMENT");
+  });
   it("accounts for clipped hunks without claiming the model saw the absent danger", async () => {
     const diff = "diff --git a/large.ts b/large.ts\n--- /dev/null\n+++ b/large.ts\n@@ -0,0 +1,121 @@\n" + Array.from({ length: 120 }, () => "+" + "x".repeat(100)).join("\n") + "\n+DANGER\n";
     let prompt = "";

@@ -137,6 +137,21 @@ describe("resolveEndpoint: fail-fast cases that stay", () => {
 // ---------- dispatcher: each apiStyle calls the right adapter ----------
 
 describe("callByStyle dispatches to the adapter of the resolved style", () => {
+  it.each(["openai-chat", "openai-responses", "anthropic-messages", "google-models"] as const)("%s preserves causal anchors and invalid-claim diagnostics", async llmApiStyle => {
+    const change = { file: "src/auth.ts", line: 2, side: "LEFT" };
+    const content = JSON.stringify({ findings: [{ ...FINDING, change }, { ...FINDING, change: { ...change, side: "BAD" } }, { ...FINDING, change: null }] });
+    const bodies = {
+      "openai-chat": { choices: [{ finish_reason: "stop", message: { content } }] },
+      "openai-responses": { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: content }] }] },
+      "anthropic-messages": { stop_reason: "end_turn", content: [{ type: "text", text: content }] },
+      "google-models": { candidates: [{ content: { parts: [{ text: content }] }, finishReason: "STOP" }] },
+    };
+    stubFetch(() => new Response(JSON.stringify(bodies[llmApiStyle]), { status: 200 }));
+    const ep = resolveEndpoint({ ...base, llmProvider: "custom", llmBaseUrl: "https://provider.invalid/v1", llmModel: "m", llmApiStyle });
+    const result = await callByStyle(ep, msgs, { ...opts, model: "m" });
+    expect(result).toMatchObject({ ok: true, findings: [{ ...LLM_FINDING, change }, { ...LLM_FINDING, changeInvalid: true }, LLM_FINDING] });
+    if (result.ok) expect(result.findings[1]).not.toHaveProperty("change");
+  });
   it("openai-chat → callLlm request shape, identical LlmResult", async () => {
     stubFetch(() => new Response(JSON.stringify(CHAT_OK), { status: 200 }));
     const ep = resolveEndpoint({ ...base, llmProvider: "openai", llmModel: "m", llmApiStyle: "openai-chat" });

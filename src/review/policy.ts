@@ -1,4 +1,5 @@
-import type { Finding } from "../domain/finding.js";
+import { isChangeAnchor, type ChangeAnchor, type Finding } from "../domain/finding.js";
+import type { AnalysisPolicy, CoverageIssue } from "../domain/assessment.js";
 import type { FileDiff, HunkLine, ParsedHunk } from "../domain/diff.js";
 import type { FailLevel } from "../inputs.js";
 import type { ReviewThread } from "../github.js";
@@ -156,14 +157,43 @@ export interface GateDecision {
   blocking: Finding[];
   blockingKeys: ReadonlySet<string>;
   reopenedKeys: ReadonlySet<string>;
+  attributionIssues: CoverageIssue[];
+}
+
+/** A model claim is eligible only when its exact side and line occur as a change. */
+export function validateChangeAnchor(change: unknown, files: FileDiff[], hunks: ParsedHunk[]): { ok: true; anchor: ChangeAnchor } | { ok: false; reason: string } {
+  if (!isChangeAnchor(change)) return { ok: false, reason: "Malformed or unrepresentable change anchor." };
+  const matches = files.filter(file => file.file === change.file || (change.side === "LEFT" && file.oldFile === change.file));
+  if (matches.length !== 1) return { ok: false, reason: "Change anchor path is absent or ambiguous in the bound patch." };
+  const file = matches[0]!;
+  if (file.truncated || (file.deleted && change.side === "RIGHT")) return { ok: false, reason: "Change anchor cannot be verified in the bound patch." };
+  const hit = indexHunks(hunks).get(file.file)?.get(keyOf(change.side, change.line));
+  if (hit?.kind !== (change.side === "LEFT" ? "del" : "add")) return { ok: false, reason: "Change anchor does not name an added RIGHT or removed LEFT line." };
+  return { ok: true, anchor: { ...change } };
 }
 
 /** Policy always uses raw findings, before any display grouping or caps. */
-export function evaluateRawGate(findings: Finding[], hunks: ParsedHunk[], files: FileDiff[], threads: ReviewThread[], actor?: string): GateDecision {
+export function evaluateRawGate(findings: Finding[], hunks: ParsedHunk[], files: FileDiff[], threads: ReviewThread[], actor?: string, options?: { analysisPolicy?: AnalysisPolicy }): GateDecision {
   const introduced = new Set(partitionGate(findings, hunks, files).introduced.map(reopenedKey));
   const reopenedKeys = actor === undefined ? new Set<string>() : resolveReopened(findings, threads, actor);
-  const blocking = findings.filter((f) => introduced.has(reopenedKey(f)) || reopenedKeys.has(reopenedKey(f)));
-  return { blocking, blockingKeys: new Set(blocking.map(reopenedKey)), reopenedKeys };
+  const attributionIssues: CoverageIssue[] = [];
+  const touched = new Set(files.flatMap(file => file.oldFile === undefined ? [file.file] : [file.file, file.oldFile]));
+  const blocking = findings.filter(f => {
+    const eligible = introduced.has(reopenedKey(f)) || reopenedKeys.has(reopenedKey(f));
+    if (options?.analysisPolicy !== "required") return eligible;
+    const hasClaim = f.change !== undefined && f.change !== null;
+    const validated = hasClaim ? validateChangeAnchor(f.change, files, hunks) : undefined;
+    if (f.changeInvalid === true || (validated !== undefined && !validated.ok)) {
+      attributionIssues.push({ code: "invalid-change-anchor", file: f.file, message: "A causal change claim could not be validated against the bound patch." });
+      return eligible;
+    }
+    if (eligible || validated?.ok) return true;
+    if (f.severity === "high" && touched.has(f.file)) {
+      attributionIssues.push({ code: "unresolved-attribution", file: f.file, message: "A high finding in a touched file has no validated causal change or existing gate eligibility." });
+    }
+    return false;
+  });
+  return { blocking, blockingKeys: new Set(blocking.map(reopenedKey)), reopenedKeys, attributionIssues };
 }
 
 /** Display survivors inherit marks when any original member has that mark. */

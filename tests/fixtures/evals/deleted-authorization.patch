@@ -1,0 +1,10 @@
+diff --git a/src/auth.ts b/src/auth.ts
+index 111..222 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1,5 +1,4 @@
+ export function remove(user, record) {
+-  if (!user.admin) throw new Error("Forbidden");
+   audit(user);
+   return destroy(record);
+ }

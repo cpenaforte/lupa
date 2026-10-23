@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Finding } from "../domain/finding.js";
+import { changeClaim, type Finding } from "../domain/finding.js";
 import type { PrMeta } from "../domain/diff.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { readCappedFileSync } from "../artifact-limits.js";
@@ -92,6 +92,7 @@ function isFinding(v: unknown): v is Finding {
     (f.line === undefined || (typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1)) &&
     (f.suggestion === undefined || typeof f.suggestion === "string") &&
     (f.patch === undefined || typeof f.patch === "string") &&
+    (f.changeInvalid === undefined || f.changeInvalid === true) &&
     (f.source === undefined || (typeof f.source === "string" && f.source.length > 0 && f.source.length <= 100)) &&
     (f.confidence === undefined ||
       (typeof f.confidence === "number" && Number.isSafeInteger(f.confidence) && f.confidence >= 0 && f.confidence <= 100)) &&
@@ -120,7 +121,7 @@ export function readFindings(dir: string, maxBytes: number = DEFAULT_MAX_ARTIFAC
   if (!Array.isArray(parsed) || !parsed.every(isFinding)) {
     throw new Error("lupa: findings.json does not match the finding contract");
   }
-  return parsed;
+  return parsed.map(({ change, changeInvalid, ...finding }) => ({ ...finding, ...changeClaim(change, changeInvalid) }));
 }
 
 export function writeFindings(dir: string, findings: Finding[]): void {

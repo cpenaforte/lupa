@@ -12,7 +12,7 @@ import type { DedupVerdicts } from "../llm/types.js";
 import { parseHunks } from "../diff/patch.js";
 import { ReadonlyTokenError, StaleHeadError, type ReviewThread } from "../github.js";
 import { buildBody, buildFallbackReport, formatBody, mapToComments, redactFindings } from "../review/render.js";
-import { evaluateRawGate, eventFor, partitionGate, projectRenderMarks, reopenedKey } from "../review/policy.js";
+import { evaluateRawGate, eventFor, projectRenderMarks, reopenedKey } from "../review/policy.js";
 import { groupFindings } from "../review/grouping.js";
 import { memberRuleMarker, THREAD_BODY_BYTES } from "../review/thread-identity.js";
 import { capBody, omissionMarkerFor, prioritizeFindings } from "../review/limits.js";
@@ -110,7 +110,7 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
   const fullSet = redactFindings(a.findings, runtimeSecrets(a.env));
   const inputs = a.env.inputs;
   const parsed = parseHunks(a.hunks);
-  const { introduced } = partitionGate(fullSet, parsed, a.hunks);
+  const { blocking: introduced } = evaluateRawGate(fullSet, parsed, a.hunks, [], undefined, { analysisPolicy: inputs.analysisPolicy });
   let actor: string | undefined;
   let threads: ReviewThread[] = [];
   if (introduced.length < fullSet.length && a.env.inputs.githubToken !== "") {
@@ -131,8 +131,9 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
   if (introduced.length < fullSet.length && a.env.inputs.githubToken === "") {
     assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck has no token." });
   }
+  const decision = evaluateRawGate(fullSet, parsed, a.hunks, threads, actor, { analysisPolicy: inputs.analysisPolicy });
+  assessment.coverage.issues.push(...decision.attributionIssues);
   persist();
-  const decision = evaluateRawGate(fullSet, parsed, a.hunks, threads, actor);
   const blocking = decision.blocking;
   const { groups: proposedGroups, dropped } = groupFindings(fullSet, a.verdicts ?? { pairs: [], links: [], malformed: 0 });
   if (dropped > 0) core.warning(`lupa: ignored ${dropped} unmergeable dedup verdict(s)`);

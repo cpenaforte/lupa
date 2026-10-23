@@ -1,5 +1,11 @@
 import { capText, MSG_CAP, RULE_CAP } from "./text.js";
 
+export interface ChangeAnchor {
+  file: string;
+  line: number;
+  side: "LEFT" | "RIGHT";
+}
+
 export interface Finding {
   severity: "info" | "warning" | "high";
   file: string;
@@ -18,6 +24,10 @@ export interface Finding {
   patch?: string;
   /** What proves the claim. `snippet` is reserved: assigned by no producer in v1. */
   evidence?: { snippet?: string; analyzer?: string };
+  /** Causal claim in the bound patch, independent of the display location. */
+  change?: ChangeAnchor;
+  /** A supplied claim was malformed or lost its exact identity. Never grants eligibility. */
+  changeInvalid?: true;
 }
 
 const SUGGESTION_CAP = 4000;
@@ -51,6 +61,24 @@ export function unsafePath(file: string): boolean {
   );
 }
 
+/** An exact, representable claim. Do not normalize paths into different identities. */
+export function isChangeAnchor(value: unknown): value is ChangeAnchor {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const c = value as Record<string, unknown>;
+  return Object.keys(c).length === 3 && typeof c.file === "string" && c.file.length > 0 &&
+    Array.from(c.file).length <= FILE_CAP && !unsafePath(c.file) && !/[\u0000-\u001f\u007f]/.test(c.file) &&
+    typeof c.line === "number" && Number.isSafeInteger(c.line) && c.line >= 1 &&
+    (c.side === "LEFT" || c.side === "RIGHT");
+}
+
+/** Keep invalid claims distinguishable from absent legacy input across every boundary. */
+export function changeClaim(change: unknown, invalid?: unknown): Pick<Finding, "change" | "changeInvalid"> {
+  if (invalid === true) return { changeInvalid: true };
+  if (change === undefined || change === null) return {};
+  if (!isChangeAnchor(change)) return { changeInvalid: true };
+  return { change: { file: change.file, line: change.line, side: change.side } };
+}
+
 /**
  * Strips control characters, caps lengths, and turns unsafe paths into repository-level notes
  * (general body). Unsafe-path check runs after the control strip, before the length cap.
@@ -72,6 +100,7 @@ export function sanitizeFinding(f: Finding): Finding {
     file: capText(file, FILE_CAP),
     rule: capText(f.rule.replace(CONTROL_ALL, ""), RULE_CAP),
     message: capText(message, MSG_CAP),
+    ...changeClaim(f.change, f.changeInvalid),
   };
   if (line !== undefined) out.line = line;
   if (f.suggestion !== undefined) {

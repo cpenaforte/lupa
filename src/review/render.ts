@@ -125,6 +125,13 @@ export function redactFindings(findings: Finding[], secrets: readonly string[]):
   const keys = secrets.filter((s) => s !== "");
   return findings.map((f) => {
     let out = f;
+    // Anchor identity must survive redaction exactly; never match a replacement path.
+    if (f.change !== undefined) {
+      const { change, ...rest } = out;
+      out = keys.some(key => change!.file.includes(key))
+        ? { ...rest, changeInvalid: true }
+        : { ...out, change: { ...change! } };
+    }
     for (const key of keys) {
       out = {
         ...out,

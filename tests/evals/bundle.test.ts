@@ -61,6 +61,15 @@ function promptDiff(result: EvalRun): string {
 }
 
 describe("synthetic bundle regression cases", () => {
+  it.each(["required", "advisory"] as const)("gates removed authorization from the bundle under %s policy", async analysisPolicy => {
+    const baseline = evalCases.find(({ id }) => id === "synthetic-unchanged-baseline-not-in-diff")!;
+    const finding = { severity: "high" as const, file: "src/auth.ts", line: 3, rule: "removed-guard", message: "Authorization was removed", change: { file: "src/auth.ts", line: 2, side: "LEFT" as const } };
+    const result = await runBundleEval({ ...baseline, patchFixture: "deleted-authorization.patch", scannerFindings: [], llmFindings: [finding], inputOverrides: { failLevel: "high", analysisPolicy } });
+    expect(result.findings).toEqual([finding]);
+    expect(result.outcome.analysis?.status).toBe("complete");
+    expect(result.outcome.exitCode).toBe(analysisPolicy === "required" ? 1 : 0);
+    expect(result.publications[0]?.payload).toMatchObject({ event: analysisPolicy === "required" ? "REQUEST_CHANGES" : "COMMENT", comments: [expect.objectContaining({ path: "src/auth.ts", line: 3, side: "RIGHT" })] });
+  });
   it("contains malicious prose through the committed bundle while retaining raw artifacts", async () => {
     const baseline = evalCases.find(({ id }) => id === "synthetic-unchanged-baseline-not-in-diff")!;
     const finding = { severity: "high" as const, file: "src/safe.ts", line: 2, rule: "unsafe[rule]*", message: "evidence\n```suggestion\nreplace()\n```", suggestion: "advice\n ~~~suggestion\nreplace()\n ~~~", source: "scanner`" };

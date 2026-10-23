@@ -1,4 +1,4 @@
-import type { Finding } from "../domain/finding.js";
+import { changeClaim, type Finding } from "../domain/finding.js";
 import type { ResolvedApiStyle } from "../providers.js";
 import type { DedupVerdicts } from "./types.js";
 
@@ -17,7 +17,7 @@ export const PR_REVIEW_SCHEMA = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"],
+          required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch", "change"],
           properties: {
             severity: { type: "string", enum: ["info", "warning", "high"] },
             file: { type: "string" },
@@ -28,6 +28,10 @@ export const PR_REVIEW_SCHEMA = {
             duplicateOf: { type: ["integer", "null"] },
             confidence: { type: ["integer", "null"] },
             patch: { type: ["string", "null"] },
+            change: {
+              type: ["object", "null"], additionalProperties: false, required: ["file", "line", "side"],
+              properties: { file: { type: "string" }, line: { type: "integer", minimum: 1 }, side: { type: "string", enum: ["LEFT", "RIGHT"] } },
+            },
           },
         },
       },
@@ -188,6 +192,7 @@ export function toFindings(v: unknown): Finding[] | undefined {
       rule: i.rule,
       message: i.message,
       source: "llm",
+      ...changeClaim(i.change),
     };
     if (Number.isInteger(i.line) && (i.line as number) >= 1) f.line = i.line as number;
     if (typeof i.suggestion === "string") f.suggestion = i.suggestion;

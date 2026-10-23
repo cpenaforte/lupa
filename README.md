@@ -134,7 +134,7 @@ Budget figures are estimates. Prices change: check your provider's price page, a
 
 ## Gate: `fail_level`
 
-Only PR-touched findings block. The review event and the exit code read the blocking set — findings on added lines, plus lineless findings on touched files — under the active level:
+With the default `analysis_policy: advisory`, the review event and exit code read the existing blocking set — findings on added lines, qualifying lineless findings on touched files, and wrongly-resolved findings described below — under the active level:
 
 | `fail_level` | Review event | Exit code |
 |---|---|---|
@@ -142,11 +142,15 @@ Only PR-touched findings block. The review event and the exit code read the bloc
 | `warning` | `COMMENT` | `2` if any blocking finding is `warning` or `high`; `0` for info-only |
 | `high` | `REQUEST_CHANGES` when a blocking high-severity finding exists; otherwise `COMMENT` | `1` if any blocking high finding; `0` otherwise |
 
+Opt in with `analysis_policy: required` to require complete analysis of the recorded semantic scope. A triggered review with incomplete, unsupported, or failed analysis exits `3`, independently of `fail_level`; this coverage failure alone does not request changes. The `analysis-status` output, review body, summary, and SHA-bound `analysis.json` artifact disclose completion and coverage limitations. Non-trigger events remain skipped/0. A stale head prevents publication and exits 3 in required mode (advisory retains its stale no-op/0 behavior). Completion describes recorded execution, not proof of model correctness or approval.
+
+Required mode also accepts a finding's optional causal `change` anchor: `{ "file": "src/auth.ts", "line": 2, "side": "LEFT" }`. The exact path and line must name an actual removed LEFT or added RIGHT line in the bound patch; a rename may use the old path for LEFT. This lets a removed protection or new caller make a finding eligible even when its display location is unchanged context or another file. The anchor is a supported model claim, not deterministic proof of causality, and does not move the review comment. Existing added-line/reopened eligibility still works without an anchor. An unresolved high in a touched file, or any invalid anchor, makes required attribution incomplete; a purely untouched baseline issue without a claim remains non-blocking advice. Malformed, lossy, or secret-redacted claims retain an internal `changeInvalid: true` diagnostic so they cannot silently become missing legacy anchors. Advisory mode keeps its existing eligibility regardless of anchors.
+
 - The action never approves automatically in v1.
 - A `REQUEST_CHANGES` review always has a body.
-- The action step exits non-zero for `1` and `2`, so the template runs it with `continue-on-error: true` and reads `steps.review.outputs.exit-code` in a separate gate step.
-- The template's gate passes on `0` and `2` and fails on `1`. Warning findings never block a merge. A failed run (for example an action error, where no exit code is produced) still fails the gate. To block on high-severity findings, set `fail_level: high`.
-- A prompt-budget skip passes the gate on fast findings only; the skip is recorded in the step summary.
+- The action step exits non-zero for `1`, `2`, and `3`, so the template runs it with `continue-on-error: true` and reads `steps.review.outputs.exit-code` in a separate gate step.
+- The template's gate passes on `0` and `2` and fails on `1` and `3`. Warning findings never block a merge; required coverage is a separate gate. A failed run (for example an action error, where no exit code is produced) still fails the gate. To block on high-severity findings, set `fail_level: high`.
+- In advisory mode a prompt-budget skip gates on fast findings only; required mode reports non-complete coverage and exits 3. The skip is recorded in the step summary.
 - Findings outside the PR diff never block on their own: they stay visible in the review body under `**Findings not placed inline:**`, preceded by a `**Note:** <n> finding(s) below are outside the PR diff and do not block.` header when at least one body item is non-blocking. Body items in the blocking set carry a `**blocking**` marker after the severity; folded excess inline comments outside the blocking set render `- path:line (non-blocking)`. Markers denote blocking-set membership read under the active fail level (a marked `warning` under `fail_level: high` still exits 0).
 - **Wrongly-resolved findings re-block.** Clicking Resolve on a review thread while the flagged issue still persists re-arms the gate: the next run re-reads the PR's review threads and any of our own resolved threads whose finding is still reported blocks again, marked `**reopened**` (in the body, or inline when the line drifted to a commentable context line). Matching is exact on file and line. Blocking and severity use the original findings before display grouping; grouped inline comments retain original member rules in versioned hidden metadata, while older threads use the displayed rule intersection. Actor comparisons ignore case and treat `name` and `name[bot]` as aliases. Identity is the token's authenticated login, then the workflow's trusted `review_actor`; review prose never supplies identity. When identity is unavailable, or the thread read fails, the run gates on diff membership only, with an unavailable recheck warning. Only the newest 100 threads are read (older ones warn-truncate).
 
