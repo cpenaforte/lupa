@@ -3,7 +3,7 @@ import type { ActionInputs } from "../inputs.js";
 import type { Finding } from "../domain/finding.js";
 import type { AnalysisAssessment, StageResult } from "../domain/assessment.js";
 import type { ReviewPayload } from "../domain/review.js";
-import type { ReviewThread } from "../github.js";
+import type { ReviewThread, ReviewThreadRead } from "../github.js";
 import type { ToolContext } from "../agent-tools.js";
 import type { CatalogProtocol, ResolvedEndpoint } from "../providers.js";
 import type { LlmResult } from "../llm/types.js";
@@ -47,11 +47,16 @@ export interface Gateway {
   getRepoSize(owner: string, repo: string, options?: { signal?: AbortSignal }): Promise<number | undefined>;
   createReview(pr: number, payload: ReviewPayload, opts: { canWrite: boolean; maxBodyChars?: number; blocking?: ReadonlySet<string>; commentKeys?: readonly (string | null)[] }): Promise<void>;
   createIssueComment(pr: number, body: string, opts: { enabled: boolean; issuesWrite: boolean }): Promise<void>;
-  /** This PR's review threads for the wrongly-resolved re-check (fail-open: empty on any error). */
-  listReviewThreads(pr: number): Promise<ReviewThread[]>;
   /**
-   * Login that posted our reviews (primary: authenticated user; fallback: newest
-   * lupa-body review). Undefined when neither resolves — publishReview then
+   * Legacy array port for the wrongly-resolved re-check (fail-open: empty on any error). It carries
+   * no read health, so publishReview treats a gateway without `readReviewThreads` as incomplete context.
+   */
+  listReviewThreads(pr: number): Promise<ReviewThread[]>;
+  /** Structured thread read; optional so legacy gateways keep compiling. */
+  readReviewThreads?(pr: number): Promise<ReviewThreadRead>;
+  /**
+   * Login that posted our reviews: authenticated user first, then the configured
+   * trusted `review_actor`. Undefined when neither resolves — publishReview then
    * skips the reopen check. The pr is passed explicitly: publishReview owns a.pr
    * on both flows, with no context.issue dependency (undefined on workflow_run).
    */

@@ -50,7 +50,7 @@ inputs:
     required: false
     default: "warning"
   analysis_policy:
-    description: "Analysis completeness policy: advisory or required"
+    description: "Analysis completeness policy: advisory or required (required exits 3 when a triggered analysis is not complete)"
     required: false
     default: "advisory"
   max_diff_chars:
@@ -98,14 +98,14 @@ inputs:
     required: false
     default: "60000"
   max_artifact_bytes:
-    description: "Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts"
+    description: "Maximum bytes read from SARIF, SBOM, findings, pr-meta, and analysis artifacts, and the cap for persisted analysis metadata (minimum 1024)"
     required: false
     default: "8388608"
 outputs:
   analysis-status:
     description: "Recorded analysis execution status: complete, incomplete, unsupported, failed, or skipped"
   exit-code:
-    description: "fail_level gate result: 0 pass, 2 warning findings, 1 high-severity findings"
+    description: "Exit gate: 0 pass, 2 warning findings, 1 high-severity findings, 3 required analysis incomplete"
 runs:
   using: node24
   main: dist/index.js

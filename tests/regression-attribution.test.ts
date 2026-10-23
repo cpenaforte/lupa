@@ -156,4 +156,17 @@ describe("causal attribution independent of display location", () => {
     expect(reopened.blocking).toEqual([finding]);
     expect(reopened.attributionIssues).toEqual([]);
   });
+  it("never matches a truncated or control-stripped path alias", () => {
+    const longPath = "dir/".repeat(50) + "auth.ts"; // 207 code points
+    const prefix = longPath.slice(0, 200);
+    const truncated = sanitizeFinding({ ...finding, file: longPath, line: 2 });
+    expect(truncated.file).toBe("");
+    expect(truncated.line).toBeUndefined();
+    expect(truncated.message).toMatch(/^artifact path rejected: /);
+    const control = sanitizeFinding({ ...finding, file: "src/au\u0000th.ts", line: 2 });
+    expect(control.file).toBe("");
+    expect(control.line).toBeUndefined();
+    const diff = [{ file: prefix, hunks: "@@ -1 +1,2 @@\n before();\n+added();\n", truncated: false }];
+    expect(evaluateRawGate([truncated, control], parseHunks(diff), diff, [], undefined, { analysisPolicy: "required" }).blocking).toEqual([]);
+  });
 });

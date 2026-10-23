@@ -31,7 +31,7 @@ export interface Finding {
 }
 
 const SUGGESTION_CAP = 4000;
-const FILE_CAP = 200;
+export const FILE_CAP = 200;
 
 /**
  * Removes provenance fields (`source`/`confidence`/`evidence`) in place and
@@ -50,6 +50,7 @@ export function stripProvenance(f: Finding): Finding {
 const CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 /** Every C0 and DEL control, for single-line fields (file, rule). */
 const CONTROL_ALL = /[\u0000-\u001f\u007f]/g;
+const CONTROL_ANY = /[\u0000-\u001f\u007f]/;
 
 /** Absolute, drive-qualified, or parent-traversing paths are never placed on a diff line. */
 export function unsafePath(file: string): boolean {
@@ -61,12 +62,20 @@ export function unsafePath(file: string): boolean {
   );
 }
 
+/**
+ * True only when a path survives the finding contract unchanged: non-empty, at most FILE_CAP
+ * code points, no C0/DEL controls, and not absolute or traversing. Anything else must never be
+ * truncated or stripped into an alias that could match a different changed path.
+ */
+export function isRepresentableFindingPath(file: string): boolean {
+  return file.length > 0 && Array.from(file).length <= FILE_CAP && !CONTROL_ANY.test(file) && !unsafePath(file);
+}
+
 /** An exact, representable claim. Do not normalize paths into different identities. */
 export function isChangeAnchor(value: unknown): value is ChangeAnchor {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const c = value as Record<string, unknown>;
-  return Object.keys(c).length === 3 && typeof c.file === "string" && c.file.length > 0 &&
-    Array.from(c.file).length <= FILE_CAP && !unsafePath(c.file) && !/[\u0000-\u001f\u007f]/.test(c.file) &&
+  return Object.keys(c).length === 3 && typeof c.file === "string" && isRepresentableFindingPath(c.file) &&
     typeof c.line === "number" && Number.isSafeInteger(c.line) && c.line >= 1 &&
     (c.side === "LEFT" || c.side === "RIGHT");
 }
@@ -80,24 +89,22 @@ export function changeClaim(change: unknown, invalid?: unknown): Pick<Finding, "
 }
 
 /**
- * Strips control characters, caps lengths, and turns unsafe paths into repository-level notes
- * (general body). Unsafe-path check runs after the control strip, before the length cap.
- *
- * Paths longer than FILE_CAP (200 chars) are intentionally capped and then fall back to general
- * notes: a truncated path matches no diff line, so mapToComments never places it inline.
+ * Strips control characters from text fields, caps lengths, and turns unrepresentable paths
+ * (over-long, control characters, absolute/traversing) into repository-level notes (general
+ * body). A path is never truncated or stripped into an alias of another path.
  */
 export function sanitizeFinding(f: Finding): Finding {
-  let file = f.file.replace(CONTROL_ALL, "");
+  let file = f.file;
   let message = f.message.replace(CONTROL_KEEP_TEXT, "");
   let line = f.line;
-  if (file !== "" && unsafePath(file)) {
+  if (file !== "" && !isRepresentableFindingPath(file)) {
     message = `artifact path rejected: ${message}`;
     file = "";
     line = undefined;
   }
   const out: Finding = {
     severity: f.severity,
-    file: capText(file, FILE_CAP),
+    file,
     rule: capText(f.rule.replace(CONTROL_ALL, ""), RULE_CAP),
     message: capText(message, MSG_CAP),
     ...changeClaim(f.change, f.changeInvalid),

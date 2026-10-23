@@ -8,7 +8,7 @@ import { evalCases, flowBRefusalCase } from "./corpus.js";
 import { cleanupEvalRuns, runBundleEval } from "./harness.js";
 import type { EvalCase, EvalRun } from "./types.js";
 import { PER_FILE_CAP } from "../../src/diff.js";
-import { producerAssessment } from "../fixtures/evals/cases.js";
+import { producerAssessment, successfulExecution } from "../fixtures/evals/cases.js";
 import type { Analysis } from "../../src/main.js";
 import { run as runSource } from "../../src/application/run.js";
 import { runSourceEval } from "./harness.js";
@@ -119,6 +119,28 @@ describe("synthetic bundle regression cases", () => {
     expect(result.outcome).toMatchObject({ exitCode: 0, analysis: { status: "skipped" } });
     expect(result.analysisCalls).toEqual([]);
     expect(result.publications).toEqual([]);
+  });
+
+  it("committed bundle reports an unrepresentable changed path as incomplete", async () => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const testCase: EvalCase = {
+      id: "synthetic-unrepresentable-long-path",
+      categories: ["positive"],
+      syntheticRationale: "A changed path too long for the finding contract must not yield complete required coverage.",
+      patchFixture: "unrepresentable-long-path.patch",
+      inputOverrides: { analysisPolicy: "required", failLevel: "high" },
+      llmFindings: [{ severity: "high", file: longPath, line: 2, rule: "long-path", message: "m" }],
+      execution: successfulExecution,
+      expected: {
+        analysisStatus: "incomplete",
+        coverage: { filesTotal: 0, hunksTotal: 0, filesReviewed: 0, hunksReviewed: 0 },
+        promptDiffSnippet: "", findings: [], exitCode: 3, summary: "", publication: { kind: "none" },
+      },
+    };
+    const result = await runBundleEval(testCase);
+    expect(result.outcome.exitCode).toBe(3);
+    expect(result.outcome.analysis?.status).toBe("incomplete");
+    expect(result.outcome.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "unsupported-path" }));
   });
 
   it.each([false, true])("raw severity/reopen gate is invariant to display dedup (merged=%s)", async merge => {

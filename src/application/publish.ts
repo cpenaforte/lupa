@@ -10,7 +10,7 @@ import type { FileDiff } from "../domain/diff.js";
 import type { InlineComment, ReviewPayload } from "../domain/review.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { parseHunks } from "../diff/patch.js";
-import { ReadonlyTokenError, StaleHeadError, type ReviewThread } from "../github.js";
+import { ReadonlyTokenError, StaleHeadError, THREAD_TRUNCATED_WARNING, THREAD_UNAVAILABLE_WARNING, type ReviewThread, type ReviewThreadRead } from "../github.js";
 import { buildBody, buildFallbackReport, formatBody, mapToComments, redactFindings } from "../review/render.js";
 import { evaluateRawGate, eventFor, projectRenderMarks, reopenedKey } from "../review/policy.js";
 import { groupFindings } from "../review/grouping.js";
@@ -85,10 +85,11 @@ function foldExcessInline(withHeading: boolean, excess: InlineComment[], blockin
  * The blocking set (PR-touched findings plus wrongly-resolved reopened ones) is
  * computed BEFORE all early returns (dry-run, fork-readonly, stale-head) and
  * returned for the flow exits, so every exit path gates on it. The reopen read
- * (getActor + listReviewThreads) is short-circuited when every raw finding
+ * (getActor + readReviewThreads) is short-circuited when every raw finding
  * is already introduced — reopen can add nothing — or when no token is
- * configured (empty token: no call, no warn), and any thread/infra
- * failure falls back to diff-only gating without throwing.
+ * configured (empty token: no call, no warn). A thread/infra failure or a
+ * truncated read falls back to the available threads without throwing and
+ * records a thread-context coverage issue, so required analysis is not complete.
  */
 export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding[]; assessment: AnalysisAssessment }> {
   let assessment = a.assessment;
@@ -119,13 +120,30 @@ export async function publishReview(a: PublishArgs): Promise<{ blocking: Finding
       if (actor === undefined) {
         assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
         core.warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
-      } else {
-        threads = await a.deps.gh.listReviewThreads(a.pr);
       }
     } catch {
-      assessment.coverage.issues.push({ code: "actor-context", message: "Needed review-thread context is unavailable." });
-      core.warning("lupa: review-thread re-read failed; gating on diff membership only");
-      threads = [];
+      assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
+      core.warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
+    }
+    if (actor !== undefined) {
+      try {
+        // A gateway without structured health cannot prove complete thread context.
+        const read: ReviewThreadRead = a.deps.gh.readReviewThreads !== undefined
+          ? await a.deps.gh.readReviewThreads(a.pr)
+          : { threads: await a.deps.gh.listReviewThreads(a.pr), health: "unavailable", reason: "graphql-error" };
+        threads = read.threads;
+        if (read.health === "truncated") {
+          assessment.coverage.issues.push({ code: "thread-context", message: "Needed review-thread context is truncated to the newest 100 threads." });
+          core.warning(THREAD_TRUNCATED_WARNING);
+        } else if (read.health === "unavailable") {
+          assessment.coverage.issues.push({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+          core.warning(THREAD_UNAVAILABLE_WARNING);
+        }
+      } catch {
+        threads = [];
+        assessment.coverage.issues.push({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+        core.warning(THREAD_UNAVAILABLE_WARNING);
+      }
     }
   }
   if (introduced.length < fullSet.length && a.env.inputs.githubToken === "") {

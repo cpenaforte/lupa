@@ -7,6 +7,7 @@ vi.mock("@actions/core", async (importOriginal) => {
 import {
   fetchActor,
   listReviewThreads,
+  readReviewThreads,
   ReadonlyTokenError,
   StaleHeadError,
   getRepoSize,
@@ -650,6 +651,50 @@ describe("listReviewThreads", () => {
     const { octokit } = gqlOk([threadNode({ login: null })]);
     const out = await listReviewThreads(octokit, "o", "r", 7);
     expect(out[0]!.authorLogin).toBeNull();
+  });
+
+  it("returns structured health for a complete read", async () => {
+    const { octokit } = gqlOk([threadNode()]);
+    const r = await readReviewThreads(octokit, "o", "r", 7);
+    expect(r.health).toBe("ok");
+    expect(r.threads).toEqual([expect.objectContaining({ path: "a.ts", rule: "r" })]);
+  });
+
+  it("reports truncation while retaining the newest 100", async () => {
+    const { octokit } = gqlOk([threadNode()], true);
+    const r = await readReviewThreads(octokit, "o", "r", 7);
+    expect(r).toMatchObject({ health: "truncated", reason: "more-than-100-threads" });
+    expect(r.threads).toHaveLength(1);
+  });
+
+  it("reports malformed and failed reads without leaking the remote error", async () => {
+    const malformed = { graphql: vi.fn(async () => ({ repository: { pullRequest: { reviewThreads: {} } } })) } as unknown as Octokit;
+    await expect(readReviewThreads(malformed, "o", "r", 7)).resolves.toEqual({ threads: [], health: "unavailable", reason: "malformed-response" });
+    const failed = { graphql: vi.fn(async () => { throw new Error("secret-token"); }) } as unknown as Octokit;
+    const r = await readReviewThreads(failed, "o", "r", 7);
+    expect(r).toEqual({ threads: [], health: "unavailable", reason: "graphql-error" });
+    expect(JSON.stringify(r)).not.toContain("secret-token");
+  });
+
+  it.each([
+    ["missing", { nodes: [threadNode()] }],
+    ["null", { pageInfo: null, nodes: [threadNode()] }],
+    ["non-boolean", { pageInfo: { hasPreviousPage: "false" }, nodes: [threadNode()] }],
+  ] as const)("reports a %s pageInfo as malformed", async (_label, reviewThreads) => {
+    const octokit = {
+      graphql: vi.fn(async () => ({ repository: { pullRequest: { reviewThreads } } })),
+    } as unknown as Octokit;
+    await expect(readReviewThreads(octokit, "o", "r", 7)).resolves.toEqual({
+      threads: [], health: "unavailable", reason: "malformed-response",
+    });
+  });
+
+  it("does not log from the structured read; the compatibility wrapper warns without the remote error", async () => {
+    const failed = { graphql: vi.fn(async () => { throw new Error("secret-token"); }) } as unknown as Octokit;
+    await readReviewThreads(failed, "o", "r", 7);
+    expect(vi.mocked(core.warning)).not.toHaveBeenCalled();
+    await listReviewThreads(failed, "o", "r", 7);
+    expect(vi.mocked(core.warning).mock.calls.map(([m]) => String(m))).toEqual(["lupa: review-thread re-read failed; gating on diff membership only"]);
   });
 });
 

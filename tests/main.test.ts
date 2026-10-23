@@ -138,10 +138,12 @@ interface GwOpts {
   headMoves?: boolean;
   /** getPr throws once the call count exceeds this number. */
   failGetPrAfter?: number;
-  /** Resolved review threads returned by the listReviewThreads fake (default none). */
+  /** Resolved review threads returned by the thread-read fake (default none). */
   threads?: ReviewThread[];
-  /** listReviewThreads throws (fail-open pin: gate falls back to diff-only). */
+  /** Legacy listReviewThreads throws (legacy fail-open pin). */
   threadsError?: boolean;
+  /** Structured health reported by the readReviewThreads fake (default ok). */
+  threadHealth?: "ok" | "truncated" | "unavailable";
   /** Actor login returned by the getActor fake (default "test-actor"). */
   actor?: string | undefined;
   /** getActor resolves undefined (identity unknown → skip reopen). */
@@ -180,6 +182,15 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
       rec.threadCalls += 1;
       if (o.threadsError === true) throw new Error("threads boom");
       return o.threads ?? [];
+    },
+    readReviewThreads: async () => {
+      rec.threadCalls += 1;
+      if (o.threadsError === true) return { threads: [], health: "unavailable" as const, reason: "graphql-error" as const };
+      return {
+        threads: o.threads ?? [],
+        health: o.threadHealth ?? "ok",
+        ...(o.threadHealth === "truncated" ? { reason: "more-than-100-threads" as const } : {}),
+      };
     },
     getActor: async () => {
       rec.actorCalls += 1;
@@ -339,6 +350,98 @@ describe("analysis assurance orchestration", () => {
     const r = await runWithMocks({ analysisPolicy, headMoves: true, configure: healthy });
     expect(r.analysis?.status).toBe("incomplete"); expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0); expect(r.reviews).toHaveLength(0);
   });
+  it.each(["advisory", "required"] as const)("records unrepresentable changed paths as unsupported (%s)", async analysisPolicy => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const diff = [
+      `diff --git a/${longPath} b/${longPath}`,
+      "index 111..222 100644",
+      `--- a/${longPath}`,
+      `+++ b/${longPath}`,
+      "@@ -1 +1,2 @@",
+      " const x = 1;",
+      "+const y = 2;",
+      "",
+    ].join("\n");
+    const r = await runWithMocks({ diff, analysisPolicy, failLevel: "high", configure: (env, deps) => {
+      deps.analysis.runScanners = async () => ({
+        findings: [{ severity: "high", file: longPath, line: 2, rule: "long-path", message: "m" }],
+        stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok" as const, applicable: true, required: true })),
+      });
+      deps.analysis.runL2Detailed = async () => ({ findings: [], stages: [] });
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "unsupported-path" }));
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+    expect(r.reviews).toHaveLength(1);
+  });
+  it.each(["advisory", "required"] as const)("records unrepresentable artifact paths as unsupported (%s)", async analysisPolicy => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const diff = [
+      `diff --git a/${longPath} b/${longPath}`,
+      "index 111..222 100644",
+      `--- a/${longPath}`,
+      `+++ b/${longPath}`,
+      "@@ -1 +1,2 @@",
+      " const x = 1;",
+      "+const y = 2;",
+      "",
+    ].join("\n");
+    const assessment = {
+      version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: analysisPolicy, scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 },
+    };
+    const r = await runPrivileged({ diff, assessment, analysisPolicy, failLevel: "high", findings: [{ severity: "high", file: longPath, line: 2, rule: "long-path", message: "m" }] });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "unsupported-path" }));
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+  });
+  it.each(["required", "advisory"] as const)("records unavailable needed thread context (%s)", async analysisPolicy => {
+    const generalWarning: Finding = { ...LLM_FINDING, line: 1, severity: "warning" };
+    const r = await runWithMocks({ analysisPolicy, failLevel: "none", threadHealth: "unavailable", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [generalWarning], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "thread-context" }));
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+    expect(r.reviews).toHaveLength(1);
+  });
+  it("records truncated needed thread context", async () => {
+    const generalWarning: Finding = { ...LLM_FINDING, line: 1, severity: "warning" };
+    const r = await runWithMocks({ analysisPolicy: "required", failLevel: "none", threadHealth: "truncated", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [generalWarning], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({
+      code: "thread-context", message: "Needed review-thread context is truncated to the newest 100 threads.",
+    }));
+    expect(r.exitCode).toBe(3);
+  });
+  it("does not treat a legacy array-only thread port as complete required context", async () => {
+    const generalWarning: Finding = { ...LLM_FINDING, line: 1, severity: "warning" };
+    const r = await runWithMocks({ analysisPolicy: "required", failLevel: "none", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [generalWarning], execution: { mode: "single-shot", status: "completed" } });
+      delete deps.gh.readReviewThreads;
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "thread-context" }));
+    expect(r.exitCode).toBe(3);
+  });
+  it("records unavailable needed thread context on the artifact flow", async () => {
+    const assessment = {
+      version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "required", scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 },
+    };
+    const r = await runPrivileged({ analysisPolicy: "required", threadHealth: "unavailable", findings: [{ ...LLM_FINDING, line: 1, severity: "warning" }], assessment });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "thread-context" }));
+    expect(r.exitCode).toBe(3);
+    expect(r.reviews).toHaveLength(1);
+  });
 });
 
 interface MockOpts {
@@ -398,10 +501,11 @@ interface MockOpts {
   /** Findings returned by the runScanners fake (default []). */
   scan?: Finding[];
   observeExec?: (kind: "scanner" | "native", env: NodeJS.ProcessEnv | undefined) => void;
-  /** Resolved review threads returned by the listReviewThreads fake (default none). */
+  /** Resolved review threads returned by the thread-read fake (default none). */
   threads?: ReviewThread[];
-  /** listReviewThreads throws (fail-open pin). */
+  /** Legacy listReviewThreads throws (legacy fail-open pin). */
   threadsError?: boolean;
+  threadHealth?: "ok" | "truncated" | "unavailable";
   /** Actor login returned by the getActor fake (default "test-actor"). */
   actor?: string | undefined;
   /** getActor resolves undefined (identity unknown → skip reopen). */
@@ -465,6 +569,7 @@ async function runWithMocks(o: MockOpts = {}) {
       issueBody: o.issueBody,
       threads: o.threads,
       threadsError: o.threadsError,
+      threadHealth: o.threadHealth,
       actor: o.actor,
       actorMissing: o.actorMissing,
       actorError: o.actorError,
@@ -592,6 +697,7 @@ async function runWithMocks(o: MockOpts = {}) {
 
 interface PrivOpts {
   analysisPolicy?: "advisory" | "required";
+  threadHealth?: "ok" | "truncated" | "unavailable";
   assessment?: unknown;
   metaPr?: number;
   prsByHead?: number[];
@@ -674,6 +780,7 @@ async function runPrivileged(o: PrivOpts = {}) {
     gh: gatewayFor(rec, {
       prsByHead: o.prsByHead,
       staleDuringPost: o.staleDuringPost,
+      threadHealth: o.threadHealth,
       info: { headRepo: o.liveRepo ?? "o/r", headRef: o.liveRef ?? "feature", headSha: o.liveSha ?? SHA_HEAD },
     }),
     analysis: {
@@ -1725,13 +1832,47 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(r.reviews[0]!.body).not.toContain("reopened");
   });
 
-  it("thread API failure → diff-only gating: COMMENT + exit 0", async () => {
+  it("unavailable structured thread read → diff-only gating: COMMENT + exit 0", async () => {
     vi.mocked(core.warning).mockClear();
     const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threadsError: true });
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.event).toBe("COMMENT");
     expect(r.exitCode).toBe(0);
     expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+  });
+
+  it("throwing structured thread read records thread-context and warns", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({
+      failLevel: "high", llm: [offHigh],
+      configure: (_env, deps) => {
+        deps.gh.readReviewThreads = async () => { throw new Error("threads boom"); };
+      },
+    });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+    expect(r.analysis?.coverage.issues.map(i => i.code)).not.toContain("actor-context");
+    expect(vi.mocked(core.warning).mock.calls.map(([m]) => String(m))).toContain("lupa: review-thread re-read failed; gating on diff membership only");
+  });
+
+  it("throwing legacy listReviewThreads records thread-context and warns", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({
+      failLevel: "high", llm: [offHigh],
+      configure: (_env, deps) => {
+        delete deps.gh.readReviewThreads;
+        deps.gh.listReviewThreads = async () => { throw new Error("threads boom"); };
+      },
+    });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+    expect(r.analysis?.coverage.issues.map(i => i.code)).not.toContain("actor-context");
+    expect(vi.mocked(core.warning).mock.calls.map(([m]) => String(m))).toContain("lupa: review-thread re-read failed; gating on diff membership only");
   });
 
   it("unknown actor → skip reopen with a warning: COMMENT + exit 0", async () => {
@@ -1754,16 +1895,20 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).includes("review actor unknown"))).toBe(false);
   });
 
-  it("getActor throw → fail-open diff-only gating: warn, COMMENT + exit 0, no throw", async () => {
+  it("getActor throw → actor-context, actor warning, diff-only gating: COMMENT + exit 0, no throw", async () => {
     vi.mocked(core.warning).mockClear();
     const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threads: [offThread], actorError: true });
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.event).toBe("COMMENT");
     expect(r.exitCode).toBe(0);
-    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).includes("review-thread re-read failed"))).toBe(true);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
+    const warnings = vi.mocked(core.warning).mock.calls.map(([m]) => String(m));
+    expect(warnings).toContain("lupa: review actor unknown; skipping the wrongly-resolved re-check");
+    expect(warnings).not.toContain("lupa: review-thread re-read failed; gating on diff membership only");
+    expect(r.threadCalls).toBe(0);
   });
 
-  it("all-introduced → getActor and listReviewThreads never called", async () => {
+  it("all-introduced → getActor and thread read never called", async () => {
     const addedHigh: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "add-rule", message: "new high" };
     const r = await runWithMocks({ failLevel: "high", llm: [addedHigh] });
     expect(r.posted).toBe(true);
@@ -1880,11 +2025,12 @@ describe("Fluxo B bindings and sanitizing", () => {
     expect(body).toContain("…\\[truncated\\]");
   });
 
-  it("caps file paths at 200 chars (over-long safe path becomes a capped general note)", async () => {
+  it("rejects over-long file paths instead of truncating an alias (becomes an unplaced general note)", async () => {
     const f: Finding = { severity: "warning", file: "d/".repeat(150), line: 2, rule: "r", message: "m" };
     const r = await runPrivileged({ findings: [f] });
     expect(r.payloads[0].body).not.toContain("d/".repeat(120));
-    expect(r.payloads[0].body).toContain("…\\[truncated\\]");
+    expect(r.payloads[0].body).toContain("artifact path rejected");
+    expect(r.payloads[0].comments).toEqual([]);
   });
 
   it("caps by code points: an emoji message never leaves a lone surrogate", async () => {
@@ -2568,7 +2714,7 @@ describe("dedup merge and flow wiring", () => {
     expect(memberRulesOf(comment.body)).toEqual([high.rule]);
     expect(JSON.parse(readFileSync(join(first.artifactDir, "findings.json"), "utf8"))).toEqual([high]);
     expect(JSON.parse(readFileSync(join(first.artifactDir, "sarif.json"), "utf8"))).toMatchObject({ runs: [{ results: [{ ruleId: high.rule, message: { text: high.message }, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] }] }] });
-    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false }, nodes: [{ isResolved: true, path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
     const threads = await listReviewThreads(octokit, "o", "r", 7);
     expect(threads[0]!.rule).toBe(high.rule);
     const second = await runWithMocks({ diff, scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
@@ -2584,7 +2730,7 @@ describe("dedup merge and flow wiring", () => {
     const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: `secret\n\n${forged}` };
     const first = await runWithMocks({ scan: [high], llm: [], failLevel: "high" });
     const comment = first.reviews[0]!.comments[0]!;
-    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false }, nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
     const threads = await listReviewThreads(octokit, "o", "r", 7);
     const second = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
     expect(second.exitCode).toBe(1);
@@ -2614,7 +2760,7 @@ describe("dedup merge and flow wiring", () => {
     const comment = first.reviews[0]!.comments[0]!;
     expect(comment.body.length).toBeGreaterThan(1000);
     expect(comment.body).toContain("```suggestion\nfixed\n```");
-    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "TEST-ACTOR[bot]" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false }, nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "TEST-ACTOR[bot]" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
     const threads = await listReviewThreads(octokit, "o", "r", 7);
     expect(threads[0]!.rules).toEqual(reverse ? ["github-pat", "r".repeat(99)] : ["r".repeat(99), "github-pat"]);
     const second = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });

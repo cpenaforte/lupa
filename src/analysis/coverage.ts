@@ -1,6 +1,8 @@
 import type { FileDiff } from "../domain/diff.js";
 import type { AnalysisAssessment, CoverageIssue } from "../domain/assessment.js";
 import { assessAnalysis } from "../domain/assessment.js";
+import { FILE_CAP, isRepresentableFindingPath } from "../domain/finding.js";
+import { capText } from "../domain/text.js";
 import { filterForPrompt, isLockfile, truncateDiff } from "../diff/patch.js";
 
 export interface DiffProjection {
@@ -13,12 +15,19 @@ export interface DiffProjection {
   issues: CoverageIssue[];
 }
 
+export const UNREPRESENTABLE_PATH_MESSAGE = "Changed path identity cannot survive the supported finding contract.";
+/** Display-only: the bounded alias never participates in matching. */
+const DISPLAY_CONTROLS = /[\u0000-\u001f\u007f]/g;
+
 /** Preserve the prompt's greedy fill while accounting only for complete hunks. */
 export function projectDiff(files: FileDiff[], maxChars: number, perFile: number): DiffProjection {
-  const eligible = filterForPrompt(files);
+  const representable = files.filter(f => isRepresentableFindingPath(f.file) && (f.oldFile === undefined || isRepresentableFindingPath(f.oldFile)));
+  const eligible = filterForPrompt(representable);
   const projected = truncateDiff(eligible, maxChars, perFile);
-  const issues: CoverageIssue[] = files.filter(f => !eligible.includes(f) && !isLockfile(f.file))
-    .map(f => ({ code: "unsupported-path", file: f.file, message: "Filtered content has no applicable semantic analyzer." }));
+  const issues: CoverageIssue[] = files.filter(f => !representable.includes(f))
+    .map(f => ({ code: "unsupported-path", file: capText(f.file.replace(DISPLAY_CONTROLS, ""), FILE_CAP), message: UNREPRESENTABLE_PATH_MESSAGE }));
+  issues.push(...representable.filter(f => !eligible.includes(f) && !isLockfile(f.file))
+    .map(f => ({ code: "unsupported-path", file: f.file, message: "Filtered content has no applicable semantic analyzer." })));
   let eligibleHunks = 0, includedHunks = 0, includedFiles = 0, used = 0;
   for (const f of eligible) {
     const starts = [...f.hunks.matchAll(/^@@ .*@@.*$/gm)].map(m => m.index!);

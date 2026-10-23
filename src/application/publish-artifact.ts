@@ -70,6 +70,11 @@ export async function runArtifactFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
     coverage: { filesTotal: projection.eligibleFiles, hunksTotal: projection.eligibleHunks, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 },
   };
   assessment.policy = env.inputs.analysisPolicy ?? "advisory";
+  for (const issue of projection.issues) {
+    if (!assessment.coverage.issues.some(i => i.code === issue.code && i.file === issue.file && i.message === issue.message)) {
+      assessment.coverage.issues.push(issue);
+    }
+  }
   assessment.status = "incomplete"; // A triggered publication cannot inherit a producer's skipped claim.
   if (assessment.policy === "required") {
     assessment.scope = "semantic";

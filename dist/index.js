@@ -20366,14 +20366,18 @@ function stripProvenance(f) {
 }
 var CONTROL_KEEP_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 var CONTROL_ALL = /[\u0000-\u001f\u007f]/g;
+var CONTROL_ANY = /[\u0000-\u001f\u007f]/;
 function unsafePath(file) {
   return file.startsWith("/") || file.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(file) || file.split(/[\\/]/).includes("..");
+}
+function isRepresentableFindingPath(file) {
+  return file.length > 0 && Array.from(file).length <= FILE_CAP && !CONTROL_ANY.test(file) && !unsafePath(file);
 }
 function isChangeAnchor(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
   const c = value;
-  return Object.keys(c).length === 3 && typeof c.file === "string" && c.file.length > 0 && Array.from(c.file).length <= FILE_CAP && !unsafePath(c.file) && !/[\u0000-\u001f\u007f]/.test(c.file) && typeof c.line === "number" && Number.isSafeInteger(c.line) && c.line >= 1 && (c.side === "LEFT" || c.side === "RIGHT");
+  return Object.keys(c).length === 3 && typeof c.file === "string" && isRepresentableFindingPath(c.file) && typeof c.line === "number" && Number.isSafeInteger(c.line) && c.line >= 1 && (c.side === "LEFT" || c.side === "RIGHT");
 }
 function changeClaim(change, invalid) {
   if (invalid === true)
@@ -20385,17 +20389,17 @@ function changeClaim(change, invalid) {
   return { change: { file: change.file, line: change.line, side: change.side } };
 }
 function sanitizeFinding(f) {
-  let file = f.file.replace(CONTROL_ALL, "");
+  let file = f.file;
   let message = f.message.replace(CONTROL_KEEP_TEXT, "");
   let line = f.line;
-  if (file !== "" && unsafePath(file)) {
+  if (file !== "" && !isRepresentableFindingPath(file)) {
     message = `artifact path rejected: ${message}`;
     file = "";
     line = void 0;
   }
   const out = {
     severity: f.severity,
-    file: capText(file, FILE_CAP),
+    file,
     rule: capText(f.rule.replace(CONTROL_ALL, ""), RULE_CAP),
     message: capText(message, MSG_CAP),
     ...changeClaim(f.change, f.changeInvalid)
@@ -20700,10 +20704,14 @@ ${f.hunks}
 }
 
 // lib/src/analysis/coverage.js
+var UNREPRESENTABLE_PATH_MESSAGE = "Changed path identity cannot survive the supported finding contract.";
+var DISPLAY_CONTROLS = /[\u0000-\u001f\u007f]/g;
 function projectDiff(files, maxChars, perFile) {
-  const eligible = filterForPrompt(files);
+  const representable = files.filter((f) => isRepresentableFindingPath(f.file) && (f.oldFile === void 0 || isRepresentableFindingPath(f.oldFile)));
+  const eligible = filterForPrompt(representable);
   const projected = truncateDiff(eligible, maxChars, perFile);
-  const issues = files.filter((f) => !eligible.includes(f) && !isLockfile(f.file)).map((f) => ({ code: "unsupported-path", file: f.file, message: "Filtered content has no applicable semantic analyzer." }));
+  const issues = files.filter((f) => !representable.includes(f)).map((f) => ({ code: "unsupported-path", file: capText(f.file.replace(DISPLAY_CONTROLS, ""), FILE_CAP), message: UNREPRESENTABLE_PATH_MESSAGE }));
+  issues.push(...representable.filter((f) => !eligible.includes(f) && !isLockfile(f.file)).map((f) => ({ code: "unsupported-path", file: f.file, message: "Filtered content has no applicable semantic analyzer." })));
   let eligibleHunks = 0, includedHunks = 0, includedFiles = 0, used = 0;
   for (const f of eligible) {
     const starts = [...f.hunks.matchAll(/^@@ .*@@.*$/gm)].map((m) => m.index);
@@ -20995,6 +21003,7 @@ var DEFAULT_MAX_FINDINGS = 200;
 var DEFAULT_MAX_INLINE_COMMENTS = 30;
 var DEFAULT_MAX_REVIEW_BODY_CHARS = 6e4;
 var DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
+var MIN_ARTIFACT_BYTES = 1024;
 function parseFailLevel(v) {
   if (v === "none" || v === "warning" || v === "high")
     return v;
@@ -21077,7 +21086,7 @@ function getInputs() {
     maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
     maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1),
     maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1e3),
-    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1),
+    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, MIN_ARTIFACT_BYTES),
     postComment: readBool("post_comment", true),
     timeoutSeconds: readInt("timeout_seconds", 90, 1),
     prNumber,
@@ -25751,7 +25760,7 @@ function asThread(n) {
     ...rules === void 0 ? {} : { rules }
   };
 }
-async function listReviewThreads(octokit, owner, repo, pr) {
+async function readReviewThreads(octokit, owner, repo, pr) {
   try {
     const data = await octokit.graphql(`query ($owner: String!, $repo: String!, $pr: Int!) {
         repository(owner: $owner, name: $repo) {
@@ -25770,16 +25779,28 @@ async function listReviewThreads(octokit, owner, repo, pr) {
         }
       }`, { owner, repo, pr });
     const threads = data.repository?.pullRequest?.reviewThreads;
-    if (threads === void 0 || !Array.isArray(threads.nodes))
-      throw new Error("reviewThreads missing");
-    if (threads.pageInfo?.hasPreviousPage === true) {
-      warning("lupa: more than 100 review threads; re-checking the newest 100 only");
+    const pageInfo = threads?.pageInfo;
+    if (threads === void 0 || !Array.isArray(threads.nodes) || pageInfo === null || typeof pageInfo !== "object" || typeof pageInfo.hasPreviousPage !== "boolean") {
+      return { threads: [], health: "unavailable", reason: "malformed-response" };
     }
-    return threads.nodes.map(asThread);
-  } catch (e) {
-    warning(`lupa: review-thread re-read failed (${e.message}); gating on diff membership only`);
-    return [];
+    const mapped = threads.nodes.map(asThread);
+    if (pageInfo.hasPreviousPage) {
+      return { threads: mapped, health: "truncated", reason: "more-than-100-threads" };
+    }
+    return { threads: mapped, health: "ok" };
+  } catch {
+    return { threads: [], health: "unavailable", reason: "graphql-error" };
   }
+}
+var THREAD_TRUNCATED_WARNING = "lupa: more than 100 review threads; re-checking the newest 100 only";
+var THREAD_UNAVAILABLE_WARNING = "lupa: review-thread re-read failed; gating on diff membership only";
+async function listReviewThreads(octokit, owner, repo, pr) {
+  const read = await readReviewThreads(octokit, owner, repo, pr);
+  if (read.health === "truncated")
+    warning(THREAD_TRUNCATED_WARNING);
+  else if (read.health === "unavailable")
+    warning(THREAD_UNAVAILABLE_WARNING);
+  return read.threads;
 }
 async function fetchActor(octokit, owner, repo, pr, options) {
   const trusted = parseReviewActor(options?.trustedLogin ?? "");
@@ -27969,13 +27990,27 @@ async function publishReview(a) {
       if (actor === void 0) {
         assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
         warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
-      } else {
-        threads = await a.deps.gh.listReviewThreads(a.pr);
       }
     } catch {
-      assessment.coverage.issues.push({ code: "actor-context", message: "Needed review-thread context is unavailable." });
-      warning("lupa: review-thread re-read failed; gating on diff membership only");
-      threads = [];
+      assessment.coverage.issues.push({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
+      warning("lupa: review actor unknown; skipping the wrongly-resolved re-check");
+    }
+    if (actor !== void 0) {
+      try {
+        const read = a.deps.gh.readReviewThreads !== void 0 ? await a.deps.gh.readReviewThreads(a.pr) : { threads: await a.deps.gh.listReviewThreads(a.pr), health: "unavailable", reason: "graphql-error" };
+        threads = read.threads;
+        if (read.health === "truncated") {
+          assessment.coverage.issues.push({ code: "thread-context", message: "Needed review-thread context is truncated to the newest 100 threads." });
+          warning(THREAD_TRUNCATED_WARNING);
+        } else if (read.health === "unavailable") {
+          assessment.coverage.issues.push({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+          warning(THREAD_UNAVAILABLE_WARNING);
+        }
+      } catch {
+        threads = [];
+        assessment.coverage.issues.push({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+        warning(THREAD_UNAVAILABLE_WARNING);
+      }
     }
   }
   if (introduced.length < fullSet.length && a.env.inputs.githubToken === "") {
@@ -28424,7 +28459,7 @@ async function runAnalysisFlow(env, deps, out) {
     hunksTotal: prompt.eligibleHunks,
     issues: [...prompt.issues, ...issues.map((i) => ({ code: "patch-unparsed", message: i.message }))]
   };
-  if (prompt.issues.some((i) => i.code === "unsupported-path"))
+  if (prompt.issues.some((i) => i.code === "unsupported-path" && i.message !== UNREPRESENTABLE_PATH_MESSAGE))
     assessment.stages.push({ stage: "filtered-paths", required: true, applicable: true, status: "unsupported", reason: "content-without-analyzer" });
   assessment.stages.push({ stage: "analysis", required: true, applicable: true, status: "skipped", reason: "execution-pending" });
   writeAssessment(env.artifactDir, assessment, env.inputs.maxArtifactBytes, runtimeSecrets(env));
@@ -28566,6 +28601,11 @@ async function runArtifactFlow(env, deps, out) {
     coverage: { filesTotal: projection.eligibleFiles, hunksTotal: projection.eligibleHunks, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 }
   };
   assessment.policy = env.inputs.analysisPolicy ?? "advisory";
+  for (const issue2 of projection.issues) {
+    if (!assessment.coverage.issues.some((i) => i.code === issue2.code && i.file === issue2.file && i.message === issue2.message)) {
+      assessment.coverage.issues.push(issue2);
+    }
+  }
   assessment.status = "incomplete";
   if (assessment.policy === "required") {
     assessment.scope = "semantic";
@@ -28671,6 +28711,12 @@ function createGateway(token, options) {
       const { owner, repo } = context2.repo;
       return listReviewThreads(octokit(), owner, repo, pr);
     },
+    readReviewThreads: async (pr) => {
+      if (token === "")
+        return { threads: [], health: "unavailable", reason: "no-token" };
+      const { owner, repo } = context2.repo;
+      return readReviewThreads(octokit(), owner, repo, pr);
+    },
     getActor: async (pr) => {
       if (token === "")
         return void 0;
@@ -28722,8 +28768,8 @@ function createProcessRunner(boundary = {
       let settled = false;
       let stopping = false;
       let invalidOutput = false;
-      let stdout = Buffer.alloc(0);
-      let stderr = Buffer.alloc(0);
+      const chunks = { stdout: [], stderr: [] };
+      const retained = { stdout: 0, stderr: 0 };
       let deadline;
       const cap = Math.max(0, Math.floor(options.maxBufferBytes));
       const decode = (bytes) => {
@@ -28741,8 +28787,8 @@ function createProcessRunner(boundary = {
         options.signal?.removeEventListener("abort", abort);
         child?.stdout?.destroy();
         child?.stderr?.destroy();
-        result.stdout = decode(stdout);
-        result.stderr = decode(stderr);
+        result.stdout = decode(Buffer.concat(chunks.stdout));
+        result.stderr = decode(Buffer.concat(chunks.stderr));
         if (invalidOutput)
           result.exitCode = null;
         resolve2(result);
@@ -28835,13 +28881,14 @@ function createProcessRunner(boundary = {
         if (settled)
           return;
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        const previous = stream === "stdout" ? stdout : stderr;
-        const room = Math.max(0, cap - previous.length);
-        const next = Buffer.concat([previous, bytes.subarray(0, room)]);
-        if (stream === "stdout")
-          stdout = next;
-        else
-          stderr = next;
+        const room = Math.max(0, cap - retained[stream]);
+        if (room > 0) {
+          const kept = Buffer.from(bytes.subarray(0, room));
+          if (kept.length > 0) {
+            chunks[stream].push(kept);
+            retained[stream] += kept.length;
+          }
+        }
         if (bytes.length > room) {
           invalidOutput = true;
           stop();

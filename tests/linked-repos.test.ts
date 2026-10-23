@@ -124,13 +124,14 @@ describe("ensureLinkedRepo", () => {
     const baseDir = tempRoot();
     const controller = new AbortController();
     const commands: string[] = [];
+    let cloneSignalAborted = false;
     const deps: CloneDeps = {
       run: async (_cmd, args, opts) => {
         commands.push(args[0]);
         if (args[0] === "clone") {
           mkdirSync(join(baseDir, "acme__tools"));
           controller.abort();
-          expect(opts.signal?.aborted).toBe(true);
+          cloneSignalAborted = opts.signal?.aborted === true;
         }
         return { code: 0, stdout: "", stderr: "" };
       },
@@ -138,6 +139,7 @@ describe("ensureLinkedRepo", () => {
     const result = await ensureLinkedRepo("acme/tools", {
       token: "", baseDir, deps, context: { signal: controller.signal, deadlineMs: Date.now() + 30_000 },
     });
+    expect(cloneSignalAborted).toBe(true);
     expect(result).toEqual({ error: "repository not accessible: acme/tools: deadline exceeded" });
     expect(commands).toEqual(["clone"]);
     expect(existsSync(join(baseDir, "acme__tools"))).toBe(false);

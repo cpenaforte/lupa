@@ -23,4 +23,30 @@ describe("semantic diff coverage", () => {
     expect(r).toMatchObject({ eligibleFiles: 1, eligibleHunks: 1, includedFiles: 1, includedHunks: 1 });
     expect(r.issues.map(i => i.file)).toEqual(["a.png", "a.min.js"]);
   });
+  it("excludes changed paths whose identity cannot survive the finding contract", () => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const r = projectDiff([file(longPath, "@@ -0,0 +1 @@\n+x")], 60000, 8000);
+    expect(r.eligibleFiles).toBe(0);
+    expect(r.eligibleHunks).toBe(0);
+    expect(r.text).not.toContain(longPath);
+    expect(r.issues).toContainEqual(expect.objectContaining({
+      code: "unsupported-path",
+      message: "Changed path identity cannot survive the supported finding contract.",
+    }));
+  });
+  it("checks the retained old path on a rename", () => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const r = projectDiff([{ file: "src/new.ts", oldFile: longPath, hunks: "@@ -1 +1 @@\n-x\n+y\n", truncated: false }], 60000, 8000);
+    expect(r.issues).toContainEqual(expect.objectContaining({ code: "unsupported-path" }));
+  });
+  it("strips controls from the unrepresentable-path display field", () => {
+    const controlPath = "src/au\u0000th\u007f.ts";
+    const r = projectDiff([file(controlPath, "@@ -0,0 +1 @@\n+x")], 60000, 8000);
+    expect(r.eligibleFiles).toBe(0);
+    expect(r.issues).toContainEqual(expect.objectContaining({
+      code: "unsupported-path",
+      file: "src/auth.ts",
+      message: "Changed path identity cannot survive the supported finding contract.",
+    }));
+  });
 });

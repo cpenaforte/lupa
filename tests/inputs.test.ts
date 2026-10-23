@@ -379,9 +379,20 @@ describe("getInputs aggregate limits (F15)", () => {
 
   it.each([
     ["max_inline_comments", "0"],
-    ["max_artifact_bytes", "0"],
   ])("rejects %s = 0 (must be >= 1)", (name, v) => {
     setInputs({ [name]: v });
     expect(() => getInputs()).toThrow(new RegExp(name));
+  });
+
+  it.each(["0", "1", "1023"])("rejects max_artifact_bytes = %s below the minimum assessment record", (v) => {
+    setInputs({ max_artifact_bytes: v });
+    expect(() => getInputs()).toThrow(/max_artifact_bytes.*>= 1024/);
+  });
+
+  it("requires max_artifact_bytes to fit the minimal assessment record", () => {
+    setInputs({ max_artifact_bytes: "1023" });
+    expect(() => getInputs()).toThrow(/max_artifact_bytes.*>= 1024/);
+    setInputs({ max_artifact_bytes: "1024" });
+    expect(getInputs().maxArtifactBytes).toBe(1024);
   });
 });

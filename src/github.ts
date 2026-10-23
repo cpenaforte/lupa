@@ -333,18 +333,27 @@ function asThread(n: ThreadNode): ReviewThread {
   };
 }
 
+export type ReviewThreadReadHealth = "ok" | "truncated" | "unavailable";
+
+export interface ReviewThreadRead {
+  threads: ReviewThread[];
+  health: ReviewThreadReadHealth;
+  reason?: "more-than-100-threads" | "malformed-response" | "graphql-error" | "no-token";
+}
+
 /**
  * Reads this PR's review threads (newest 100 — recent resolves are the relevant
- * ones) over GraphQL on the same client. `hasPreviousPage` warns (lupa prefix)
- * and uses the 100; any fetch error warns and yields empty (fail-open: never
- * blocks on infra failure).
+ * ones) over GraphQL on the same client and reports the read's health: `truncated`
+ * keeps the newest 100 when older pages exist; a malformed response or any thrown
+ * error is `unavailable` with a fixed reason (never the remote error text). Never
+ * throws and never logs: the caller decides how to account for incomplete context.
  */
-export async function listReviewThreads(
+export async function readReviewThreads(
   octokit: Octokit,
   owner: string,
   repo: string,
   pr: number,
-): Promise<ReviewThread[]> {
+): Promise<ReviewThreadRead> {
   try {
     const data = (await octokit.graphql(
       `query ($owner: String!, $repo: String!, $pr: Int!) {
@@ -366,15 +375,44 @@ export async function listReviewThreads(
       { owner, repo, pr },
     )) as { repository?: { pullRequest?: { reviewThreads?: { pageInfo?: { hasPreviousPage?: unknown }; nodes?: ThreadNode[] } } } };
     const threads = data.repository?.pullRequest?.reviewThreads;
-    if (threads === undefined || !Array.isArray(threads.nodes)) throw new Error("reviewThreads missing");
-    if (threads.pageInfo?.hasPreviousPage === true) {
-      core.warning("lupa: more than 100 review threads; re-checking the newest 100 only");
+    const pageInfo = threads?.pageInfo;
+    if (
+      threads === undefined ||
+      !Array.isArray(threads.nodes) ||
+      pageInfo === null ||
+      typeof pageInfo !== "object" ||
+      typeof pageInfo.hasPreviousPage !== "boolean"
+    ) {
+      return { threads: [], health: "unavailable", reason: "malformed-response" };
     }
-    return threads.nodes.map(asThread);
-  } catch (e) {
-    core.warning(`lupa: review-thread re-read failed (${(e as Error).message}); gating on diff membership only`);
-    return [];
+    const mapped = threads.nodes.map(asThread);
+    if (pageInfo.hasPreviousPage) {
+      return { threads: mapped, health: "truncated", reason: "more-than-100-threads" };
+    }
+    return { threads: mapped, health: "ok" };
+  } catch {
+    return { threads: [], health: "unavailable", reason: "graphql-error" };
   }
+}
+
+export const THREAD_TRUNCATED_WARNING = "lupa: more than 100 review threads; re-checking the newest 100 only";
+export const THREAD_UNAVAILABLE_WARNING = "lupa: review-thread re-read failed; gating on diff membership only";
+
+/**
+ * Compatibility wrapper over readReviewThreads: warns (lupa prefix) when the read
+ * is truncated or unavailable and returns the available threads (fail-open: never
+ * blocks on infra failure).
+ */
+export async function listReviewThreads(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pr: number,
+): Promise<ReviewThread[]> {
+  const read = await readReviewThreads(octokit, owner, repo, pr);
+  if (read.health === "truncated") core.warning(THREAD_TRUNCATED_WARNING);
+  else if (read.health === "unavailable") core.warning(THREAD_UNAVAILABLE_WARNING);
+  return read.threads;
 }
 
 /**

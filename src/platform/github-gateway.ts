@@ -2,7 +2,7 @@ import { context, getOctokit } from "@actions/github";
 import type { Gateway } from "../application/contracts.js";
 import {
   fetchActor as fetchReviewActor, getRepoSize as fetchRepoSize, listReviewThreads as fetchReviewThreads,
-  postIssueFallback, postReview,
+  postIssueFallback, postReview, readReviewThreads as fetchReviewThreadRead,
 } from "../github.js";
 
 export function createGateway(token: string, options?: { trustedLogin?: string }): Gateway {
@@ -50,6 +50,11 @@ export function createGateway(token: string, options?: { trustedLogin?: string }
       if (token === "") return [];
       const { owner, repo } = context.repo;
       return fetchReviewThreads(octokit(), owner, repo, pr);
+    },
+    readReviewThreads: async (pr) => {
+      if (token === "") return { threads: [], health: "unavailable", reason: "no-token" };
+      const { owner, repo } = context.repo;
+      return fetchReviewThreadRead(octokit(), owner, repo, pr);
     },
     getActor: async (pr) => {
       if (token === "") return undefined;

@@ -86,6 +86,70 @@ describe("owned process lifetime", () => {
     expect(result.exitCode).toBeNull();
   });
 
+  it("concatenates many bounded chunks once and preserves order", async () => {
+    const { run, proc } = setup();
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      const pending = run("fixture", [], { ...options, maxBufferBytes: 64 });
+      for (let i = 0; i < 32; i++) proc.stdout!.emit("data", Buffer.from("ab"));
+      proc.emit("close", 0, null);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pending).toMatchObject({ stdout: "ab".repeat(32), exitCode: 0 });
+      expect(concat.mock.calls.length).toBeLessThanOrEqual(2);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
+  it("caps across many chunks and marks the output invalid", async () => {
+    const { run, proc } = setup();
+    const pending = run("fixture", [], { ...options, maxBufferBytes: 8 });
+    for (let i = 0; i < 10; i++) proc.stdout!.emit("data", Buffer.from("abcd"));
+    proc.emit("close", 0, null);
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await pending;
+    expect(result.stdout).toBe("abcdabcd");
+    expect(result.exitCode).toBeNull();
+  });
+
+  it("does not retain zero-length chunks", async () => {
+    const { run, proc } = setup();
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      const pending = run("fixture", [], { ...options, maxBufferBytes: 64 });
+      for (let i = 0; i < 100; i++) proc.stdout!.emit("data", Buffer.alloc(0));
+      proc.stdout!.emit("data", Buffer.from("ok"));
+      proc.emit("close", 0, null);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pending).toMatchObject({ stdout: "ok", exitCode: 0 });
+      const stdoutChunks = concat.mock.calls.map(([list]) => list).find((list) => list.length > 0);
+      expect(stdoutChunks).toHaveLength(1);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
+  it("decodes a multibyte sequence split across chunks", async () => {
+    const { run, proc } = setup();
+    const pending = run("fixture", [], { ...options, maxBufferBytes: 3 });
+    const euro = Buffer.from("€");
+    proc.stdout!.emit("data", euro.subarray(0, 1));
+    proc.stdout!.emit("data", euro.subarray(1));
+    proc.emit("close", 0, null);
+    await vi.advanceTimersByTimeAsync(250);
+    expect((await pending).stdout).toBe("€");
+  });
+
+  it("ignores output after close", async () => {
+    const { run, proc } = setup();
+    const pending = run("fixture", [], options);
+    proc.stdout!.emit("data", Buffer.from("abc"));
+    proc.emit("close", 0, null);
+    proc.stdout!.emit("data", Buffer.from("late"));
+    await vi.advanceTimersByTimeAsync(250);
+    expect((await pending).stdout).toBe("abc");
+  });
+
   it("does not launch anything for an already aborted request", async () => {
     const { run, spawn } = setup();
     const controller = new AbortController();

@@ -60,6 +60,8 @@ export const DEFAULT_MAX_FINDINGS = 200;
 export const DEFAULT_MAX_INLINE_COMMENTS = 30;
 export const DEFAULT_MAX_REVIEW_BODY_CHARS = 60000;
 export const DEFAULT_MAX_ARTIFACT_BYTES = 8388608;
+/** Shared floor: holds the bounded fallback assessment (413 bytes with 40-char SHAs) and pr-meta.json (263 bytes). */
+export const MIN_ARTIFACT_BYTES = 1024;
 
 export function parseFailLevel(v: string): FailLevel {
   if (v === "none" || v === "warning" || v === "high") return v;
@@ -145,7 +147,7 @@ export function getInputs(): ActionInputs {
     maxFindings: readInt("max_findings", DEFAULT_MAX_FINDINGS, 1),
     maxInlineComments: readInt("max_inline_comments", DEFAULT_MAX_INLINE_COMMENTS, 1),
     maxReviewBodyChars: readInt("max_review_body_chars", DEFAULT_MAX_REVIEW_BODY_CHARS, 1000),
-    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, 1),
+    maxArtifactBytes: readInt("max_artifact_bytes", DEFAULT_MAX_ARTIFACT_BYTES, MIN_ARTIFACT_BYTES),
     postComment: readBool("post_comment", true),
     timeoutSeconds: readInt("timeout_seconds", 90, 1),
     prNumber,

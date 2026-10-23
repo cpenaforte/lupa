@@ -7,7 +7,7 @@ import { sanitizeFinding } from "../domain/finding.js";
 import type { PrMeta } from "../domain/diff.js";
 import type { AnalysisAssessment } from "../domain/assessment.js";
 import { assessmentExit } from "../domain/assessment.js";
-import { projectDiff, finalizeAssessment } from "../analysis/coverage.js";
+import { projectDiff, finalizeAssessment, UNREPRESENTABLE_PATH_MESSAGE } from "../analysis/coverage.js";
 import type { DedupVerdicts } from "../llm/types.js";
 import { runL0 } from "../fastpath.js";
 import { isLockfile, parsePatch, PER_FILE_CAP } from "../diff/patch.js";
@@ -118,7 +118,7 @@ export async function runAnalysisFlow(env: RunEnv, deps: Deps, out: Outcome): Pr
   assessment.status = "incomplete";
   assessment.coverage = { ...assessment.coverage, filesTotal: prompt.eligibleFiles, hunksTotal: prompt.eligibleHunks,
     issues: [...prompt.issues, ...issues.map(i => ({ code: "patch-unparsed", message: i.message }))] };
-  if (prompt.issues.some(i => i.code === "unsupported-path")) assessment.stages.push({ stage: "filtered-paths", required: true, applicable: true, status: "unsupported", reason: "content-without-analyzer" });
+  if (prompt.issues.some(i => i.code === "unsupported-path" && i.message !== UNREPRESENTABLE_PATH_MESSAGE)) assessment.stages.push({ stage: "filtered-paths", required: true, applicable: true, status: "unsupported", reason: "content-without-analyzer" });
   assessment.stages.push({ stage: "analysis", required: true, applicable: true, status: "skipped", reason: "execution-pending" });
   writeAssessment(env.artifactDir, assessment, env.inputs.maxArtifactBytes, runtimeSecrets(env));
 

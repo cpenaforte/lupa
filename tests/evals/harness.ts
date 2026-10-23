@@ -170,6 +170,10 @@ async function runEval(
       gatewayCalls.push({ method: "listReviewThreads", args: [pr] });
       return testCase.reviewThreads ?? [];
     },
+    async readReviewThreads(pr) {
+      gatewayCalls.push({ method: "readReviewThreads", args: [pr] });
+      return { threads: testCase.reviewThreads ?? [], health: "ok" };
+    },
     async getActor(pr) {
       gatewayCalls.push({ method: "getActor", args: [pr] });
       return testCase.actor === null ? undefined : testCase.actor ?? "synthetic-actor";

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readAssessment, writeAssessment, writePrMeta } from "../src/artifacts/review-store.js";
 import type { AnalysisAssessment } from "../src/domain/assessment.js";
+import { MIN_ARTIFACT_BYTES } from "../src/inputs.js";
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })));
 function setup() {
@@ -44,6 +45,21 @@ describe("assessment artifacts", () => {
     const raw = readFileSync(join(dir, "analysis.json"), "utf8"); expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(1000);
     expect(persisted).toEqual(JSON.parse(raw));
     expect(readAssessment(dir, 1000)).toMatchObject({ status: "incomplete", coverage: { issues: [expect.objectContaining({ code: "assessment-overflow" })] } });
+  });
+  it("fits the bounded fallback in the documented minimum", () => {
+    const { dir, assessment } = setup();
+    assessment.stages = Array.from({ length: 40 }, (_, i) => ({
+      stage: `s${i}`, status: "ok" as const, applicable: true, required: true, reason: "x".repeat(1000),
+    }));
+    assessment.coverage.issues = Array.from({ length: 205 }, () => ({ code: "x", message: "m".repeat(1000) }));
+    const persisted = writeAssessment(dir, assessment, MIN_ARTIFACT_BYTES, []);
+    expect(persisted.status).toBe("incomplete");
+    expect(readAssessment(dir, MIN_ARTIFACT_BYTES)).toEqual(persisted);
+    expect(Buffer.byteLength(readFileSync(join(dir, "analysis.json"), "utf8"))).toBeLessThanOrEqual(MIN_ARTIFACT_BYTES);
+  });
+  it("still rejects a physically impossible direct writer cap", () => {
+    const { dir, assessment } = setup();
+    expect(() => writeAssessment(dir, assessment, 100, [])).toThrow(/byte limit cannot hold/);
   });
   it.each(["policy", "scope", "status", "stage status"])("rejects an array in the %s enum field", (field) => {
     const { dir, assessment } = setup();

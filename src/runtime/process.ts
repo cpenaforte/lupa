@@ -57,8 +57,9 @@ export function createProcessRunner(boundary: ProcessBoundary = {
       let settled = false;
       let stopping = false;
       let invalidOutput = false;
-      let stdout = Buffer.alloc(0);
-      let stderr = Buffer.alloc(0);
+      // Bounded chunk lists plus byte counters; concatenated once per stream at finish.
+      const chunks: Record<"stdout" | "stderr", Buffer[]> = { stdout: [], stderr: [] };
+      const retained = { stdout: 0, stderr: 0 };
       let deadline: ReturnType<typeof setTimeout> | undefined;
       const cap = Math.max(0, Math.floor(options.maxBufferBytes));
       const decode = (bytes: Buffer) => {
@@ -77,8 +78,8 @@ export function createProcessRunner(boundary: ProcessBoundary = {
         child?.stdout?.destroy();
         child?.stderr?.destroy();
         // Decode only at the end, avoiding split multibyte chunks and unbounded retention.
-        result.stdout = decode(stdout);
-        result.stderr = decode(stderr);
+        result.stdout = decode(Buffer.concat(chunks.stdout));
+        result.stderr = decode(Buffer.concat(chunks.stderr));
         if (invalidOutput) result.exitCode = null;
         resolve(result);
       };
@@ -167,10 +168,15 @@ export function createProcessRunner(boundary: ProcessBoundary = {
       const capture = (stream: "stdout" | "stderr", chunk: Buffer | string) => {
         if (settled) return;
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        const previous = stream === "stdout" ? stdout : stderr;
-        const room = Math.max(0, cap - previous.length);
-        const next = Buffer.concat([previous, bytes.subarray(0, room)]);
-        if (stream === "stdout") stdout = next; else stderr = next;
+        const room = Math.max(0, cap - retained[stream]);
+        if (room > 0) {
+          // Copy: the source buffer belongs to the stream and may be reused.
+          const kept = Buffer.from(bytes.subarray(0, room));
+          if (kept.length > 0) {
+            chunks[stream].push(kept);
+            retained[stream] += kept.length;
+          }
+        }
         if (bytes.length > room) { invalidOutput = true; stop(); }
       };
 

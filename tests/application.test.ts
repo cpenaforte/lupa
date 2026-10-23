@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import * as core from "@actions/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Source-corpus runs execute the real publication code, which logs synthetic warnings/errors for
+// refusal, stale, and fallback scenarios. Capture them here so they are asserted rather than printed.
+vi.mock("@actions/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@actions/core")>();
+  return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
+});
 import { run } from "../src/application/run.js";
 import type { Analysis } from "../src/application/contracts.js";
 import * as main from "../src/main.js";
@@ -12,6 +20,52 @@ import { cleanupEvalRuns, runSourceEval } from "./evals/harness.js";
 import { evalCases } from "./evals/corpus.js";
 
 afterEach(cleanupEvalRuns);
+
+type Diagnostic = { level: "info" | "warning" | "error"; message: string };
+
+async function withDiagnostics<T>(fn: () => Promise<T>): Promise<{ result: T; diagnostics: Diagnostic[] }> {
+  const diagnostics: Diagnostic[] = [];
+  const levels = ["info", "warning", "error"] as const;
+  for (const level of levels) {
+    vi.mocked(core[level]).mockImplementation((message: string | Error) => { diagnostics.push({ level, message: String(message) }); });
+  }
+  try {
+    return { result: await fn(), diagnostics };
+  } finally {
+    for (const level of levels) vi.mocked(core[level]).mockReset();
+  }
+}
+
+const HEAD = "a".repeat(40);
+const OTHER = "c".repeat(40);
+const STALE_COVERAGE = "Analysis\\: incomplete\\; scope\\: semantic\\.\nSemantic coverage\\: 1\\/1 files\\, 1\\/1 hunks\\; 0 unreviewed hunks\\.\nstale\\-head\\: The PR head changed\\; analysis applies only to the recorded head\\.";
+const expectedDiagnostics: Record<string, Diagnostic[]> = {
+  "synthetic-force-push-head-moves-before-post": [
+    { level: "info", message: STALE_COVERAGE },
+    { level: "warning", message: `PR head moved from ${HEAD} to ${OTHER}: skipping review for the stale head` },
+  ],
+  "synthetic-fork-readonly-summary-only": [
+    { level: "warning", message: "fork PR with secrets in scope: L2 native toolchains skipped" },
+    { level: "warning", message: "fork PR with a read-only token: review not posted; summary and artifact only" },
+  ],
+  "synthetic-dry-run-post-comment-off": [
+    { level: "info", message: "post_comment is false: dry-run, nothing posted (would post event=COMMENT, inline=1, general=0, high=0, blocking=1, omitted=0)" },
+  ],
+  "synthetic-non-trigger-push-event": [
+    { level: "info", message: 'lupa: event "push" does not trigger a review; nothing to do.' },
+  ],
+  "synthetic-issue-fallback-after-refusal": [
+    { level: "error", message: "review post refused by GitHub: refused" },
+  ],
+  "synthetic-llm-failure-fast-only": [
+    { level: "warning", message: "slow path failed (content-filter): synthetic refusal" },
+    { level: "info", message: "lupa: dedup skipped (slow path unavailable); scanner findings published unmerged" },
+  ],
+  "synthetic-stale-on-post-skip": [
+    { level: "info", message: STALE_COVERAGE },
+    { level: "info", message: `lupa: PR head moved during posting; analyzed ${HEAD}, live ${OTHER}; skipping review for the stale head — a fresh run will cover the new head.` },
+  ],
+};
 
 describe("application entry boundary", () => {
   it("preserves the public entry and helper identities across compatibility exports", () => {
@@ -34,7 +88,8 @@ describe("application entry boundary", () => {
         runScanners: forbidden, runL2: forbidden, ensureOllama: forbidden, checkModelListed: forbidden,
         callByStyle: forbidden, callWithProbe: forbidden, callByStyleAgent: forbidden, callWithProbeAgent: forbidden,
       } : undefined;
-      const result = await runSourceEval(testCase, run, analysis);
+      const { result, diagnostics } = await withDiagnostics(() => runSourceEval(testCase, run, analysis));
+      expect(diagnostics).toEqual(expectedDiagnostics[testCase.id] ?? []);
       expect(result.outcome.exitCode).toBe(testCase.expected.exitCode);
       expect(result.findings).toEqual(testCase.expected.findings);
       expect(result.summary).toBe(testCase.expected.summary);
