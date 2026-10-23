@@ -53,6 +53,28 @@ describe("causal attribution independent of display location", () => {
     expect(validateChangeAnchor(anchor, [files[0]!, { ...files[0]!, file: "renamed.ts", oldFile: anchor.file }], hunks).ok).toBe(false);
     expect(validateChangeAnchor(anchor, [{ ...files[0]!, truncated: true }], hunks).ok).toBe(false);
   });
+  it.each([false, true])("rejects old-path anchors when another patch section shares the resolved destination (reversed=%s)", reversed => {
+    const colliding = [
+      { file: "new.ts", deleted: true, hunks: "@@ -2 +0,0 @@\n-unrelated();\n", truncated: false },
+      { file: "new.ts", oldFile: "old.ts", hunks: "@@ -10 +10 @@\n-guard();\n+unsafe();\n", truncated: false },
+    ];
+    if (reversed) colliding.reverse();
+    const parsed = parseHunks(colliding);
+    const change = { file: "old.ts", line: 2, side: "LEFT" as const };
+    expect(validateChangeAnchor(change, colliding, parsed).ok).toBe(false);
+    const f = { ...finding, file: "untouched.ts", change };
+    const decision = evaluateRawGate([f], parsed, colliding, [], undefined, { analysisPolicy: "required" });
+    expect(decision.blocking).toEqual([]);
+    expect(decision.attributionIssues).toContainEqual(expect.objectContaining({ code: "invalid-change-anchor" }));
+    const status = assessAnalysis({ triggered: true, scope: "semantic", stages: [], coverage: { filesTotal: 2, hunksTotal: 2, filesReviewed: 2, hunksReviewed: 2, issues: decision.attributionIssues, issuesOmitted: 0 } });
+    expect(status).toBe("incomplete");
+    expect(eventFor("high", decision.blocking)).toBe("COMMENT");
+    expect(assessmentExit("required", status, exitFor("high", decision.blocking))).toBe(3);
+    const added = { ...f, file: "new.ts", line: 10 };
+    const independent = evaluateRawGate([added], parsed, colliding, [], undefined, { analysisPolicy: "required" });
+    expect(independent.blocking).toEqual([added]);
+    expect(independent.attributionIssues).toHaveLength(1);
+  });
   it("refuses a control-stripped path even if it would match an actual deletion", () => {
     const safe = sanitizeFinding({ ...finding, change: { ...anchor, file: "src/au\u0000th.ts" } });
     expect(safe.changeInvalid).toBe(true);

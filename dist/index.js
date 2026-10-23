@@ -26201,6 +26201,8 @@ function validateChangeAnchor(change, files, hunks) {
   if (matches.length !== 1)
     return { ok: false, reason: "Change anchor path is absent or ambiguous in the bound patch." };
   const file = matches[0];
+  if (files.filter((entry) => entry.file === file.file).length !== 1)
+    return { ok: false, reason: "Change anchor destination is ambiguous in the bound patch." };
   if (file.truncated || file.deleted && change.side === "RIGHT")
     return { ok: false, reason: "Change anchor cannot be verified in the bound patch." };
   const hit = indexHunks(hunks).get(file.file)?.get(keyOf(change.side, change.line));

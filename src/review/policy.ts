@@ -166,6 +166,9 @@ export function validateChangeAnchor(change: unknown, files: FileDiff[], hunks: 
   const matches = files.filter(file => file.file === change.file || (change.side === "LEFT" && file.oldFile === change.file));
   if (matches.length !== 1) return { ok: false, reason: "Change anchor path is absent or ambiguous in the bound patch." };
   const file = matches[0]!;
+  // Hunk lookup is keyed by current path, not section identity. An old-path
+  // match must not borrow changed lines from another section at that destination.
+  if (files.filter(entry => entry.file === file.file).length !== 1) return { ok: false, reason: "Change anchor destination is ambiguous in the bound patch." };
   if (file.truncated || (file.deleted && change.side === "RIGHT")) return { ok: false, reason: "Change anchor cannot be verified in the bound patch." };
   const hit = indexHunks(hunks).get(file.file)?.get(keyOf(change.side, change.line));
   if (hit?.kind !== (change.side === "LEFT" ? "del" : "add")) return { ok: false, reason: "Change anchor does not name an added RIGHT or removed LEFT line." };
