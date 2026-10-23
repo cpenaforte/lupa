@@ -147,6 +147,8 @@ jobs:
           llm_model: ${{ vars.PR_REVIEWER_MODEL }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
           fail_level: warning
+          # Opt in to required only after configuring the documented analysis profile.
+          analysis_policy: advisory
 
       # This step is evaluated on every event. Its guard checks only that the event has a same-repository
       # PR head. It needs BOTH security-events: write and actions: read (commented out above); without
@@ -184,6 +186,7 @@ jobs:
             ${{ runner.temp }}/pr-reviewer-out/sbom.cdx.json
 
       - name: Enforce fail_level (warning check never blocks)
+        # Required non-complete analysis reports 3; a missing output also fails this gate.
         if: always()
         env:
           EXIT_CODE: ${{ steps.review.outputs.exit-code }}

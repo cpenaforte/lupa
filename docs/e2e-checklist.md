@@ -10,11 +10,14 @@ Setup: a private test repository with the workflow from `docs/workflow-template.
 unless a case says otherwise. Read the review body on the PR, the job summary, and the
 `pr-reviewer-out` artifact.
 
+For the assurance changes, rerun the matrix against the exact immutable commit of the release under review. The `v0.1.0` procedure below is historical release setup, not current pass evidence. Record the action SHA, workflow run/PR URLs, outputs, and artifact SHAs for each fresh run; all assurance rows below remain manual checks until that evidence is collected. No historical canary result establishes that a new release passed.
+
 Every case asserts, in addition to its own rows:
 
-- the artifact `pr-reviewer-out` contains `diff.patch`, `pr-meta.json`, `findings.json`, `sarif.json`, `sbom.cdx.json` (where the scanner ran);
+- the artifact `pr-reviewer-out` contains `diff.patch`, `pr-meta.json`, `findings.json`, `analysis.json`, `sarif.json`, `sbom.cdx.json` (where the scanner ran); assessment SHAs match the reviewed patch;
 - the LLM key value never appears in the job log, the summary, the review body, or any artifact;
-- the workflow exit code matches the `exit-code` output (`0` pass, `2` warning, `1` high).
+- the action process exit matches `exit-code` (`0` pass, `2` warning, `1` high, `3` required non-complete); the separate template gate passes 0/2 and fails 1/3 or missing output;
+- `analysis-status`, body, summary, and `analysis.json` agree on execution status and disclose missing coverage even with zero findings. Complete execution is not measured correctness, a human-review replacement, or automatic approval.
 
 ## Cases
 
@@ -25,10 +28,26 @@ Every case asserts, in addition to its own rows:
 | 3 | **Race**: unsynchronised shared counter updated from two async handlers | `COMMENT` | LLM finding that cites the shared variable; severity may be `warning` (not asserted to be `high`) | `2` |
 | 4 | **Giant diff**: >60 000 changed characters across many files | `COMMENT` | Review still posted. Body/summary notes truncation; `diff.patch` in the artifact is untruncated; the prompt input is capped (`max_diff_chars`) | per findings |
 | 5 | **Force-push**: push a rewritten history to an open PR branch | `COMMENT` for the new head SHA (`synchronize` event) | Review refers to the new head SHA only; no stale findings from the old head | per findings |
-| 6 | **Deleted line**: removes a line that had a finding on the previous head | `COMMENT` | No inline comment on the deleted line (not on the new head's diff); no error | per findings |
+| 6 | **Deleted line**: report a removed line in the current bound patch | `COMMENT` | Inline comment uses the exact old line on `LEFT`; a line absent from this patch remains body-only advice | per findings |
 | 7 | **Multi-line finding**: LLM reports a range across five added lines | `COMMENT` | Inline comment anchored to a valid added line inside the range; no 422 from the API | per findings |
 | 8 | **Fork PR, secrets not granted** (`pull_request` from a fork) | none (no POST) | Summary and artifact only; warning `review not posted; summary and artifact only`; L2 toolchains skipped (`fork PR with secrets in scope`) when secrets are in scope | per findings |
 | 9 | **`/review` retrigger** (`issue_comment` `created` containing `/review`, author `OWNER`/`MEMBER`/`COLLABORATOR`) on a PR | `COMMENT` for the current head | Review posted once; the same comment from an external author (`CONTRIBUTOR`/`NONE`) triggers nothing | per findings |
+
+
+Fresh assurance checks for the reviewed release (not yet live pass evidence):
+
+| Scenario | Required result | Advisory control |
+| --- | --- | --- |
+| Required model timeout or required scanner failure, zero defect findings | `failed`, exit 3, `COMMENT` with execution reason | Existing finding severity exit retained |
+| Clipped/omitted semantic hunk, including a defect only in the tail | `incomplete`, exit 3, unreviewed hunks disclosed; no clean claim | Coverage notice, existing severity exit |
+| Malformed tool arguments or exhausted agent budget; requested tools unsupported | `incomplete` or `unsupported`, exit 3 even with valid empty final findings | Coverage notice, existing severity exit |
+| Remove authorization; finding displayed on unchanged context with an exact removed-line anchor | Gate on causal LEFT anchor; high + `fail_level: high` returns 1 and `REQUEST_CHANGES` when execution is complete | Existing diff/reopen eligibility retained |
+| Actor spoof in review prose or producer metadata; repeat with genuine wrongly-resolved thread and display dedup | Spoof never authenticates; genuine raw high reopens independent of display merging | Same identity and raw severity rules |
+| Head moves before/during post | Persist `incomplete` on analyzed SHA, exit 3, no stale publication | Persist `incomplete`, exit 0, no stale publication |
+| Fork Flow B legacy/missing assessment or hostile producer policy/actor/token | Coverage unavailable or honest producer claim; trusted required policy returns 3 for non-complete; no Analysis calls or privilege escalation | Trusted advisory severity policy retained |
+| Workflow/live head SHA differs from producer PR metadata | Refuse publication; do not rerun analysis | Same refusal |
+| Healthy requested stages and every eligible hunk accounted for; no findings | `complete`, exit 0, `COMMENT`; human review still needed | `complete` for recorded scope, no approval |
+| Non-trigger event or missing gate output | Non-trigger `skipped`/0; missing output fails gate | Same behavior |
 
 Negative controls (run once each):
 

@@ -1,7 +1,28 @@
 import * as fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("workflow templates", () => {
+  it.each([["0", 0], ["2", 0], ["1", 1], ["3", 1], ["", 1], ["garbage", 1]] as const)(
+    "executes the actual gate shell for output %j (exit %i)", (exitCode, expectedExit) => {
+      const template = fs.readFileSync("docs/workflow-template.yml", "utf8");
+      const block = template.slice(template.indexOf("      - name: Enforce fail_level"));
+      const script = block.slice(block.indexOf("        run: |\n") + "        run: |\n".length)
+        .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+      const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], { env: { ...process.env, EXIT_CODE: exitCode }, encoding: "utf8" });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(expectedExit);
+      if (expectedExit === 1) expect(result.stderr).toContain(`gate failed (exit code: ${exitCode || "none"})`);
+    },
+  );
+
+  it("makes advisory setup explicit in both trusted action inputs", () => {
+    for (const file of ["docs/workflow-template.yml", "docs/workflow-template-privileged.yml"]) {
+      const text = fs.readFileSync(file, "utf8");
+      const inputBlock = text.slice(text.indexOf("uses: cpenaforte/lupa@"));
+      expect(inputBlock).toMatch(/^ {10}analysis_policy: advisory$/m);
+    }
+  });
   it("uploads analysis.json with the review artifact on unsuccessful analysis runs", () => {
     const text = fs.readFileSync("docs/workflow-template.yml", "utf8");
     const upload = text.split(/^      - name: /m).find(step => step.startsWith("Upload review artifact\n"))!;

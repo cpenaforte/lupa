@@ -13,6 +13,8 @@ import { ReadonlyTokenError, StaleHeadError } from "../../src/github.js";
 import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/application/contracts.js";
 import type { LlmResult } from "../../src/llm/types.js";
 import type { EvalCase, EvalPublication, EvalRun } from "./types.js";
+import { executeTool } from "../../src/agent-tools.js";
+import type { ToolContext } from "../../src/agent-tools.js";
 
 const BASE_SHA = "b".repeat(40);
 const HEAD_SHA = "a".repeat(40);
@@ -141,6 +143,7 @@ async function runEval(
     headRepo: "synthetic-owner/synthetic-repo",
     headRef: "synthetic-branch",
     isFork: testCase.fakeGatewayMode === "isFork",
+    ...testCase.livePr,
   };
   const gateway: Gateway = {
     async getPr(pr) {
@@ -165,11 +168,11 @@ async function runEval(
     },
     async listReviewThreads(pr) {
       gatewayCalls.push({ method: "listReviewThreads", args: [pr] });
-      return [];
+      return testCase.reviewThreads ?? [];
     },
     async getActor(pr) {
       gatewayCalls.push({ method: "getActor", args: [pr] });
-      return "synthetic-actor";
+      return testCase.actor === null ? undefined : testCase.actor ?? "synthetic-actor";
     },
     async createReview(pr, payload) {
       gatewayCalls.push({ method: "createReview", args: [pr, payload] });
@@ -193,12 +196,12 @@ async function runEval(
       const error = testCase.llmError;
       return { ok: false as const, reason: error.reason, detail: error.detail } as LlmResult;
     }
-    return { ok: true as const, findings: [...(testCase.llmFindings ?? [])], execution: { mode: "single-shot", status: "completed" } };
+    return { ok: true as const, findings: [...(testCase.llmFindings ?? [])], execution: testCase.execution.model, verdicts: testCase.verdicts };
   };
   const analysis: Analysis = {
     async runScanners(options) {
       analysisCalls.push({ method: "runScanners", args: [options] });
-      return { findings: [...(testCase.scannerFindings ?? [])], stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok" as const, required: true, applicable: true })) };
+      return { findings: [...(testCase.scannerFindings ?? [])], stages: testCase.execution.scannerStages };
     },
     async runL2(dir) {
       analysisCalls.push({ method: "runL2", args: [dir] });
@@ -206,7 +209,7 @@ async function runEval(
     },
     async runL2Detailed(dir) {
       analysisCalls.push({ method: "runL2", args: [dir] });
-      return { findings: [...(testCase.l2Findings ?? [])], stages: [{ stage: "l2:fixture", status: "ok", required: true, applicable: true }] };
+      return { findings: [...(testCase.l2Findings ?? [])], stages: testCase.execution.l2Stages };
     },
     async ensureOllama(...args) {
       analysisCalls.push({ method: "ensureOllama", args });
@@ -219,11 +222,13 @@ async function runEval(
     callWithProbe: (...args) => llm("callWithProbe", args),
     async callByStyleAgent(...args) {
       analysisCalls.push({ method: "callByStyleAgent", args });
-      return { ok: true, findings: [...(testCase.llmFindings ?? [])] };
+      if (testCase.agentTool) await executeTool(testCase.agentTool.name, testCase.agentTool.args, args[3] as ToolContext);
+      return { ok: true, findings: [...(testCase.llmFindings ?? [])], execution: testCase.execution.model };
     },
     async callWithProbeAgent(...args) {
       analysisCalls.push({ method: "callWithProbeAgent", args });
-      return { ok: true, findings: [...(testCase.llmFindings ?? [])] };
+      if (testCase.agentTool) await executeTool(testCase.agentTool.name, testCase.agentTool.args, args[6] as ToolContext);
+      return { ok: true, findings: [...(testCase.llmFindings ?? [])], execution: testCase.execution.model };
     },
   };
   const env: RunEnv = {
@@ -242,7 +247,15 @@ async function runEval(
   const restoreHasInstance = runReview === undefined ? bridgeBundleErrors() : () => {};
   let outcome: Awaited<ReturnType<typeof execute>>;
   try {
-    outcome = await execute(env, { gh: gateway, analysis: analysisOverride ?? analysis } satisfies Deps);
+    // Record the actual injected port, including source-eval overrides. A Flow B assertion
+    // must fail if it accidentally calls an override instead of the default fake.
+    const effectiveAnalysis = analysisOverride === undefined ? analysis : Object.fromEntries(
+      Object.entries(analysisOverride).map(([method, fn]) => [method, (...args: unknown[]) => {
+        analysisCalls.push({ method: method as keyof Analysis, args });
+        return fn(...args);
+      }]),
+    ) as unknown as Analysis;
+    outcome = await execute(env, { gh: gateway, analysis: effectiveAnalysis } satisfies Deps);
   } finally {
     restoreHasInstance();
   }
@@ -260,6 +273,6 @@ async function runEval(
     artifactDir,
     workDir,
     analysisCalls,
-    fakeInterfaces: { gateway, analysis },
+    fakeInterfaces: { gateway, analysis: analysisOverride ?? analysis },
   };
 }

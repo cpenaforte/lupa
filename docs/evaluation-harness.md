@@ -15,6 +15,12 @@ a general quality score or predict performance on real pull requests. The fixtur
 responses are synthetic, and the suite rejects unexpected network requests. The CI evaluation step
 needs no provider credentials or service.
 
+Each corpus expectation pins `analysisStatus` and the applicable coverage counters independently of findings, locations, severity exits, and publication content. Every case supplies explicit scanner/L2/model execution evidence; an empty findings list never implies healthy execution. The harness records calls on the actual injected Analysis port, including source overrides, so Flow B's no-analysis assertion cannot accidentally inspect an unused default fake. The committed-bundle suite also installs a rejecting network sentinel for every case and asserts that it was unused, including failures that production could otherwise catch.
+
+Named integration checks cover required model/scanner failures, unknown health, clipped tails, malformed tool arguments through the real read-only executor, unsupported tool fallback, agent budget exhaustion, deletion anchors, actor spoofing, raw dedup/reopen invariance, and complete execution. They pin required stale-head exit 3 against advisory exit 0 at both publication race points. Flow B checks cover legacy and SHA-mismatched assessments, hostile producer policy/actor/token/severity claims, trusted head binding, and publication without Analysis calls. Workflow tests execute the actual gate shell: 0/2 pass, 1/3 and missing/invalid output fail. The CI non-trigger smoke executes the bundle under required policy and checks `analysis-status: skipped` and exit 0, including a negative check for missing outputs.
+
+These are deterministic execution-contract checks. `complete` is not a model-quality score, proof of causal correctness, a substitute for human review, or permission to approve or merge. Source-corpus runs intentionally emit synthetic warnings/errors for refusal, stale, and fallback scenarios; those diagnostics are expected fixture behavior. Live canaries need fresh evidence for the reviewed release and are never inferred from these results or historical runs.
+
 Live provider checks and the `test-lupa` consumer canary remain separate from the deterministic
 evaluation gate. See [the fixture catalog](../tests/fixtures/evals/README.md) for the category-to-case
 mapping and corpus limits.

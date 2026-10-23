@@ -24,6 +24,23 @@ function okText(text: string, toolCalls: ToolCall[] = []): AgentReply {
 }
 
 describe("deterministic agent tool-round evaluation", () => {
+  it("records malformed read-only tool arguments even when the final response has zero findings", async () => {
+    const observations: Array<{ tool: string; isError: boolean; truncated: boolean }> = [];
+    const conversations: Conversation[] = [];
+    const fetchMock = vi.fn(() => { throw new Error("unexpected network request in malformed-tool evaluation"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await runAgent({ system: "s", user: "u" }, { roots: { self: "/tmp" }, observe: event => observations.push(event) },
+      { maxTurns: 3, maxSeconds: 120, timeoutSeconds: 5 }, {
+        call: async conversation => {
+          conversations.push(structuredClone(conversation));
+          return conversations.length === 1 ? okText("", [tc("bad-args", "read_file", { path: 42 })]) : okText('{"findings":[]}');
+        }, log: () => {},
+      });
+    expect(result.result).toEqual({ ok: true, findings: [] });
+    expect(observations).toEqual([{ tool: "read_file", isError: true, truncated: false }]);
+    expect(conversations[1]?.turns).toContainEqual(expect.objectContaining({ role: "tool", id: "bad-args", isError: true }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it("preserves removal attribution and invalid claims through the agent final parser", async () => {
     const change = { file: "src/auth.ts", line: 2, side: "LEFT" };
     const f = { severity: "high", file: "src/auth.ts", line: 3, rule: "removed-guard", message: "Removed authorization guard", suggestion: null };

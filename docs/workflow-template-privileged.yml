@@ -85,3 +85,5 @@ jobs:
           review_actor: ${{ vars.PR_REVIEWER_ACTOR }}
           post_comment: "true"
           fail_level: warning
+          # Trusted publication policy; producer analysis.json cannot override this input.
+          analysis_policy: advisory

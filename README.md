@@ -49,16 +49,17 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. |
 | `pr_number` | (empty) | Used only by `workflow_dispatch`. |
 | `fail_level` | `warning` | `none`, `warning` or `high`. See the gate section. |
+| `analysis_policy` | `advisory` | `advisory` preserves severity exits; `required` returns 3 for a triggered non-complete analysis. |
 | `max_diff_chars` | `60000` | Diff ceiling sent to the LLM. |
 | `max_prompt_chars` | `120000` | Total UTF-8 byte budget for the assembled LLM user message (diff, findings, issue context, headers, skipped-files note); the fixed system prompt is excluded. Note: `max_diff_chars` is counted in UTF-16 code units, not bytes. |
 | `max_findings` | `200` | Total findings published (inline + body). |
 | `max_inline_comments` | `30` | Inline comments posted per review. |
 | `max_review_body_chars` | `60000` | Maximum review body size in Unicode code points. |
-| `max_artifact_bytes` | `8388608` | Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts. |
+| `max_artifact_bytes` | `8388608` | Maximum bytes read from SARIF, SBOM, findings, pr-meta, and analysis artifacts; also caps persisted analysis metadata. |
 | `post_comment` | `true` | `false` makes a dry-run. |
 | `timeout_seconds` | `90` | LLM request timeout. A timeout degrades to a summary without retry. |
 
-Output: `exit-code` (`0` pass, `2` warning findings, `1` high-severity findings).
+Outputs: `exit-code` (`0` pass, `2` warning findings, `1` high-severity findings, `3` required non-complete analysis) and `analysis-status` (`complete`, `incomplete`, `unsupported`, `failed`, `skipped`).
 
 ## Providers
 
@@ -144,6 +145,12 @@ With the default `analysis_policy: advisory`, the review event and exit code rea
 
 Opt in with `analysis_policy: required` to require complete analysis of the recorded semantic scope. A triggered review with incomplete, unsupported, or failed analysis exits `3`, independently of `fail_level`; this coverage failure alone does not request changes. The `analysis-status` output, review body, summary, and SHA-bound `analysis.json` artifact disclose completion and coverage limitations. Non-trigger events remain skipped/0. A stale head prevents publication and exits 3 in required mode (advisory retains its stale no-op/0 behavior). Completion describes recorded execution, not proof of model correctness or approval.
 
+For the required profile, configure a reachable model and its BYOK key (or the documented keyless provider), install Semgrep and provide Docker for Gitleaks/Trivy and OSV on changed supported lockfiles, and make each detected L2 check available. Configure `PR_REVIEWER_ACTOR` as described below when the posting credential cannot resolve its identity. Then change `analysis_policy: advisory` to `analysis_policy: required` in the PR workflow; choose `fail_level` separately. Flow B has its own trusted publication inputs and cannot repair a producer's missing analysis. Keep the PR workflow's gate required in branch protection if it should enforce this policy.
+
+The required scope includes successful semantic execution for every eligible changed hunk. Missing tools/model/key or unknown invocation health report `unsupported`; failed invocations report `failed`; clipped/omitted hunks, exhausted agent inspection, malformed tool arguments, unavailable needed issue/actor context, and unresolved attribution report non-complete coverage. Binary, minified, source-map, and unrepresentable paths without an applicable analyzer are unsupported. If `llm_agent: true` is requested, a model fallback without tool support is unsupported even if it returns a valid empty findings object. In advisory keyless deterministic runs, the body records that semantic review did not run. A `complete` assessment describes execution of its recorded scope; it does not measure correctness, replace human review, or authorize automatic approval or merge.
+
+With zero findings, a non-complete review still shows `Analysis: incomplete`, `unsupported`, or `failed`, its scope, semantic file/hunk counts, and the reason in both the summary and review body. Coverage alone posts `COMMENT` when publication is safe. `analysis.json` stores the capped, redacted assessment bound to the recorded base/head SHAs. In Flow B this is an untrusted producer reporting claim: it never sets token type, actor, severity policy, or merge acceptance, and publication never reruns analysis. Legacy or invalid/mismatched assessment artifacts remain publishable with coverage unavailable; trusted required policy returns 3. PR metadata or live/workflow head binding mismatches refuse publication entirely.
+
 Required mode also accepts a finding's optional causal `change` anchor: `{ "file": "src/auth.ts", "line": 2, "side": "LEFT" }`. The exact path and line must name an actual removed LEFT or added RIGHT line in the bound patch; a rename may use the old path for LEFT. This lets a removed protection or new caller make a finding eligible even when its display location is unchanged context or another file. The anchor is a supported model claim, not deterministic proof of causality, and does not move the review comment. Existing added-line/reopened eligibility still works without an anchor. An unresolved high in a touched file, or any invalid anchor, makes required attribution incomplete; a purely untouched baseline issue without a claim remains non-blocking advice. Malformed, lossy, or secret-redacted claims retain an internal `changeInvalid: true` diagnostic so they cannot silently become missing legacy anchors. Advisory mode keeps its existing eligibility regardless of anchors.
 
 - The action never approves automatically in v1.
@@ -162,7 +169,7 @@ For tokens that cannot resolve an authenticated user (including some installatio
 - **semgrep** runs from the PyPI package, pinned to `semgrep==1.180.0`. The unprivileged template installs it into a venv. No docker is needed for semgrep. Without `SEMGREP_APP_TOKEN` it runs `semgrep scan --config p/default --metrics=off` (`--config auto` is rejected when `--metrics=off` is set: "Cannot create auto config when metrics are off"); with a token it runs `semgrep ci` (diff-aware via `SEMGREP_BASELINE_COMMIT`).
 - **gitleaks, trivy and osv-scanner** run from docker images pinned by digest. The runner needs docker for them. Without docker, each one reports a `scanner-missing` warning and the run continues.
 - Docker scanners mount the checkout at `/src`, so SARIF reports absolute `/src/<path>` (or `file:///src/<path>`) artifact URIs. These are normalized back to repo-relative paths before findings are mapped, so inline comments still land on the right file.
-- **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate sees the blocking subset of the merged set; the summary head/counts and the dry-run high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
+- **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate sees original findings before display merging; the summary head/counts and the dry-run high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
 
 ## Finding provenance
 
@@ -182,7 +189,7 @@ With `post_comment: false` the action runs the whole pipeline, writes the summar
 
 ## Forks and the two-workflow setup
 
-A fork PR gets a read-only `GITHUB_TOKEN`, so the review cannot be posted from the PR workflow. In that case the action writes the summary and uploads the review artifact (`pr-reviewer-out`, containing `diff.patch`, `pr-meta.json`, `findings.json`, `sarif.json` and `sbom.cdx.json`). Issue comments and code-scanning uploads do not work on read-only fork runs either.
+A fork PR gets a read-only `GITHUB_TOKEN`, so the review cannot be posted from the PR workflow. In that case the action writes the summary and uploads the review artifact (`pr-reviewer-out`, containing `diff.patch`, `pr-meta.json`, `findings.json`, `analysis.json`, `sarif.json` and `sbom.cdx.json` where produced). Issue comments and code-scanning uploads do not work on read-only fork runs either.
 
 To post reviews on fork PRs, use the two-workflow pattern:
 

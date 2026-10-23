@@ -128,7 +128,7 @@ describe("README novelty-gated blocking (Q02)", () => {
       "when a blocking high-severity finding exists",
       "`1` if any blocking high finding",
       "event, inline, general, high and blocking",
-      "blocking subset of the merged set",
+      "original findings before display merging",
       "outside the PR diff and do not block",
       "**blocking**",
       "(non-blocking)",
