@@ -26726,8 +26726,6 @@ var RECOVERABLE_ERROR_PREFIXES = [
   "cannot list directory",
   "invalid regex",
   "invalid line range",
-  "invalid tool arguments",
-  "unknown tool",
   "repository not accessible"
 ];
 function isRecoverableToolError(output) {
