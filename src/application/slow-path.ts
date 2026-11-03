@@ -10,7 +10,7 @@ import type { DedupVerdicts, LlmResult } from "../llm/types.js";
 import { TOOL_DEFS, type ToolContext } from "../agent-tools.js";
 import { AGENT_LIMITS, type Conversation } from "../agent-types.js";
 import { catalogProtocolFor, resolveEndpoint, type ResolvedEndpoint } from "../providers.js";
-import { ensureLinkedRepo, parseLinkedRepos } from "../linked-repos.js";
+import { ensureLinkedRepo, parseLinkedRepos, sameOwner } from "../linked-repos.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER } from "../prompt.js";
 import { budgetPrompt } from "../prompt/budget.js";
 import { note } from "./publish.js";
@@ -164,18 +164,24 @@ export async function slowPath(
         ensureLinked: async (alias, opts?) => {
           if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
             return { error: "repository not accessible: " + alias };
+          // The PR body is author-controlled: the action's token (and its size lookup)
+          // reaches only the reviewed owner's repositories. Other owners clone anonymously.
+          const ownCredentials = sameOwner(alias, selfRepo);
+          if (!ownCredentials) core.info(`agent linked repo ${alias} cloned without credentials (different owner)`);
           const r = await ensureLinkedRepo(alias, {
-            token: i.githubToken,
+            token: ownCredentials ? i.githubToken : "",
             baseDir: join(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
             maxBytes: AGENT_LIMITS.cloneMaxBytes,
             deadlineMs: opts?.deadlineMs,
             context: opts?.context ?? owned.context,
-            sizeKb: async (a, options) => {
-              const parts = a.split("/");
-              if (parts.length !== 2) return undefined;
-              const [o, n] = parts;
-              return deps.gh.getRepoSize(o!, n!, options);
-            },
+            ...(ownCredentials ? {
+              sizeKb: async (a: string, options?: { signal?: AbortSignal }) => {
+                const parts = a.split("/");
+                if (parts.length !== 2) return undefined;
+                const [o, n] = parts;
+                return deps.gh.getRepoSize(o!, n!, options);
+              },
+            } : {}),
           });
           if ("dir" in r) {
             toolCtx.roots.linked!.set(alias, r.dir);

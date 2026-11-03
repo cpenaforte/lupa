@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { effectiveTimeout, ensureLinkedRepo, parseLinkedRepos } from "../src/linked-repos.js";
+import { effectiveTimeout, ensureLinkedRepo, parseLinkedRepos, sameOwner } from "../src/linked-repos.js";
 import type { CloneDeps } from "../src/linked-repos.js";
 
 const created: string[] = [];
@@ -523,6 +523,37 @@ describe("ensureLinkedRepo", () => {
     };
     const res = await ensureLinkedRepo("a/b/c", { token: "", baseDir, deps });
     expect(res).toEqual({ dir: join(baseDir, "a__b__c"), sha: "" });
+  });
+});
+
+describe("sameOwner", () => {
+  it.each<[string, string, boolean]>([
+    ["acme/lib", "acme/app", true],
+    ["Acme/lib", "acme/app", true],
+    ["acme/lib", "ACME/app", true],
+    ["evil/secret", "acme/app", false],
+    ["acme-evil/lib", "acme/app", false],
+    ["acme", "acme/app", false],
+    ["acme/lib", "", false],
+    ["acme/lib", "acme", false],
+  ])("sameOwner(%s, %s) is %s", (alias, self, expected) => {
+    expect(sameOwner(alias, self)).toBe(expected);
+  });
+});
+
+describe("ensureLinkedRepo without a token", () => {
+  it("clones without any Authorization header in the git environment", async () => {
+    const baseDir = tempRoot();
+    const env: NodeJS.ProcessEnv[] = [];
+    const deps: CloneDeps = {
+      run: async (_cmd, _args, o) => {
+        env.push(o.env);
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await ensureLinkedRepo("evil/secret", { token: "", baseDir, deps });
+    expect(env.length).toBeGreaterThan(0);
+    for (const e of env) expect(JSON.stringify(e)).not.toContain("Authorization");
   });
 });
 

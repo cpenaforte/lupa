@@ -451,6 +451,8 @@ interface MockOpts {
   llmAgent?: boolean;
   /** Drive one linked-repo tool call through the agent ToolContext (clone is expected to fail). */
   agentToolProbe?: boolean;
+  /** Linked alias the agent probe reads (default someone/else). */
+  probeRepo?: string;
   /** Size in KB reported by the getRepoSize fake (default 1024). */
   repoSizeKb?: number;
   llmApiKey?: string;
@@ -546,7 +548,7 @@ async function runWithMocks(o: MockOpts = {}) {
       ? commentPayload
       : o.prNumber === null
         ? {}
-        : { action: o.action ?? "synchronize", pull_request: { number: 7 } },
+        : { action: o.action ?? "synchronize", pull_request: { number: 7 }, repository: { full_name: "o/r" } },
     inputs: inputsFor(o),
     workDir: root,
     artifactDir,
@@ -645,7 +647,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
         rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
         if (o.agentToolProbe === true) {
-          const res = await executeTool("read_file", { path: "README.md", repo: "someone/else" }, toolCtx);
+          const res = await executeTool("read_file", { path: "README.md", repo: o.probeRepo ?? "someone/else" }, toolCtx);
           rec.toolOutput = res.output;
           rec.toolError = res.isError;
         }
@@ -1460,14 +1462,15 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({
       llmAgent: true,
       agentToolProbe: true,
-      prBody: "See https://github.com/someone/else for context",
+      prBody: "See https://github.com/o/other for context",
+      probeRepo: "o/other",
     });
     expect(r.posted).toBe(true);
     expect(r.toolError).toBe(true);
-    // Gating passes (the body links someone/else), so the real clone is attempted and fails;
-    // the size pre-check inside ensureLinkedRepo proves the clone path was reached.
-    expect(r.toolOutput).toContain("repository not accessible: someone/else");
-    expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
+    // Gating passes (the body links o/other, same owner as the reviewed o/r), so the real clone
+    // is attempted and fails; the size pre-check inside ensureLinkedRepo proves the clone path was reached.
+    expect(r.toolOutput).toContain("repository not accessible: o/other");
+    expect(r.repoSizeCalls).toContainEqual(["o", "other"]);
   });
 
   it("oversized linked repo is short-circuited by the size guard (no clone) and the review still posts", async () => {
@@ -1476,17 +1479,18 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({
       llmAgent: true,
       agentToolProbe: true,
-      prBody: "See https://github.com/someone/else for context",
+      prBody: "See https://github.com/o/other for context",
+      probeRepo: "o/other",
       repoSizeKb: 300000000,
     });
     expect(r.posted).toBe(true);
     expect(r.toolError).toBe(true);
     // The size guard short-circuits before any clone: the tool surfaces the
     // not-accessible error while getRepoSize proves the pre-check ran.
-    expect(r.toolOutput).toContain("repository not accessible: someone/else");
-    expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
+    expect(r.toolOutput).toContain("repository not accessible: o/other");
+    expect(r.repoSizeCalls).toContainEqual(["o", "other"]);
     const lines = info.mock.calls.map((c) => String(c[0]));
-    expect(lines).toContain("agent linked repositories: someone/else");
+    expect(lines).toContain("agent linked repositories: o/other");
   });
 
   it("agent slow path makes no second getPr fetch (body is threaded through)", async () => {
@@ -1519,15 +1523,15 @@ describe("run() orchestration", () => {
   });
 
   it("unlinked alias is refused at the gate while a mixed-case linked alias passes it", async () => {
-    const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/someone/else for context" });
+    const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/o/Other for context" });
     expect(r.posted).toBe(true);
     const gate = r.agentToolCtx!.ensureLinked!;
     expect(await gate("evil/x")).toEqual({ error: "repository not accessible: evil/x" });
     // Refusal happened at the gate: ensureLinkedRepo (and its getRepoSize pre-check) never ran.
     expect(r.repoSizeCalls).not.toContainEqual(["evil", "x"]);
-    // Mixed-case linked alias passes the gate: the size pre-check sees the alias as passed through.
-    await gate("Someone/Else");
-    expect(r.repoSizeCalls).toContainEqual(["Someone", "Else"]);
+    // Mixed-case same-owner alias passes the gate: the size pre-check sees the alias as passed through.
+    await gate("O/other");
+    expect(r.repoSizeCalls).toContainEqual(["O", "other"]);
   });
 
   it("logs the linked repo SHA on reuse", async () => {
@@ -1554,6 +1558,9 @@ describe("run() orchestration", () => {
       expect(r.posted).toBe(true);
       const lines = info.mock.calls.map((c) => String(c[0]));
       expect(lines).toContain(`agent linked repo someone/else at ${sha}`);
+      // Another owner's repository is never checked out with the action's credentials.
+      expect(lines).toContain("agent linked repo someone/else cloned without credentials (different owner)");
+      expect(r.repoSizeCalls).not.toContainEqual(["someone", "else"]);
     } finally {
       if (prevRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
       else process.env.RUNNER_TEMP = prevRunnerTemp;

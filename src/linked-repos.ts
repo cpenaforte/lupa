@@ -102,6 +102,18 @@ function cleanAlias(owner: string, repo: string): string | null {
 }
 
 /**
+ * True when `alias` belongs to the same owner as the reviewed repository (case-insensitive).
+ * Credentials are used only for these: the PR body is author-controlled, so an alias
+ * from another owner must not be cloned or size-checked with the action's token.
+ * An empty or malformed `selfFullName` matches nothing (fail closed).
+ */
+export function sameOwner(alias: string, selfFullName: string): boolean {
+  const owner = (name: string): string => name.split("/")[0]?.toLowerCase() ?? "";
+  const selfOwner = owner(selfFullName);
+  return selfOwner !== "" && selfFullName.includes("/") && alias.includes("/") && owner(alias) === selfOwner;
+}
+
+/**
  * Parse `owner/repo` references out of a PR body. GitHub URLs win over bare
  * `owner/repo` mentions; bare mentions are best-effort (a wrong alias such as
  * a relative path like `src/utils` simply fails lazily at clone time).
