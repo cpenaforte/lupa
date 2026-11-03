@@ -261,6 +261,18 @@ export async function runL2(
   return (await runL2Detailed(dir, spawn, timeoutMs, changedFiles, execution)).findings;
 }
 
+/**
+ * A check-only tool that ran to completion and exited non-zero has reported findings,
+ * so its stage is `ok` (its warning comes from the interpreter). Only a missing binary,
+ * a timeout, a signal kill, an incomplete run or a spawn errno is an execution failure.
+ */
+function l2StageStatus(failure: ToolFailure | undefined): StageResult["status"] {
+  if (!failure) return "ok";
+  if (failure.code === "ENOENT") return "unsupported";
+  if (failure.timedOut || failure.incomplete || failure.signal !== null || typeof failure.code !== "number") return "failed";
+  return "ok";
+}
+
 export async function runL2Detailed(
   dir: string, spawn: Spawner = execTool, timeoutMs: number = L2_TIMEOUT_MS,
   changedFiles: Set<string> = new Set(), execution?: ExecutionOptions,
@@ -271,7 +283,7 @@ export async function runL2Detailed(
     const { cmd, args } = l2Argv(name);
     const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
     stages.push({ stage: `l2:${name}`, applicable: true, required: true,
-      status: failure?.code === "ENOENT" ? "unsupported" : failure ? "failed" : "ok",
+      status: l2StageStatus(failure),
       ...(failure ? { reason: failure.code === "ENOENT" ? "missing-binary" : describeFailure(name, failure, timeoutMs) } : {}) });
     findings.push(...(interpreters[name] ?? interpretDefault)(name, failure, stdout, changedFiles, timeoutMs));
   }

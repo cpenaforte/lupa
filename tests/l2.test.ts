@@ -11,6 +11,25 @@ it("distinguishes a missing configured binary from completed native checks", asy
   expect(r.stages).toEqual([{ stage: "l2:prettier", status: "unsupported", applicable: true, required: true, reason: "missing-binary" }]);
 });
 
+it("a native check that exits non-zero with findings is an ok stage that still reports its warning", async () => {
+  const dir = makeTmp({ "package.json": "{}" });
+  const r = await runL2Detailed(dir, async () => ({ stdout: "", failure: { code: 1, signal: null, output: "bad" } }));
+  expect(r.stages).toEqual([expect.objectContaining({ stage: "l2:prettier", status: "ok", required: true })]);
+  expect(r.findings).toEqual([expect.objectContaining({ severity: "warning", rule: "prettier" })]);
+});
+
+it.each([
+  ["signal kill", { code: null, signal: "SIGKILL", output: "" }],
+  ["timeout", { code: 1, signal: null, timedOut: true, output: "" }],
+  ["incomplete cleanup", { code: 1, signal: null, incomplete: true, output: "" }],
+  ["spawn errno", { code: "EACCES", signal: null, output: "" }],
+])("a %s is a failed stage", async (_label, failure) => {
+  const dir = makeTmp({ "package.json": "{}" });
+  const r = await runL2Detailed(dir, async () => ({ stdout: "", failure }));
+  expect(r.stages).toEqual([expect.objectContaining({ stage: "l2:prettier", status: "failed", required: true })]);
+  expect(r.stages[0]!.reason).toEqual(expect.any(String));
+});
+
 it("execTool strips secrets from explicit child env and preserves zero-exit stdout", async () => {
   const result = await execTool(process.execPath, ["-e", "console.log(JSON.stringify(process.env))"], process.cwd(), 5000,
     { env: { PATH: process.env.PATH, GITHUB_TOKEN: "secret", RUNNER_TEMP: "/owned", NODE_OPTIONS: "--bad" } });
