@@ -26742,7 +26742,7 @@ function isRecoverableToolError(output) {
 function fsErrorMessage(error2, kind, rel) {
   const code = error2.code;
   if (kind === "file") {
-    if (code === "ENOENT")
+    if (code === "ENOENT" || code === "ENOTDIR")
       return `file not found: ${rel}`;
     if (code === "EISDIR")
       return `not a file: ${rel}`;
@@ -26849,6 +26849,8 @@ async function resolveRoot(repo, ctx, deadlineMs) {
     const res = deadlineMs !== void 0 || ctx.context !== void 0 ? await ctx.ensureLinked(alias, { deadlineMs, ...ctx.context ? { context: ctx.context } : {} }) : await ctx.ensureLinked(alias);
     if ("dir" in res)
       return res.dir;
+    if (res.error === `repository not linked: ${alias}`)
+      return { error: res.error };
     return { error: `repository unavailable: ${alias}` };
   }
   return { error: `repository not linked: ${alias}` };
