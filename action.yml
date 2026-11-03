@@ -72,7 +72,7 @@ inputs:
   llm_max_tokens:
     description: "Maximum tokens the LLM may generate"
     required: false
-    default: "2000"
+    default: "8000"
   llm_agent:
     description: "Enable read-only repository tools so the reviewer can verify claims before reporting"
     required: false

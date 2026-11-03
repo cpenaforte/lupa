@@ -43,7 +43,7 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | `llm_model` | (empty) | Model name, passed through as is. |
 | `llm_api_key` | (empty) | Provider key. Never logged. |
 | `llm_temperature`, `llm_top_p` | (unset) | Sent only when set explicitly. Left unset by default because reasoning models reject other values. |
-| `llm_max_tokens` | `2000` | Maximum output tokens. |
+| `llm_max_tokens` | `8000` | Maximum output tokens. |
 | `llm_agent` | `false` | Enable read-only repository tools so the reviewer can verify claims before reporting. |
 | `llm_agent_max_turns` | `10` | Maximum number of tool-call rounds the agent may take. |
 | `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. Accepted range `11`–`21600`. |
