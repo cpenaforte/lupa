@@ -419,6 +419,31 @@ describe("callGoogleTurn", () => {
     ]);
   });
 
+  it("sends a progress note as its own user content after the functionResponse turn", async () => {
+    const note = "Tool rounds used: 1 of 3; 2 remaining. When the rounds run out, respond with ONLY the JSON findings object.";
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "",
+          toolCalls: [{ id: "fc_0", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+        },
+        { role: "tool", id: "fc_0", name: "read_file", output: "ok" },
+        { role: "user", text: note },
+      ],
+      tools: [toolDef],
+    };
+    await callGoogleTurn(fakeGoogleEp(), MODEL, c, opts(), turnFlags);
+    expect(lastBody().contents).toEqual([
+      { role: "user", parts: [{ text: "u" }] },
+      { role: "model", parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" } } }] },
+      { role: "user", parts: [{ functionResponse: { name: "read_file", response: { output: "ok" } } }] },
+      { role: "user", parts: [{ text: note }] },
+    ]);
+  });
+
   it("replays assistant rawItems (thoughtSignature + native ids) verbatim", async () => {
     const c: Conversation = {
       system: "s", user: "u",
