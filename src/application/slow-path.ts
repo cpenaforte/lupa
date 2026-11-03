@@ -153,8 +153,12 @@ export async function slowPath(
       const linked = parseLinkedRepos(prBody, selfRepo);
       if (linked.length > 0) core.info(`agent linked repositories: ${linked.join(", ")}`);
       const toolCtx: ToolContext = {
+        // Recoverable lookup errors (wrong path, bad regex) are the model's routine
+        // exploration and leave diff coverage intact; cancellation, I/O and budget
+        // failures and every truncation are real coverage gaps.
         observe: event => {
-          if (event.isError || event.truncated) assessment?.coverage.issues.push({ code: event.isError ? "tool-error" : "tool-truncated", message: `${event.tool}: ${event.isError ? "inspection failed" : "inspection truncated"}` });
+          if (event.isError && !event.recoverable) assessment?.coverage.issues.push({ code: "tool-error", message: `${event.tool}: inspection failed` });
+          else if (event.truncated) assessment?.coverage.issues.push({ code: "tool-truncated", message: `${event.tool}: inspection truncated` });
         },
         roots: { self: env.workDir, linked: new Map() },
         ensureLinked: async (alias, opts?) => {

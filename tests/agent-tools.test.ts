@@ -13,7 +13,7 @@ import {
   walkFiles,
   walkPaths,
 } from "../src/agent-tools.js";
-import type { ToolContext } from "../src/agent-tools.js";
+import type { ToolContext, ToolObservation } from "../src/agent-tools.js";
 
 const created: string[] = [];
 function tempRoot(): string {
@@ -812,7 +812,35 @@ describe("F11 tool-layer deadlines and byte caps", () => {
     const ctx = { roots: { self: root }, observe: (event: unknown) => { events.push(event); } };
     await executeTool("read_file", { path: "private.txt" }, ctx, { maxResultBytes: 200 });
     await executeTool("read_file", {}, ctx);
-    expect(events).toEqual([{ tool: "read_file", isError: false, truncated: true }, { tool: "read_file", isError: true, truncated: false }]);
+    expect(events).toEqual([
+      { tool: "read_file", isError: false, truncated: true, recoverable: false },
+      { tool: "read_file", isError: true, truncated: false, recoverable: true },
+    ]);
+  });
+  it("marks only model-correctable lookup and argument errors as recoverable", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const events: ToolObservation[] = [];
+    const ctx: ToolContext = { roots: { self: root }, observe: event => { events.push(event); } };
+    const cancelled: ToolContext = { ...ctx, context: { deadlineMs: Date.now() + 60_000, signal: AbortSignal.abort() } };
+    await executeTool("read_file", { path: "missing.ts" }, ctx);
+    await executeTool("grep", { pattern: "(" }, ctx);
+    await executeTool("read_file", { path: "a.txt", start: 5, end: 1 }, ctx);
+    await executeTool("no_such_tool", {}, ctx);
+    await executeTool("read_file", { path: "../outside.txt" }, ctx);
+    await executeTool("read_file", { path: "a.txt", repo: "other/repo" }, ctx);
+    await executeTool("read_file", { path: "a.txt" }, cancelled);
+    await executeTool("read_file", { path: "a.txt" }, ctx);
+    expect(events.map(({ isError, recoverable }) => ({ isError, recoverable }))).toEqual([
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: false },
+      { isError: false, recoverable: false },
+    ]);
   });
   it("resolveRoot forwards the deadline to ensureLinked", async () => {
     const root = tempRoot();

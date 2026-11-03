@@ -10,7 +10,37 @@ export interface ToolRoots {
   linked?: Map<string, string>;
 }
 
-export type ToolObservation = { tool: string; isError: boolean; truncated: boolean };
+/**
+ * `recoverable` marks an error the model can correct by retrying with a different
+ * lookup or arguments. Only recoverable errors leave analysis coverage unaffected.
+ */
+export type ToolObservation = { tool: string; isError: boolean; truncated: boolean; recoverable: boolean };
+
+/**
+ * Error envelopes whose message the model can correct. The tests pin each prefix
+ * against the message the tool actually produces; keep the two in step.
+ */
+const RECOVERABLE_ERROR_PREFIXES = [
+  "path not accessible",
+  "cannot read file",
+  "cannot list directory",
+  "invalid regex",
+  "invalid line range",
+  "invalid tool arguments",
+  "unknown tool",
+  "repository not accessible",
+];
+
+export function isRecoverableToolError(output: string): boolean {
+  let message: unknown;
+  try {
+    message = (JSON.parse(output) as { error?: unknown }).error;
+  } catch {
+    return false;
+  }
+  return typeof message === "string" && RECOVERABLE_ERROR_PREFIXES.some((prefix) => message.startsWith(prefix));
+}
+
 export interface ToolContext {
   observe?: (event: ToolObservation) => void;
   context?: RequestContext;
@@ -886,6 +916,7 @@ export async function executeTool(
   const result = await dispatchTool(name, args, ctx, limits);
   let truncated = false;
   try { truncated = JSON.parse(result.output).truncated === true; } catch { /* error envelope */ }
-  ctx.observe?.({ tool: name, isError: result.isError, truncated });
+  const recoverable = result.isError && isRecoverableToolError(result.output);
+  ctx.observe?.({ tool: name, isError: result.isError, truncated, recoverable });
   return result;
 }

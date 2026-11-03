@@ -869,15 +869,27 @@ describe("run() orchestration", () => {
     expect(r.analysis).toMatchObject({ status: "complete", coverage: { filesReviewed: 1, hunksReviewed: 1 } });
     expect(r.exitCode).toBe(0);
   });
-  it("tool failures remain incomplete even after a valid agent final response", async () => {
+  it.each<[string, (ctx: ToolContext) => Promise<void>, string, number, { code: string; message: string } | undefined]>([
+    ["a missing path is routine exploration and stays complete",
+      async ctx => { await executeTool("read_file", { path: "missing.ts" }, ctx); }, "complete", 0, undefined],
+    ["a cancelled inspection is a coverage gap",
+      async ctx => { await executeTool("read_file", { path: "missing.ts" }, ctx, { context: { deadlineMs: Date.now() + 60_000, signal: AbortSignal.abort() } }); },
+      "incomplete", 3, { code: "tool-error", message: "read_file: inspection failed" }],
+    ["a truncated inspection is a coverage gap",
+      async ctx => { ctx.observe?.({ tool: "grep", isError: false, truncated: true, recoverable: false }); },
+      "incomplete", 3, { code: "tool-truncated", message: "grep: inspection truncated" }],
+  ])("agent tool observation: %s", async (_label, step, status, exitCode, issue) => {
     const r = await runWithMocks({ analysisPolicy: "required", llmAgent: true, configure: (env, deps) => {
       healthy(env, deps);
       deps.analysis.callWithProbeAgent = async (_p, _m, _b, _k, _c, _o, ctx) => {
-        await executeTool("read_file", { path: "missing.ts" }, ctx);
+        await step(ctx);
         return { ok: true, findings: [], execution: { mode: "agent", status: "completed" } };
       };
     } });
-    expect(r.analysis?.status).toBe("incomplete"); expect(r.analysis?.coverage.issues).toContainEqual({ code: "tool-error", message: "read_file: inspection failed" });
+    expect(r.analysis?.status).toBe(status);
+    expect(r.exitCode).toBe(exitCode);
+    if (issue === undefined) expect(r.analysis?.coverage.issues.filter(i => i.code.startsWith("tool-"))).toEqual([]);
+    else expect(r.analysis?.coverage.issues).toContainEqual(issue);
   });
   it("no llm key still posts fast-path review", async () => {
     const r = await runWithMocks({ llmApiKey: "" });

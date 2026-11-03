@@ -331,7 +331,7 @@ export async function runAgent(
         if (requestExpired(context)) return finish(timeoutLlmResult(), "budget", false);
         const call = reply.toolCalls[i]!;
         if (i >= maxCalls) {
-          toolCtx.observe?.({ tool: call.name, isError: true, truncated: false });
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: false, recoverable: false });
           // Too-many-calls record is loop-generated bookkeeping: excluded
           // from `bytes` (content outputs alone are counted).
           turnsArr.push({
@@ -345,7 +345,7 @@ export async function runAgent(
         }
         const remainingBytes = maxTotalBytes - bytes;
         if (remainingBytes < MARKER_BYTES) {
-          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true });
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true, recoverable: false });
           // Below this no content output can fit: skip execution without
           // incrementing `calls`; the record itself is bookkeeping-excluded.
           turnsArr.push({
@@ -366,7 +366,7 @@ export async function runAgent(
         calls += 1;
         const output = capToolResult(res.output, effective);
         const replaced = output !== res.output;
-        if (replaced) toolCtx.observe?.({ tool: call.name, isError: true, truncated: true });
+        if (replaced) toolCtx.observe?.({ tool: call.name, isError: true, truncated: true, recoverable: false });
         const isError = res.isError || replaced;
         if (!replaced) {
           const n = Buffer.byteLength(output, "utf8");
