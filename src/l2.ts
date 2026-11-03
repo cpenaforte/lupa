@@ -225,22 +225,6 @@ const interpreters: Record<string, Interpreter> = {
 };
 
 /** Run one check-only command, dispatching by tool name. Silence ([]) when clean or the binary is missing (ENOENT). */
-async function runOne(
-  name: string,
-  dir: string,
-  spawn: Spawner,
-  timeoutMs: number,
-  changed: Set<string>,
-  execution?: ExecutionOptions,
-): Promise<Finding[]> {
-  const { cmd, args } = l2Argv(name);
-  const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
-  // Binary not installed on this runner: skip silently.
-  if (failure?.code === "ENOENT") return [];
-  const interpret = interpreters[name] ?? interpretDefault;
-  return interpret(name, failure, stdout, changed, timeoutMs);
-}
-
 /**
  * Run every detected L2 tool in `dir`, sequentially. Clean or missing binary → no finding.
  * Per-tool interpreters: gofmt reports one warning per changed unformatted file (parsed
