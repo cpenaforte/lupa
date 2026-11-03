@@ -25,7 +25,7 @@ import {
 import { callWithProbe } from "../src/llm.js";
 import { listReviewThreads, ReadonlyTokenError, StaleHeadError, type Octokit, type ReviewThread } from "../src/github.js";
 import { buildFallbackReport, redactFindings, type ReviewPayload } from "../src/review.js";
-import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
+import { TOOL_DEFS, executeTool, isRecoverableToolError } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
 import { memberRulesOf } from "../src/review/thread-identity.js";
@@ -1527,6 +1527,10 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
     const gate = r.agentToolCtx!.ensureLinked!;
     expect(await gate("evil/x")).toEqual({ error: "repository not linked: evil/x" });
+    // Through the real tool path, the refused alias is a recoverable lookup, not a coverage gap.
+    const refused = await executeTool("read_file", { path: "a.txt", repo: "evil/x" }, r.agentToolCtx!);
+    expect(JSON.parse(refused.output)).toEqual({ error: "repository not linked: evil/x" });
+    expect(isRecoverableToolError(refused.output)).toBe(true);
     // Refusal happened at the gate: ensureLinkedRepo (and its getRepoSize pre-check) never ran.
     expect(r.repoSizeCalls).not.toContainEqual(["evil", "x"]);
     // Mixed-case same-owner alias passes the gate: the size pre-check sees the alias as passed through.

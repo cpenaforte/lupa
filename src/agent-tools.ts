@@ -50,7 +50,8 @@ export function isRecoverableToolError(output: string): boolean {
 function fsErrorMessage(error: unknown, kind: "file" | "directory", rel: string): string {
   const code = (error as NodeJS.ErrnoException).code;
   if (kind === "file") {
-    if (code === "ENOENT") return `file not found: ${rel}`;
+    // ENOTDIR: a parent component is a file, so the requested path does not exist.
+    if (code === "ENOENT" || code === "ENOTDIR") return `file not found: ${rel}`;
     if (code === "EISDIR") return `not a file: ${rel}`;
     return `cannot read file: ${rel}`;
   }
@@ -190,8 +191,10 @@ async function resolveRoot(repo: unknown, ctx: ToolContext, deadlineMs?: number)
       ? await ctx.ensureLinked(alias, { deadlineMs, ...(ctx.context ? { context: ctx.context } : {}) })
       : await ctx.ensureLinked(alias);
     if ("dir" in res) return res.dir;
-    // Clone, size and deadline failures are masked: the model gets a deterministic,
-    // non-recoverable message and never the git detail.
+    // The gate's refusal (an alias outside the declared linked set) is a lookup mistake and
+    // passes through unchanged. Clone, size and deadline failures are masked: the model gets a
+    // deterministic, non-recoverable message and never the git detail.
+    if (res.error === `repository not linked: ${alias}`) return { error: res.error };
     return { error: `repository unavailable: ${alias}` };
   }
   return { error: `repository not linked: ${alias}` };

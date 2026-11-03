@@ -870,7 +870,15 @@ describe("F11 tool-layer deadlines and byte caps", () => {
     expect(JSON.parse(asFile.output)).toEqual({ error: "not a file: ." });
     expect(JSON.parse(asDir.output)).toEqual({ error: "not a directory: a.txt" });
     expect(JSON.parse(missingDir.output)).toEqual({ error: "directory not found: nope" });
-    for (const out of [asFile, asDir, missingDir]) expect(isRecoverableToolError(out.output)).toBe(true);
+    const underFile = await executeTool("read_file", { path: "a.txt/b" }, ctx);
+    expect(JSON.parse(underFile.output)).toEqual({ error: "file not found: a.txt/b" });
+    // A linked gate refusal (alias outside the declared set) must stay a lookup mistake.
+    const refused = await executeTool("read_file", { path: "a.txt", repo: "evil/x" }, {
+      roots: { self: root },
+      ensureLinked: async () => ({ error: "repository not linked: evil/x" }),
+    });
+    expect(JSON.parse(refused.output)).toEqual({ error: "repository not linked: evil/x" });
+    for (const out of [asFile, asDir, missingDir, underFile, refused]) expect(isRecoverableToolError(out.output)).toBe(true);
   });
   it("classifies only lookup messages as recoverable", () => {
     const lookups = ["file not found: a.ts", "not a file: src", "directory not found: src", "not a directory: a.txt",
