@@ -71,7 +71,7 @@ describe("getInputs defaults", () => {
     expect(i.maxDiffChars).toBe(60000);
     expect(i.maxPromptChars).toBe(120000);
     expect(i.timeoutSeconds).toBe(90);
-    expect(i.llmMaxTokens).toBe(2000);
+    expect(i.llmMaxTokens).toBe(8000);
     expect(i.postComment).toBe(true);
     expect(i.llmTemperature).toBeUndefined();
     expect(i.llmTopP).toBeUndefined();
