@@ -26728,7 +26728,8 @@ var RECOVERABLE_ERROR_PATTERNS = [
   /^not a file: /,
   /^directory not found: /,
   /^not a directory: /,
-  /^repository not linked: [^:]+$/
+  /^repository not linked: [^:]+$/,
+  /^file too large: /
 ];
 function isRecoverableToolError(output) {
   let message;
