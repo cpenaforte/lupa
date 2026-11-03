@@ -26720,13 +26720,15 @@ import { join as join5 } from "node:path";
 import { closeSync as closeSync2, openSync as openSync2, readFileSync as readFileSync3, readSync as readSync2, readdirSync, realpathSync, statSync as statSync2 } from "node:fs";
 import { dirname, isAbsolute, join as join3, relative, resolve, sep as sep2 } from "node:path";
 import { Worker } from "node:worker_threads";
-var RECOVERABLE_ERROR_PREFIXES = [
-  "path not accessible",
-  "cannot read file",
-  "cannot list directory",
-  "invalid regex",
-  "invalid line range",
-  "repository not accessible"
+var RECOVERABLE_ERROR_PATTERNS = [
+  /^path not accessible: /,
+  /^invalid regex: /,
+  /^invalid line range: /,
+  /^file not found: /,
+  /^not a file: /,
+  /^directory not found: /,
+  /^not a directory: /,
+  /^repository not linked: [^:]+$/
 ];
 function isRecoverableToolError(output) {
   let message;
@@ -26735,7 +26737,22 @@ function isRecoverableToolError(output) {
   } catch {
     return false;
   }
-  return typeof message === "string" && RECOVERABLE_ERROR_PREFIXES.some((prefix) => message.startsWith(prefix));
+  return typeof message === "string" && RECOVERABLE_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+function fsErrorMessage(error2, kind, rel) {
+  const code = error2.code;
+  if (kind === "file") {
+    if (code === "ENOENT")
+      return `file not found: ${rel}`;
+    if (code === "EISDIR")
+      return `not a file: ${rel}`;
+    return `cannot read file: ${rel}`;
+  }
+  if (code === "ENOENT")
+    return `directory not found: ${rel}`;
+  if (code === "ENOTDIR")
+    return `not a directory: ${rel}`;
+  return `cannot list directory: ${rel}`;
 }
 var DRIVE_LETTER = /^[a-zA-Z]:/;
 var TRUNCATION_MARKER = "\n[truncated]";
@@ -26832,8 +26849,9 @@ async function resolveRoot(repo, ctx, deadlineMs) {
     const res = deadlineMs !== void 0 || ctx.context !== void 0 ? await ctx.ensureLinked(alias, { deadlineMs, ...ctx.context ? { context: ctx.context } : {} }) : await ctx.ensureLinked(alias);
     if ("dir" in res)
       return res.dir;
+    return { error: `repository unavailable: ${alias}` };
   }
-  return { error: `repository not accessible: ${alias}` };
+  return { error: `repository not linked: ${alias}` };
 }
 async function rootFor(args, ctx, deadlineMs) {
   const root = await resolveRoot(args.repo, ctx, deadlineMs);
@@ -26854,8 +26872,8 @@ async function readFile(args, ctx, opts) {
   let size;
   try {
     size = statSync2(target).size;
-  } catch {
-    return errorResult(`cannot read file: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "file", rel));
   }
   if (size > READ_MAX_BYTES) {
     return errorResult(`file too large: ${rel} (${size} bytes > ${READ_MAX_BYTES} byte limit; use grep or glob to narrow it down)`);
@@ -26863,8 +26881,8 @@ async function readFile(args, ctx, opts) {
   let raw;
   try {
     raw = readFileSync3(target, "utf8");
-  } catch {
-    return errorResult(`cannot read file: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "file", rel));
   }
   const lines = raw.split("\n");
   if (raw.endsWith("\n") && lines.length > 0 && lines[lines.length - 1] === "")
@@ -26908,8 +26926,8 @@ async function listDir(args, ctx, endMs, maxBytes) {
   let dirents;
   try {
     dirents = readdirSync(target, { withFileTypes: true });
-  } catch {
-    return errorResult(`cannot list directory: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "directory", rel));
   }
   const entries = [];
   for (const d of dirents) {
@@ -28283,7 +28301,7 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
         roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
         ensureLinked: async (alias, opts) => {
           if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
-            return { error: "repository not accessible: " + alias };
+            return { error: "repository not linked: " + alias };
           const ownCredentials = sameOwner(alias, selfRepo);
           if (!ownCredentials)
             info(`agent linked repo ${alias} cloned without credentials (different owner)`);
