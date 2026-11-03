@@ -147,6 +147,10 @@ describe.each(providers)("$style malformed wire arguments", ({ style, call, path
         { type: "reasoning", id: "opaque", encrypted_content: "signed" },
         { type: "function_call", call_id: "bad", name: "grep", arguments: "{" },
         { type: "function_call_output", call_id: "bad", output: tools[0]!.output },
+        {
+          role: "user",
+          content: "Tool rounds used: 1 of 5; 4 remaining. When the rounds run out, respond with ONLY the JSON findings object.",
+        },
       ]);
     }
   });
