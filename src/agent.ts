@@ -46,6 +46,19 @@ const BUDGET_NOTE = "Tool budget exhausted. Respond with ONLY the JSON findings 
 const REPAIR_NOTE =
   "Your previous message was not valid JSON. Respond with ONLY the JSON findings object matching the schema; no prose.";
 const TIMEOUT_DETAIL = "agent budget exhausted";
+
+/**
+ * Running count of tool rounds, sent before every follow-up round so the model
+ * can pace its investigation instead of being cut off by the forced final
+ * round. Only called while at least one round remains (`used < maxTurns`).
+ */
+function progressNote(used: number, maxTurns: number): string {
+  const remaining = maxTurns - used;
+  if (remaining === 1) {
+    return `Tool rounds used: ${used} of ${maxTurns}; this is your last tool round. Afterwards respond with ONLY the JSON findings object.`;
+  }
+  return `Tool rounds used: ${used} of ${maxTurns}; ${remaining} remaining. When the rounds run out, respond with ONLY the JSON findings object.`;
+}
 const NO_TOOLS = { allowTools: false, allowFormat: true } as const;
 const WITH_TOOLS = { allowTools: true, allowFormat: false } as const;
 /** Byte length of the "\n[truncated]" marker: below this no content output fits. */
@@ -214,6 +227,7 @@ export async function runAgent(
       const forced = turns >= budget.maxTurns || bytes >= maxTotalBytes || maxTotalBytes - bytes < MARKER_BYTES;
       const flags = forced ? { ...NO_TOOLS } : { ...WITH_TOOLS };
       if (forced) turnsArr.push({ role: "user", text: BUDGET_NOTE });
+      else if (turns > 0) turnsArr.push({ role: "user", text: progressNote(turns, budget.maxTurns) });
       const turnStart = clock();
       const turnIndex = turns;
       const nowMs = deadline - remaining;
