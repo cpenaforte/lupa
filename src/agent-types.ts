@@ -43,6 +43,9 @@ export interface Conversation {
   tools?: ToolDef[];
 }
 
+/** Seconds held back from the agent budget so a final model call can still start. */
+export const AGENT_RESERVE_SECONDS = 10;
+
 export const AGENT_LIMITS = {
   maxCallsPerTurn: 4,
   resultBytes: 32768,

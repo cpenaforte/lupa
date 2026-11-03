@@ -1,5 +1,5 @@
 import { createRequestContext, requestExpired, type RequestContext } from "./runtime/context.js";
-import { AGENT_LIMITS } from "./agent-types.js";
+import { AGENT_LIMITS, AGENT_RESERVE_SECONDS } from "./agent-types.js";
 import type { Conversation, ToolCall } from "./agent-types.js";
 import { executeTool } from "./agent-tools.js";
 import type { ToolContext } from "./agent-tools.js";
@@ -150,7 +150,7 @@ export async function runAgent(
     const timeoutFor = (remaining: number): number =>
       Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1000)));
     const timedOut = (): AgentOutcome | null => {
-      if (requestExpired(context) || deadline - clock() < 10_000) {
+      if (requestExpired(context) || deadline - clock() < AGENT_RESERVE_SECONDS * 1000) {
         return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
       }
       return null;

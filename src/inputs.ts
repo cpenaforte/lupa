@@ -1,5 +1,6 @@
 import * as core from "@actions/core";
 import type { AnalysisPolicy } from "./domain/assessment.js";
+import { AGENT_RESERVE_SECONDS } from "./agent-types.js";
 
 export type FailLevel = "none" | "warning" | "high";
 
@@ -83,18 +84,19 @@ function readString(name: string, fallback = ""): string {
   return v === "" ? fallback : v;
 }
 
-function parseIntValue(name: string, raw: string, min: number): number {
+function parseIntValue(name: string, raw: string, min: number, max?: number): number {
   const n = Number(raw);
-  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min) {
-    throw new Error(`Invalid ${name} "${raw}": expected an integer >= ${min} (safe integer)`);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min || (max !== undefined && n > max)) {
+    const range = max === undefined ? `>= ${min}` : `between ${min} and ${max}`;
+    throw new Error(`Invalid ${name} "${raw}": expected an integer ${range} (safe integer)`);
   }
   return n;
 }
 
-function readInt(name: string, fallback: number, min: number): number {
+function readInt(name: string, fallback: number, min: number, max?: number): number {
   const raw = readString(name);
   if (raw === "") return fallback;
-  return parseIntValue(name, raw, min);
+  return parseIntValue(name, raw, min, max);
 }
 
 function readOptionalDecimal(name: string): number | undefined {
@@ -153,7 +155,7 @@ export function getInputs(): ActionInputs {
     prNumber,
     llmAgent: readBool("llm_agent", false),
     llmAgentMaxTurns: readInt("llm_agent_max_turns", 10, 1),
-    llmAgentMaxSeconds: readInt("llm_agent_max_seconds", 180, 1),
+    llmAgentMaxSeconds: readInt("llm_agent_max_seconds", 180, AGENT_RESERVE_SECONDS + 1, 21600),
   };
 }
 

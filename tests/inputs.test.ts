@@ -341,6 +341,21 @@ describe("getInputs agent inputs", () => {
     expect(() => getInputs()).toThrow(/llm_agent_max_seconds/);
   });
 
+  it.each(["0", "1", "10"])("rejects llm_agent_max_seconds = %s (under the 10s reserve plus one model call)", (value) => {
+    setInputs({ llm_agent_max_seconds: value });
+    expect(() => getInputs()).toThrow(/llm_agent_max_seconds.*between 11 and 21600/);
+  });
+
+  it.each(["21601", "2147484"])("rejects llm_agent_max_seconds = %s (above the 6 hour job limit)", (value) => {
+    setInputs({ llm_agent_max_seconds: value });
+    expect(() => getInputs()).toThrow(/llm_agent_max_seconds.*between 11 and 21600/);
+  });
+
+  it.each(["11", "180", "21600"])("accepts llm_agent_max_seconds = %s", (value) => {
+    setInputs({ llm_agent_max_seconds: value });
+    expect(getInputs().llmAgentMaxSeconds).toBe(Number(value));
+  });
+
   it("rejects invalid llm_agent naming the input", () => {
     setInputs({ llm_agent: "yes" });
     expect(() => getInputs()).toThrow(/llm_agent/);
