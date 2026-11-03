@@ -26,10 +26,10 @@ const RECOVERABLE_ERROR_PREFIXES = [
   "cannot list directory",
   "invalid regex",
   "invalid line range",
-  "invalid tool arguments",
-  "unknown tool",
   "repository not accessible",
 ];
+// Malformed or unknown calls (`invalid tool arguments`, `unknown tool`) are deliberately NOT
+// recoverable: the required-policy eval pins them as an execution deficit.
 
 export function isRecoverableToolError(output: string): boolean {
   let message: unknown;

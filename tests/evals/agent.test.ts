@@ -25,7 +25,7 @@ function okText(text: string, toolCalls: ToolCall[] = []): AgentReply {
 
 describe("deterministic agent tool-round evaluation", () => {
   it("records malformed read-only tool arguments even when the final response has zero findings", async () => {
-    const observations: Array<{ tool: string; isError: boolean; truncated: boolean }> = [];
+    const observations: Array<{ tool: string; isError: boolean; truncated: boolean; recoverable: boolean }> = [];
     const conversations: Conversation[] = [];
     const fetchMock = vi.fn(() => { throw new Error("unexpected network request in malformed-tool evaluation"); });
     vi.stubGlobal("fetch", fetchMock);
@@ -37,7 +37,7 @@ describe("deterministic agent tool-round evaluation", () => {
         }, log: () => {},
       });
     expect(result.result).toEqual({ ok: true, findings: [] });
-    expect(observations).toEqual([{ tool: "read_file", isError: true, truncated: false }]);
+    expect(observations).toEqual([{ tool: "read_file", isError: true, truncated: false, recoverable: false }]);
     expect(conversations[1]?.turns).toContainEqual(expect.objectContaining({ role: "tool", id: "bad-args", isError: true }));
     expect(fetchMock).not.toHaveBeenCalled();
   });

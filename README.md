@@ -49,7 +49,7 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. Accepted range `11`–`21600`. |
 | `pr_number` | (empty) | Used only by `workflow_dispatch`. |
 | `fail_level` | `warning` | `none`, `warning` or `high`. See the gate section. |
-| `analysis_policy` | `advisory` | `advisory` preserves severity exits; `required` returns 3 for a triggered non-complete analysis. Non-complete includes a superseded (stale) head, truncated agent tool results, agent tool errors other than routine lookup mistakes (cancellation, budget, I/O), and L2 checks that timed out, were killed by a signal or could not be spawned. Routine agent lookup errors (missing path, bad regex, unknown tool) do not count. |
+| `analysis_policy` | `advisory` | `advisory` preserves severity exits; `required` returns 3 for a triggered non-complete analysis. Non-complete includes a superseded (stale) head, truncated agent tool results, agent tool errors other than routine lookup mistakes (cancellation, budget, I/O), and L2 checks that timed out, were killed by a signal or could not be spawned. Routine agent lookup errors (missing path, bad regex, invalid line range, inaccessible linked repository) do not count; malformed or unknown tool calls do. |
 | `max_diff_chars` | `60000` | Diff ceiling sent to the LLM. |
 | `max_prompt_chars` | `120000` | Total UTF-8 byte budget for the assembled LLM user message (diff, findings, issue context, headers, skipped-files note); the fixed system prompt is excluded. Note: `max_diff_chars` is counted in UTF-16 code units, not bytes. |
 | `max_findings` | `200` | Total findings published (inline + body). |

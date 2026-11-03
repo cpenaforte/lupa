@@ -814,10 +814,10 @@ describe("F11 tool-layer deadlines and byte caps", () => {
     await executeTool("read_file", {}, ctx);
     expect(events).toEqual([
       { tool: "read_file", isError: false, truncated: true, recoverable: false },
-      { tool: "read_file", isError: true, truncated: false, recoverable: true },
+      { tool: "read_file", isError: true, truncated: false, recoverable: false },
     ]);
   });
-  it("marks only model-correctable lookup and argument errors as recoverable", async () => {
+  it("marks lookup mistakes as recoverable, but malformed or unknown calls as execution deficits", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "hello\n");
     const events: ToolObservation[] = [];
@@ -835,7 +835,7 @@ describe("F11 tool-layer deadlines and byte caps", () => {
       { isError: true, recoverable: true },
       { isError: true, recoverable: true },
       { isError: true, recoverable: true },
-      { isError: true, recoverable: true },
+      { isError: true, recoverable: false },
       { isError: true, recoverable: true },
       { isError: true, recoverable: true },
       { isError: true, recoverable: false },
