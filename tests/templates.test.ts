@@ -416,6 +416,7 @@ describe("minimal workflow template", () => {
       "PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-out",
       "/pr-reviewer-out/diff.patch",
       "llm_api_key: ${{ secrets.LLM_API_KEY }}",
+      "review_actor: github-actions[bot]",
       "llm_model: ${{ vars.PR_REVIEWER_MODEL }}",
       "continue-on-error: true",
       "semgrep==1.180.0",

@@ -55,6 +55,8 @@ jobs:
           PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-out
         with:
           pr_number: ${{ github.event.pull_request.number }}
+          # Reviews posted with the default GITHUB_TOKEN are authored by this bot account.
+          review_actor: github-actions[bot]
           llm_provider: openai
           llm_model: ${{ vars.PR_REVIEWER_MODEL }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
