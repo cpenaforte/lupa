@@ -13,7 +13,8 @@ import {
   walkFiles,
   walkPaths,
 } from "../src/agent-tools.js";
-import type { ToolContext } from "../src/agent-tools.js";
+import type { ToolContext, ToolObservation } from "../src/agent-tools.js";
+import { isRecoverableToolError } from "../src/agent-tools.js";
 
 const created: string[] = [];
 function tempRoot(): string {
@@ -26,6 +27,18 @@ function ctxFor(self: string): ToolContext {
 }
 afterEach(() => {
   while (created.length) rmSync(created.pop()!, { recursive: true, force: true });
+});
+
+describe("request cancellation", () => {
+  it("terminates an active grep worker when its request is cancelled", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "a".repeat(100) + "!");
+    const controller = new AbortController();
+    const context = { signal: controller.signal, deadlineMs: Date.now() + 30_000 };
+    const pending = grepInRoot(root, { pattern: "(a+)+$" }, 5000, undefined, undefined, undefined, context);
+    controller.abort();
+    expect(await pending).toEqual({ output: '{"error":"grep cancelled"}', isError: true });
+  });
 });
 
 describe("resolveWithinRoot", () => {
@@ -56,6 +69,37 @@ describe("resolveWithinRoot", () => {
 });
 
 describe("read_file", () => {
+  it("does not resolve a linked repository after cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let resolutions = 0;
+    const result = await executeTool("read_file", { path: "a.txt", repo: "acme/tools" }, {
+      roots: { self: tempRoot() },
+      ensureLinked: async () => { resolutions++; return { error: "missing" }; },
+    }, { context: { signal: controller.signal, deadlineMs: Date.now() + 30_000 } });
+    expect(result.isError).toBe(true);
+    expect(resolutions).toBe(0);
+  });
+
+  it("shares cancellation with linked resolution and stops before reading", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "must not read");
+    const controller = new AbortController();
+    const context = { signal: controller.signal, deadlineMs: Date.now() + 30_000 };
+    let received: unknown;
+    const result = await executeTool("read_file", { path: "a.txt", repo: "acme/tools" }, {
+      roots: { self: root },
+      ensureLinked: async (_alias, opts) => {
+        received = opts?.context;
+        controller.abort();
+        return { dir: root, sha: "abc" };
+      },
+    }, { context });
+    expect(received).toBe(context);
+    expect(result.isError).toBe(true);
+    expect(result.output).not.toContain("must not read");
+  });
+
   it("read_file returns numbered lines and metadata", async () => {
     const root = tempRoot();
     writeFileSync(join(root, "a.txt"), "line1\nline2\nline3\n");
@@ -245,7 +289,7 @@ describe("executeTool", () => {
 
     const alias = await executeTool("read_file", { path: "a.txt", repo: "foo/bar" }, ctxFor(root));
     expect(alias.isError).toBe(true);
-    expect(JSON.parse(alias.output)).toEqual({ error: "repository not accessible: foo/bar" });
+    expect(JSON.parse(alias.output)).toEqual({ error: "repository not linked: foo/bar" });
   });
 
   it("repo alias resolves from the linked map or ensureLinked", async () => {
@@ -270,7 +314,7 @@ describe("executeTool", () => {
       ensureLinked: async () => ({ error: "clone failed" }),
     });
     expect(failed.isError).toBe(true);
-    expect(JSON.parse(failed.output)).toEqual({ error: "repository not accessible: o/missing" });
+    expect(JSON.parse(failed.output)).toEqual({ error: "repository unavailable: o/missing" });
   });
 });
 
@@ -761,6 +805,90 @@ describe("F11 tool-layer deadlines and byte caps", () => {
     expect(gp.truncated).toBe(true);
     expect(gp.paths.length).toBeLessThan(10);
     expect(Buffer.byteLength(g.output, "utf8")).toBeLessThanOrEqual(100);
+  });
+  it("observes errors and truncation without arguments or file contents", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "private.txt"), "secret-content".repeat(100));
+    const events: unknown[] = [];
+    const ctx = { roots: { self: root }, observe: (event: unknown) => { events.push(event); } };
+    await executeTool("read_file", { path: "private.txt" }, ctx, { maxResultBytes: 200 });
+    await executeTool("read_file", {}, ctx);
+    expect(events).toEqual([
+      { tool: "read_file", isError: false, truncated: true, recoverable: false },
+      { tool: "read_file", isError: true, truncated: false, recoverable: false },
+    ]);
+  });
+  it("marks lookup mistakes as recoverable, but malformed or unknown calls as execution deficits", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const events: ToolObservation[] = [];
+    const ctx: ToolContext = { roots: { self: root }, observe: event => { events.push(event); } };
+    const cancelled: ToolContext = { ...ctx, context: { deadlineMs: Date.now() + 60_000, signal: AbortSignal.abort() } };
+    await executeTool("read_file", { path: "missing.ts" }, ctx);
+    await executeTool("grep", { pattern: "(" }, ctx);
+    await executeTool("read_file", { path: "a.txt", start: 5, end: 1 }, ctx);
+    await executeTool("no_such_tool", {}, ctx);
+    await executeTool("read_file", { path: "../outside.txt" }, ctx);
+    await executeTool("read_file", { path: "a.txt", repo: "other/repo" }, ctx);
+    await executeTool("read_file", { path: "a.txt" }, cancelled);
+    await executeTool("read_file", { path: "a.txt" }, ctx);
+    expect(events.map(({ isError, recoverable }) => ({ isError, recoverable }))).toEqual([
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: false },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: true },
+      { isError: true, recoverable: false },
+      { isError: false, recoverable: false },
+    ]);
+  });
+  it("keeps linked clone, deadline and size failures non-recoverable and masks the git detail", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const events: ToolObservation[] = [];
+    const failing = (error: string): ToolContext => ({
+      roots: { self: root },
+      observe: event => { events.push(event); },
+      ensureLinked: async () => ({ error }),
+    });
+    const outputs = [
+      await executeTool("read_file", { path: "a.txt", repo: "o/r" }, failing("repository not accessible: o/r: clone failed")),
+      await executeTool("read_file", { path: "a.txt", repo: "o/r" }, failing("repository not accessible: o/r: deadline exceeded")),
+      await executeTool("read_file", { path: "a.txt", repo: "o/r" }, failing("repository too large")),
+    ];
+    for (const out of outputs) expect(JSON.parse(out.output)).toEqual({ error: "repository unavailable: o/r" });
+    expect(events.map(({ recoverable }) => recoverable)).toEqual([false, false, false]);
+  });
+  it("names wrong-type and missing lookups as recoverable", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const ctx: ToolContext = { roots: { self: root } };
+    const asFile = await executeTool("read_file", { path: "." }, ctx);
+    const asDir = await executeTool("list_dir", { path: "a.txt" }, ctx);
+    const missingDir = await executeTool("list_dir", { path: "nope" }, ctx);
+    expect(JSON.parse(asFile.output)).toEqual({ error: "not a file: ." });
+    expect(JSON.parse(asDir.output)).toEqual({ error: "not a directory: a.txt" });
+    expect(JSON.parse(missingDir.output)).toEqual({ error: "directory not found: nope" });
+    const underFile = await executeTool("read_file", { path: "a.txt/b" }, ctx);
+    expect(JSON.parse(underFile.output)).toEqual({ error: "file not found: a.txt/b" });
+    // A linked gate refusal (alias outside the declared set) must stay a lookup mistake.
+    const refused = await executeTool("read_file", { path: "a.txt", repo: "evil/x" }, {
+      roots: { self: root },
+      ensureLinked: async () => ({ error: "repository not linked: evil/x" }),
+    });
+    expect(JSON.parse(refused.output)).toEqual({ error: "repository not linked: evil/x" });
+    for (const out of [asFile, asDir, missingDir, underFile, refused]) expect(isRecoverableToolError(out.output)).toBe(true);
+  });
+  it("classifies only lookup messages as recoverable", () => {
+    const lookups = ["file not found: a.ts", "not a file: src", "directory not found: src", "not a directory: a.txt",
+      "repository not linked: o/r", "path not accessible: ../x", "invalid regex: (", "invalid line range: 5..1",
+      "file too large: a.ts (9 bytes > 1 byte limit; use grep or glob)"];
+    const notLookups = ["cannot read file: a.ts", "cannot list directory: src", "repository unavailable: o/r",
+      "repository not accessible: o/r: clone failed",
+      "tool request cancelled", "grep timed out", "invalid tool arguments for grep: pattern is required", "unknown tool: x"];
+    for (const message of lookups) expect(isRecoverableToolError(JSON.stringify({ error: message }))).toBe(true);
+    for (const message of notLookups) expect(isRecoverableToolError(JSON.stringify({ error: message }))).toBe(false);
   });
   it("resolveRoot forwards the deadline to ensureLinked", async () => {
     const root = tempRoot();

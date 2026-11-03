@@ -1,21 +1,12 @@
-import { PR_REVIEW_SCHEMA } from "../prompt.js";
+import type { RequestContext } from "../runtime/context.js";
 import type { ResolvedEndpoint } from "../providers.js";
 import type { Conversation, ToolCall } from "../agent-types.js";
-import {
-  attempt,
-  errMessage,
-  extractUsage,
-  parseContent,
-  parseVerdicts,
-  redact,
-  retryDelayMs,
-  sleep,
-  toFindings,
-  validateSampling,
-  SNIPPET_CHARS,
-  type AgentReply,
-  type LlmResult,
-} from "../llm.js";
+import { PR_REVIEW_SCHEMA } from "../llm/schema.js";
+import { attempt, errMessage, retryDelayMs, waitForRetry, requestTimeout, SNIPPET_CHARS } from "../llm/transport.js";
+import { extractUsage, parseContent, parseVerdicts, toFindings } from "../llm/schema.js";
+import { validateSampling } from "../llm/sampling.js";
+import { redact } from "../domain/text.js";
+import type { AgentReply, LlmResult } from "../llm/types.js";
 
 /** Every `{type, ...}` block inside `output[].content[]`. */
 function outputParts(json: unknown): Array<Record<string, unknown>> {
@@ -182,6 +173,7 @@ export async function callResponses(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
   },
 ): Promise<LlmResult> {
   const key = o.apiKey;
@@ -211,7 +203,7 @@ export async function callResponses(
   }
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return requestTimeout();
     a = await attempt(ep, payload, o);
     if (a.kind === "fail") return a.result;
   }
@@ -272,6 +264,7 @@ export async function callResponsesTurn(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
   },
   flags: { allowTools: boolean; allowFormat: boolean },
 ): Promise<AgentReply> {
@@ -297,7 +290,7 @@ export async function callResponsesTurn(
   }
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return { ok: false, result: requestTimeout() };
     a = await attempt(ep, payload, o);
     if (a.kind === "fail") return { ok: false, result: a.result };
   }

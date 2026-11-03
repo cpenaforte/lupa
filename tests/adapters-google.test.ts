@@ -45,7 +45,7 @@ const EXPECTED_GOOGLE_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"],
+        required: ["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch", "change"],
         properties: {
           severity: { type: "string", enum: ["info", "warning", "high"] },
           file: { type: "string" },
@@ -56,6 +56,7 @@ const EXPECTED_GOOGLE_SCHEMA = {
           duplicateOf: { type: "integer", nullable: true },
           confidence: { type: "integer", nullable: true },
           patch: { type: "string", nullable: true },
+          change: { type: "object", nullable: true, required: ["file", "line", "side"], properties: { file: { type: "string" }, line: { type: "integer", minimum: 1 }, side: { type: "string", enum: ["LEFT", "RIGHT"] } } },
         },
       },
     },
@@ -356,6 +357,20 @@ describe("callGoogleTurn", () => {
     expect((body.systemInstruction as { parts: Array<{ text: string }> }).parts[0]!.text).toBe(c.system);
   });
 
+  it("sends every tool declaration inside one Tool, in order", async () => {
+    const listDef = { name: "list_dir", description: "List a directory", parameters: { type: "object", properties: { path: { type: "string" } } } };
+    const c: Conversation = { system: "s", user: "u", tools: [toolDef, listDef] };
+    await callGoogleTurn(fakeGoogleEp(), MODEL, c, opts(), turnFlags);
+    expect(lastBody().tools).toEqual([
+      {
+        functionDeclarations: [
+          { name: "read_file", description: "Read a file", parameters: googleSchema(toolDef.parameters) },
+          { name: "list_dir", description: "List a directory", parameters: googleSchema(listDef.parameters) },
+        ],
+      },
+    ]);
+  });
+
   it("turn attaches calls:1 usage (candidates fallback) from usageMetadata", async () => {
     stubFetch(() =>
       json(200, { ...okGoogle('{"findings":[]}'), usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } }),
@@ -594,12 +609,13 @@ describe("googleSchema", () => {
     const items = out.properties.findings.items;
     expect(out.properties.findings.type).toBe("array");
     expect(out.required).toEqual(["findings", "duplicates"]);
-    expect(items.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"]);
+    expect(items.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch", "change"]);
     expect(items.properties.line).toEqual({ type: "integer", nullable: true });
     expect(items.properties.severity).toEqual({ type: "string", enum: ["info", "warning", "high"] });
     expect(items.properties.duplicateOf).toEqual({ type: "integer", nullable: true });
     expect(items.properties.confidence).toEqual({ type: "integer", nullable: true });
     expect(items.properties.patch).toEqual({ type: "string", nullable: true });
+    expect(items.properties.change).toEqual({ type: "object", nullable: true, required: ["file", "line", "side"], properties: { file: { type: "string" }, line: { type: "integer", minimum: 1 }, side: { type: "string", enum: ["LEFT", "RIGHT"] } } });
   });
 
   it("converts nullable duplicates with minItems/maxItems passed through", () => {

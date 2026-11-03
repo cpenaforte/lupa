@@ -9,6 +9,10 @@ inputs:
     description: "LLM provider identifier"
     required: false
     default: "openai"
+  review_actor:
+    description: "Trusted review author's GitHub login (optional fallback when authenticated identity is unavailable)"
+    required: false
+    default: ""
   llm_base_url:
     description: "Base URL of the LLM API (empty = provider default)"
     required: false
@@ -45,6 +49,10 @@ inputs:
     description: "Lowest finding severity that fails the action: none, warning or high"
     required: false
     default: "warning"
+  analysis_policy:
+    description: "Analysis completeness policy: advisory or required (required exits 3 when a triggered analysis is not complete)"
+    required: false
+    default: "advisory"
   max_diff_chars:
     description: "Maximum number of diff characters sent to the LLM"
     required: false
@@ -90,12 +98,14 @@ inputs:
     required: false
     default: "60000"
   max_artifact_bytes:
-    description: "Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts"
+    description: "Maximum bytes read from SARIF, SBOM, findings, pr-meta, and analysis artifacts, and the cap for persisted analysis metadata (minimum 1024)"
     required: false
     default: "8388608"
 outputs:
+  analysis-status:
+    description: "Recorded analysis execution status: complete, incomplete, unsupported, failed, or skipped"
   exit-code:
-    description: "fail_level gate result: 0 pass, 2 warning findings, 1 high-severity findings"
+    description: "Exit gate: 0 pass, 2 warning findings, 1 high-severity findings, 3 required analysis incomplete"
 runs:
   using: node24
   main: dist/index.js

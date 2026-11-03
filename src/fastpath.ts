@@ -1,40 +1,11 @@
 import { basename } from "node:path";
-import { isLockfile, type FileDiff } from "./diff.js";
+import { isLockfile } from "./diff/patch.js";
+import type { FileDiff } from "./domain/diff.js";
+import type { Finding } from "./domain/finding.js";
 
-export interface Finding {
-  severity: "info" | "warning" | "high";
-  file: string;
-  line?: number;
-  rule: string;
-  message: string;
-  suggestion?: string;
-  /** Short producer id (e.g. "fastpath", "semgrep", "llm"). Absent = legacy finding. */
-  source?: string;
-  /** Claimant confidence, integer 0..100. Absent = unmarked (never defaulted). */
-  confidence?: number;
-  /**
-   * Explicit replacement code for the flagged line (Q01). Absent = no patch
-   * claim. Stored and rendered verbatim; only `hasPatch` decides applicability.
-   */
-  patch?: string;
-  /** What proves the claim. `snippet` is reserved: assigned by no producer in v1. */
-  evidence?: { snippet?: string; analyzer?: string };
-}
-
-/** Finding-text caps (finding-contract home; imported by main.ts and review.ts — behavior unchanged). */
-export const MSG_CAP = 2000;
-export const RULE_CAP = 100;
-export const TRUNC_MARK = "…[truncated]";
-
-/**
- * Caps by code points (not UTF-16 units), so a cut never splits a surrogate pair.
- * The cap includes the truncation marker.
- */
-export function capText(s: string, cap: number): string {
-  const cps = Array.from(s);
-  if (cps.length <= cap) return s;
-  return cps.slice(0, cap - Array.from(TRUNC_MARK).length).join("") + TRUNC_MARK;
-}
+export type { Finding } from "./domain/finding.js";
+export { stripProvenance } from "./domain/finding.js";
+export { MSG_CAP, RULE_CAP, TRUNC_MARK, capText } from "./domain/text.js";
 
 const LARGE_FILE_BYTES = 500 * 1024;
 const TODO_RE = /\b(TODO|FIXME|XXX)\b/;
@@ -42,19 +13,6 @@ const TODO_RE = /\b(TODO|FIXME|XXX)\b/;
 /** Filename-level sensitive-path rules (basename match). */
 /** Committed templates of env files. They hold placeholders, not secrets, so they are not flagged. */
 const ENV_TEMPLATES: ReadonlySet<string> = new Set([".env.example", ".env.sample", ".env.template"]);
-
-/**
- * Removes provenance fields (`source`/`confidence`/`evidence`) in place and
- * returns the finding. Agent-mode findings carry no provenance (Q04): applied
- * at both agent exit points — after `agent.ts`'s `toFindings` call and on the
- * single-shot probe-memo branch in `llm.ts` (verdicts kept there).
- */
-export function stripProvenance(f: Finding): Finding {
-  delete f.source;
-  delete f.confidence;
-  delete f.evidence;
-  return f;
-}
 
 function isSensitivePath(file: string): boolean {
   const name = basename(file);

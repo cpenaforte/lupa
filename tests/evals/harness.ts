@@ -10,9 +10,11 @@ import {
   DEFAULT_MAX_REVIEW_BODY_CHARS,
 } from "../../src/inputs.js";
 import { ReadonlyTokenError, StaleHeadError } from "../../src/github.js";
-import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/main.js";
-import type { LlmResult } from "../../src/llm.js";
+import type { Analysis, Deps, Gateway, PrInfo, RunEnv } from "../../src/application/contracts.js";
+import type { LlmResult } from "../../src/llm/types.js";
 import type { EvalCase, EvalPublication, EvalRun } from "./types.js";
+import { executeTool } from "../../src/agent-tools.js";
+import type { ToolContext } from "../../src/agent-tools.js";
 
 const BASE_SHA = "b".repeat(40);
 const HEAD_SHA = "a".repeat(40);
@@ -35,6 +37,7 @@ function defaultInputs(): ActionInputs {
     llmApiKey: "synthetic-fixture-key",
     llmMaxTokens: 128,
     failLevel: "warning",
+    analysisPolicy: "advisory",
     maxDiffChars: 60000,
     maxPromptChars: 120000,
     maxFindings: DEFAULT_MAX_FINDINGS,
@@ -91,6 +94,22 @@ function bridgeBundleErrors(): () => void {
 }
 
 export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
+  return runEval(testCase);
+}
+
+export async function runSourceEval(
+  testCase: EvalCase,
+  runReview: typeof import("../../src/main.js").run,
+  analysisOverride?: Analysis,
+): Promise<EvalRun> {
+  return runEval(testCase, runReview, analysisOverride);
+}
+
+async function runEval(
+  testCase: EvalCase,
+  runReview?: typeof import("../../src/main.js").run,
+  analysisOverride?: Analysis,
+): Promise<EvalRun> {
   const root = mkdtempSync(join(tmpdir(), "lupa-eval-"));
   scratchRoots.push(root);
   const workDir = join(root, "work");
@@ -112,7 +131,7 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
   const bundlePath = resolve(process.cwd(), "dist/index.js");
   const bundleUrl = pathToFileURL(bundlePath);
   bundleUrl.searchParams.set("synthetic-eval", testCase.id);
-  const bundled = (await import(bundleUrl.href)) as typeof import("../../src/main.js");
+  const execute = runReview ?? ((await import(bundleUrl.href)) as typeof import("../../src/main.js")).run;
   const prompts = { system: "", user: "" };
   const gatewayCalls: Array<{ method: string; args: unknown[] }> = [];
   const publications: EvalPublication[] = [];
@@ -124,6 +143,7 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     headRepo: "synthetic-owner/synthetic-repo",
     headRef: "synthetic-branch",
     isFork: testCase.fakeGatewayMode === "isFork",
+    ...testCase.livePr,
   };
   const gateway: Gateway = {
     async getPr(pr) {
@@ -148,11 +168,15 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     },
     async listReviewThreads(pr) {
       gatewayCalls.push({ method: "listReviewThreads", args: [pr] });
-      return [];
+      return testCase.reviewThreads ?? [];
+    },
+    async readReviewThreads(pr) {
+      gatewayCalls.push({ method: "readReviewThreads", args: [pr] });
+      return { threads: testCase.reviewThreads ?? [], health: "ok" };
     },
     async getActor(pr) {
       gatewayCalls.push({ method: "getActor", args: [pr] });
-      return "synthetic-actor";
+      return testCase.actor === null ? undefined : testCase.actor ?? "synthetic-actor";
     },
     async createReview(pr, payload) {
       gatewayCalls.push({ method: "createReview", args: [pr, payload] });
@@ -176,16 +200,20 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
       const error = testCase.llmError;
       return { ok: false as const, reason: error.reason, detail: error.detail } as LlmResult;
     }
-    return { ok: true as const, findings: [...(testCase.llmFindings ?? [])] };
+    return { ok: true as const, findings: [...(testCase.llmFindings ?? [])], execution: testCase.execution.model, verdicts: testCase.verdicts };
   };
   const analysis: Analysis = {
     async runScanners(options) {
       analysisCalls.push({ method: "runScanners", args: [options] });
-      return { findings: [...(testCase.scannerFindings ?? [])] };
+      return { findings: [...(testCase.scannerFindings ?? [])], stages: testCase.execution.scannerStages };
     },
     async runL2(dir) {
       analysisCalls.push({ method: "runL2", args: [dir] });
       return [...(testCase.l2Findings ?? [])];
+    },
+    async runL2Detailed(dir) {
+      analysisCalls.push({ method: "runL2", args: [dir] });
+      return { findings: [...(testCase.l2Findings ?? [])], stages: testCase.execution.l2Stages };
     },
     async ensureOllama(...args) {
       analysisCalls.push({ method: "ensureOllama", args });
@@ -198,11 +226,13 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     callWithProbe: (...args) => llm("callWithProbe", args),
     async callByStyleAgent(...args) {
       analysisCalls.push({ method: "callByStyleAgent", args });
-      return { ok: true, findings: [...(testCase.llmFindings ?? [])] };
+      if (testCase.agentTool) await executeTool(testCase.agentTool.name, testCase.agentTool.args, args[3] as ToolContext);
+      return { ok: true, findings: [...(testCase.llmFindings ?? [])], execution: testCase.execution.model };
     },
     async callWithProbeAgent(...args) {
       analysisCalls.push({ method: "callWithProbeAgent", args });
-      return { ok: true, findings: [...(testCase.llmFindings ?? [])] };
+      if (testCase.agentTool) await executeTool(testCase.agentTool.name, testCase.agentTool.args, args[6] as ToolContext);
+      return { ok: true, findings: [...(testCase.llmFindings ?? [])], execution: testCase.execution.model };
     },
   };
   const env: RunEnv = {
@@ -218,10 +248,18 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     summaryPath,
     ...testCase.envOverrides,
   };
-  const restoreHasInstance = bridgeBundleErrors();
-  let outcome: Awaited<ReturnType<typeof bundled.run>>;
+  const restoreHasInstance = runReview === undefined ? bridgeBundleErrors() : () => {};
+  let outcome: Awaited<ReturnType<typeof execute>>;
   try {
-    outcome = await bundled.run(env, { gh: gateway, analysis } satisfies Deps);
+    // Record the actual injected port, including source-eval overrides. A Flow B assertion
+    // must fail if it accidentally calls an override instead of the default fake.
+    const effectiveAnalysis = analysisOverride === undefined ? analysis : Object.fromEntries(
+      Object.entries(analysisOverride).map(([method, fn]) => [method, (...args: unknown[]) => {
+        analysisCalls.push({ method: method as keyof Analysis, args });
+        return fn(...args);
+      }]),
+    ) as unknown as Analysis;
+    outcome = await execute(env, { gh: gateway, analysis: effectiveAnalysis } satisfies Deps);
   } finally {
     restoreHasInstance();
   }
@@ -239,6 +277,6 @@ export async function runBundleEval(testCase: EvalCase): Promise<EvalRun> {
     artifactDir,
     workDir,
     analysisCalls,
-    fakeInterfaces: { gateway, analysis },
+    fakeInterfaces: { gateway, analysis: analysisOverride ?? analysis },
   };
 }

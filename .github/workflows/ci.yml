@@ -58,6 +58,7 @@ jobs:
           GITHUB_OUTPUT: ${{ runner.temp }}/bundle-output.txt
           INPUT_POST_COMMENT: "false"
           INPUT_FAIL_LEVEL: none
+          INPUT_ANALYSIS_POLICY: required
           INPUT_LLM_API_KEY: ""
         shell: bash
         run: |
@@ -71,6 +72,9 @@ jobs:
           : > "$GITHUB_OUTPUT"
           node ./dist/index.js
           test -s "$GITHUB_STEP_SUMMARY"
+          # @actions/core emits multiline output records. Both values must come from this run.
+          grep -A1 '^exit-code<<' "$GITHUB_OUTPUT" | grep -qx '0'
+          grep -A1 '^analysis-status<<' "$GITHUB_OUTPUT" | grep -qx 'skipped'
 
       - name: Committed dist matches the build
         run: git diff --exit-code -- dist/index.js

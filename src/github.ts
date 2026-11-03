@@ -1,8 +1,10 @@
 import { context, getOctokit } from "@actions/github";
 import * as core from "@actions/core";
-import type { InlineComment, ReviewPayload } from "./review.js";
-import { capBody, isTruncNoteLine, truncNoteFor } from "./review.js";
-import { DEFAULT_MAX_REVIEW_BODY_CHARS } from "./inputs.js";
+import type { InlineComment, ReviewPayload } from "./domain/review.js";
+import { capBody, isTruncNoteLine, truncNoteFor } from "./review/limits.js";
+import { DEFAULT_MAX_REVIEW_BODY_CHARS, parseReviewActor } from "./inputs.js";
+import { memberRulesOf } from "./review/thread-identity.js";
+import { escapeProse } from "./domain/text.js";
 
 export type Octokit = ReturnType<typeof getOctokit>;
 
@@ -115,9 +117,14 @@ function repoOf(): { owner: string; repo: string } {
  * missing repo, no access, network failure — resolves to undefined so the
  * caller treats the size as unknown instead of failing the run.
  */
-export async function getRepoSize(octokit: Octokit, owner: string, repo: string): Promise<number | undefined> {
+export async function getRepoSize(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  options?: { signal?: AbortSignal },
+): Promise<number | undefined> {
   try {
-    const r = await octokit.rest.repos.get({ owner, repo });
+    const r = await octokit.rest.repos.get({ owner, repo, ...(options?.signal ? { request: { signal: options.signal } } : {}) });
     const size = (r.data as { size?: unknown }).size;
     return typeof size === "number" ? size : undefined;
   } catch {
@@ -148,7 +155,7 @@ function foldComments(
     const text = c.body.replace(/\r\n?/g, "\n").replace(/(\n[ \t]*)+$/, "");
     const key = commentKeys?.[i] ?? null;
     const suffix = key !== null && blocking !== undefined && !blocking.has(key) ? " (non-blocking)" : "";
-    const head = `- ${c.path}:${c.line}${suffix}`;
+    const head = `- ${escapeProse(`${c.path}:${c.line}`)}${suffix}`;
     // A body that is empty or whitespace-only gets no continuation line at all.
     if (text.trim() === "") return head;
     return `${head}\n  ${text.replace(/\n/g, "\n  ")}`;
@@ -275,9 +282,9 @@ export async function postReview(
 
 /**
  * One PR review thread, as needed for the wrongly-resolved re-check. `rule` is
- * parsed from the first comment body (the `formatBody` head shape, tolerating
- * our own inline reopened marker); unparseable bodies yield null and never
- * match. A null author (deleted account) never matches either.
+ * taken from versioned raw identity metadata, or the legacy first-comment
+ * heading (tolerating our own reopened marker). Unparseable bodies yield null
+ * and never match. A null author (deleted account) never matches either.
  */
 export interface ReviewThread {
   authorLogin: string | null;
@@ -286,6 +293,8 @@ export interface ReviewThread {
   line?: number | null;
   originalLine?: number | null;
   rule: string | null;
+  /** Valid versioned raw member identities, when posted by a newer renderer. */
+  rules?: readonly string[];
 }
 
 /** `formatBody` head shape, tolerating our own inline reopened marker. */
@@ -310,28 +319,41 @@ function asThread(n: ThreadNode): ReviewThread {
   const login = first?.author?.login;
   const line = typeof n.line === "number" ? n.line : null;
   const originalLine = typeof n.originalLine === "number" ? n.originalLine : null;
+  const rules = memberRulesOf(first?.body);
   return {
     authorLogin: typeof login === "string" ? login : null,
     isResolved: n.isResolved === true,
     path: typeof n.path === "string" ? n.path : "",
     line,
     originalLine,
-    rule: threadRuleOf(first?.body),
+    // Modern headings are escaped display text; the versioned marker owns raw identity.
+    // Legacy bodies retain their historical heading parser without decoding ambiguity.
+    rule: rules?.[0] ?? threadRuleOf(first?.body),
+    ...(rules === undefined ? {} : { rules }),
   };
+}
+
+export type ReviewThreadReadHealth = "ok" | "truncated" | "unavailable";
+
+export interface ReviewThreadRead {
+  threads: ReviewThread[];
+  health: ReviewThreadReadHealth;
+  reason?: "more-than-100-threads" | "malformed-response" | "graphql-error" | "no-token";
 }
 
 /**
  * Reads this PR's review threads (newest 100 — recent resolves are the relevant
- * ones) over GraphQL on the same client. `hasPreviousPage` warns (lupa prefix)
- * and uses the 100; any fetch error warns and yields empty (fail-open: never
- * blocks on infra failure).
+ * ones) over GraphQL on the same client and reports the read's health: `truncated`
+ * keeps the newest 100 when older pages exist; a malformed response or any thrown
+ * error is `unavailable` with a fixed reason (never the remote error text). Never
+ * throws and never logs: the caller decides how to account for incomplete context.
  */
-export async function listReviewThreads(
+export async function readReviewThreads(
   octokit: Octokit,
   owner: string,
   repo: string,
   pr: number,
-): Promise<ReviewThread[]> {
+): Promise<ReviewThreadRead> {
   try {
     const data = (await octokit.graphql(
       `query ($owner: String!, $repo: String!, $pr: Int!) {
@@ -353,57 +375,69 @@ export async function listReviewThreads(
       { owner, repo, pr },
     )) as { repository?: { pullRequest?: { reviewThreads?: { pageInfo?: { hasPreviousPage?: unknown }; nodes?: ThreadNode[] } } } };
     const threads = data.repository?.pullRequest?.reviewThreads;
-    if (threads === undefined || !Array.isArray(threads.nodes)) throw new Error("reviewThreads missing");
-    if (threads.pageInfo?.hasPreviousPage === true) {
-      core.warning("lupa: more than 100 review threads; re-checking the newest 100 only");
+    const pageInfo = threads?.pageInfo;
+    if (
+      threads === undefined ||
+      !Array.isArray(threads.nodes) ||
+      pageInfo === null ||
+      typeof pageInfo !== "object" ||
+      typeof pageInfo.hasPreviousPage !== "boolean"
+    ) {
+      return { threads: [], health: "unavailable", reason: "malformed-response" };
     }
-    return threads.nodes.map(asThread);
-  } catch (e) {
-    core.warning(`lupa: review-thread re-read failed (${(e as Error).message}); gating on diff membership only`);
-    return [];
+    const mapped = threads.nodes.map(asThread);
+    if (pageInfo.hasPreviousPage) {
+      return { threads: mapped, health: "truncated", reason: "more-than-100-threads" };
+    }
+    return { threads: mapped, health: "ok" };
+  } catch {
+    return { threads: [], health: "unavailable", reason: "graphql-error" };
   }
 }
 
-/** Prefix every posted review body opens with (the summary head). */
-const LUPA_BODY_PREFIX = "lupa:";
+export const THREAD_TRUNCATED_WARNING = "lupa: more than 100 review threads; re-checking the newest 100 only";
+export const THREAD_UNAVAILABLE_WARNING = "lupa: review-thread re-read failed; gating on diff membership only";
 
 /**
- * Identity for the reopen match. Primary: the authenticated login on the same
- * token that posts. Fallback (e.g. installation tokens that 403 on the user
- * route): the login of the newest review on this PR whose body opens with the
- * lupa summary prefix (paginated, per_page 100 — newest match wins). Both
- * failing yields undefined (caller skips the reopen check with a warning).
+ * Compatibility wrapper over readReviewThreads: warns (lupa prefix) when the read
+ * is truncated or unavailable and returns the available threads (fail-open: never
+ * blocks on infra failure).
+ */
+export async function listReviewThreads(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  pr: number,
+): Promise<ReviewThread[]> {
+  const read = await readReviewThreads(octokit, owner, repo, pr);
+  if (read.health === "truncated") core.warning(THREAD_TRUNCATED_WARNING);
+  else if (read.health === "unavailable") core.warning(THREAD_UNAVAILABLE_WARNING);
+  return read.threads;
+}
+
+/**
+ * Identity for the reopen match: authenticated login, then workflow-owned
+ * configuration. Review prose never authenticates an actor.
  */
 export async function fetchActor(
   octokit: Octokit,
   owner: string,
   repo: string,
   pr: number,
+  options?: { trustedLogin?: string },
 ): Promise<string | undefined> {
+  const trusted = parseReviewActor(options?.trustedLogin ?? "");
   try {
     const me = await octokit.rest.users.getAuthenticated();
     const login = (me.data as { login?: unknown }).login;
-    if (typeof login === "string" && login !== "") return login;
-  } catch {
-    // Fall through to the review-body fallback below.
-  }
-  try {
-    const reviews = (await octokit.paginate(octokit.rest.pulls.listReviews, {
-      owner,
-      repo,
-      pull_number: pr,
-      per_page: 100,
-    })) as Array<{ body?: unknown; user?: { login?: unknown } | null }>;
-    let newest: string | undefined;
-    for (const r of reviews) {
-      if (typeof r.body === "string" && r.body.startsWith(LUPA_BODY_PREFIX) && typeof r.user?.login === "string") {
-        newest = r.user.login;
-      }
+    if (typeof login === "string") {
+      const authenticated = parseReviewActor(login);
+      if (authenticated !== undefined) return authenticated;
     }
-    if (newest !== undefined) return newest;
   } catch {
-    // Both paths failed; warn below.
+    // Installation tokens may not support the authenticated-user endpoint.
   }
+  if (trusted !== undefined) return trusted;
   core.warning("lupa: could not determine the review actor; skipping the wrongly-resolved re-check");
   return undefined;
 }

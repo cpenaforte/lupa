@@ -9,7 +9,9 @@ vi.mock("@actions/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@actions/core")>();
   return { ...actual, info: vi.fn(), warning: vi.fn(), error: vi.fn() };
 });
-import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, run, sanitizeFinding, toSarif, unquoteGitPath, type Deps, type Gateway, type PrInfo, type RunEnv } from "../src/main.js";
+import { budgetPrompt, cleanEnvForExec, main, readFindings, readRunEnv, sanitizeFinding, toSarif, unquoteGitPath } from "../src/main.js";
+import { run } from "../src/application/run.js";
+import type { Deps, Gateway, PrInfo, RunEnv } from "../src/application/contracts.js";
 import { buildMessages, ISSUE_TRUNCATION_MARKER, neutralise } from "../src/prompt.js";
 import { readPrMeta } from "../src/diff.js";
 import type { DedupVerdicts, LlmUsage } from "../src/llm.js";
@@ -21,11 +23,13 @@ import {
   DEFAULT_MAX_REVIEW_BODY_CHARS,
 } from "../src/inputs.js";
 import { callWithProbe } from "../src/llm.js";
-import { ReadonlyTokenError, StaleHeadError, type ReviewThread } from "../src/github.js";
+import { listReviewThreads, ReadonlyTokenError, StaleHeadError, type Octokit, type ReviewThread } from "../src/github.js";
 import { buildFallbackReport, redactFindings, type ReviewPayload } from "../src/review.js";
-import { TOOL_DEFS, executeTool } from "../src/agent-tools.js";
+import { TOOL_DEFS, executeTool, isRecoverableToolError } from "../src/agent-tools.js";
 import type { ToolContext } from "../src/agent-tools.js";
 import type { Finding } from "../src/fastpath.js";
+import { memberRulesOf } from "../src/review/thread-identity.js";
+import { fromStdout } from "../src/scanners.js";
 
 const SHA_HEAD = "a".repeat(40);
 const SHA_OTHER = "c".repeat(40);
@@ -134,10 +138,12 @@ interface GwOpts {
   headMoves?: boolean;
   /** getPr throws once the call count exceeds this number. */
   failGetPrAfter?: number;
-  /** Resolved review threads returned by the listReviewThreads fake (default none). */
+  /** Resolved review threads returned by the thread-read fake (default none). */
   threads?: ReviewThread[];
-  /** listReviewThreads throws (fail-open pin: gate falls back to diff-only). */
+  /** Legacy listReviewThreads throws (legacy fail-open pin). */
   threadsError?: boolean;
+  /** Structured health reported by the readReviewThreads fake (default ok). */
+  threadHealth?: "ok" | "truncated" | "unavailable";
   /** Actor login returned by the getActor fake (default "test-actor"). */
   actor?: string | undefined;
   /** getActor resolves undefined (identity unknown → skip reopen). */
@@ -176,6 +182,15 @@ function gatewayFor(rec: Rec, o: GwOpts): Gateway {
       rec.threadCalls += 1;
       if (o.threadsError === true) throw new Error("threads boom");
       return o.threads ?? [];
+    },
+    readReviewThreads: async () => {
+      rec.threadCalls += 1;
+      if (o.threadsError === true) return { threads: [], health: "unavailable" as const, reason: "graphql-error" as const };
+      return {
+        threads: o.threads ?? [],
+        health: o.threadHealth ?? "ok",
+        ...(o.threadHealth === "truncated" ? { reason: "more-than-100-threads" as const } : {}),
+      };
     },
     getActor: async () => {
       rec.actorCalls += 1;
@@ -229,11 +244,215 @@ function inputsFor(o: MockOpts): ActionInputs {
   };
 }
 
+const healthy = (_env: RunEnv, deps: Deps) => {
+  deps.analysis.runScanners = async () => ({ findings: [], stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok" as const, applicable: true, required: true })) });
+  deps.analysis.runL2Detailed = async () => ({ findings: [], stages: [] });
+  deps.analysis.callWithProbe = async () => ({ ok: true, findings: [], execution: { mode: "single-shot", status: "completed" } });
+};
+
+describe("analysis assurance orchestration", () => {
+  it.each(["required", "advisory"] as const)("Flow B validates causal claims under current %s policy", async analysisPolicy => {
+    const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: analysisPolicy === "required" ? "advisory" : "required", scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 } };
+    const finding = { severity: "high", file: "src/auth.ts", line: 3, rule: "removed-guard", message: "Removed authorization", change: { file: "src/auth.ts", line: 2, side: "LEFT" } };
+    const diff = readFileSync(new URL("./fixtures/evals/deleted-authorization.patch", import.meta.url), "utf8");
+    const r = await runPrivileged({ diff, assessment, analysisPolicy, failLevel: "high", findings: [finding] });
+    expect(r.analysis?.status).toBe("complete");
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 1 : 0);
+    expect(r.reviews[0]?.event).toBe(analysisPolicy === "required" ? "REQUEST_CHANGES" : "COMMENT");
+    const malformed = await runPrivileged({ diff, assessment, analysisPolicy, failLevel: "high", findings: [{ ...finding, file: "untouched.ts", change: { line: 2 } }] });
+    expect(malformed.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+    expect(malformed.reviews[0]?.event).toBe("COMMENT");
+    expect(malformed.reviews[0]?.body).toContain("Removed authorization");
+  });
+  it.each(["required", "advisory"] as const)("publishes deletion anchors under %s policy independently of display context", async analysisPolicy => {
+    const diff = readFileSync(new URL("./fixtures/evals/deleted-authorization.patch", import.meta.url), "utf8");
+    const f: Finding = { severity: "high", file: "src/auth.ts", line: 3, rule: "missing-auth", message: "Removed authorization guard", change: { file: "src/auth.ts", line: 2, side: "LEFT" } };
+    const r = await runWithMocks({ diff, analysisPolicy, failLevel: "high", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [f], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("complete");
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 1 : 0);
+    expect(r.reviews[0]?.event).toBe(analysisPolicy === "required" ? "REQUEST_CHANGES" : "COMMENT");
+    expect(r.reviews[0]?.comments[0]).toMatchObject({ path: "src/auth.ts", line: 3, side: "RIGHT" });
+    expect(readFindings(r.artifactDir)[0]?.change).toEqual(f.change);
+  });
+  it("persists unresolved required attribution before reporting or publishing", async () => {
+    const r = await runWithMocks({ analysisPolicy: "required", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [{ ...LLM_FINDING, line: 1, severity: "high" }], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.exitCode).toBe(3);
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(JSON.parse(readFileSync(join(r.artifactDir, "analysis.json"), "utf8")).status).toBe("incomplete");
+    expect(r.body).toContain("incomplete");
+    expect(r.reviews[0]?.event).toBe("COMMENT");
+  });
+  it("accounts for clipped hunks without claiming the model saw the absent danger", async () => {
+    const diff = "diff --git a/large.ts b/large.ts\n--- /dev/null\n+++ b/large.ts\n@@ -0,0 +1,121 @@\n" + Array.from({ length: 120 }, () => "+" + "x".repeat(100)).join("\n") + "\n+DANGER\n";
+    let prompt = "";
+    const r = await runWithMocks({ diff, analysisPolicy: "required", failLevel: "none", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async (_p, _m, _b, _k, messages) => {
+        prompt = messages.user;
+        expect(JSON.parse(readFileSync(join(env.artifactDir, "analysis.json"), "utf8")).status).toBe("incomplete");
+        return { ok: true, findings: [], execution: { mode: "single-shot", status: "completed" } };
+      };
+    } });
+    expect(prompt).not.toContain("DANGER");
+    expect(r.analysis).toMatchObject({ status: "incomplete", coverage: { hunksTotal: 1, hunksReviewed: 0 } });
+    expect(r.exitCode).toBe(3); expect(r.reviews[0]?.event).toBe("COMMENT");
+    expect(r.body).toContain("incomplete"); expect(readFileSync(r.summaryPath, "utf8")).toContain("incomplete");
+  });
+  it.each(["failed", "unsupported", "skipped"] as const)("records %s execution while retaining scanner findings", async status => {
+    const r = await runWithMocks({ analysisPolicy: "required", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.runScanners = async () => ({ findings: [LLM_FINDING], stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status, applicable: true, required: true })) });
+    } });
+    expect(r.analysis?.status).toBe(status === "skipped" ? "incomplete" : status);
+    expect(r.exitCode).toBe(3); expect(readFileSync(join(r.artifactDir, "findings.json"), "utf8")).toContain(LLM_FINDING.rule);
+  });
+  it("does not treat legacy zero-findings ports as healthy", async () => {
+    const r = await runWithMocks({ llm: [], scan: [], analysisPolicy: "required" });
+    expect(r.analysis?.stages).toContainEqual(expect.objectContaining({ status: "unsupported", reason: "unknown-health", required: true }));
+    expect(r.exitCode).toBe(3);
+  });
+  it("reports timeout with redacted evidence and unchanged advisory severity exit", async () => {
+    const r = await runWithMocks({ configure: (env, deps) => { healthy(env, deps); deps.analysis.callWithProbe = async () => ({ ok: false, reason: "timeout", detail: "timeout test-llm-key" }); } });
+    expect(r.analysis?.status).toBe("failed"); expect(r.exitCode).toBe(0);
+    expect(readFileSync(join(r.artifactDir, "analysis.json"), "utf8")).not.toContain("test-llm-key");
+  });
+  it.each(["fallback", "budget"] as const)("retains partial agent findings with %s status", async status => {
+    const r = await runWithMocks({ llmAgent: true, analysisPolicy: "required", configure: (env, deps) => {
+      healthy(env, deps); deps.analysis.callWithProbeAgent = async () => ({ ok: true, findings: [LLM_FINDING], execution: { mode: "agent", status } });
+    } });
+    expect(r.analysis?.status).toBe(status === "fallback" ? "unsupported" : "incomplete"); expect(r.exitCode).toBe(3);
+    expect(readFileSync(join(r.artifactDir, "findings.json"), "utf8")).toContain(LLM_FINDING.rule);
+  });
+  it("records linked issue and needed actor failures", async () => {
+    const r = await runWithMocks({ prBody: "Fixes #42", analysisPolicy: "required", actorMissing: true, configure: (env, deps) => {
+      healthy(env, deps); deps.gh.getIssueBody = async () => { throw Error("unavailable"); };
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [{ ...LLM_FINDING, file: "untouched.ts" }], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues.map(i => i.code)).toEqual(expect.arrayContaining(["issue-context", "actor-context"]));
+  });
+  it("keeps advisory keyless deterministic scope and required semantic scope distinct", async () => {
+    const a = await runWithMocks({ llmApiKey: "", configure: healthy });
+    expect(a.analysis).toMatchObject({ scope: "deterministic", status: "complete" });
+    expect(a.analysis?.stages).toContainEqual(expect.objectContaining({ stage: "semantic", status: "skipped", required: false }));
+    const b = await runWithMocks({ llmApiKey: "", analysisPolicy: "required", configure: healthy });
+    expect(b.analysis).toMatchObject({ scope: "semantic", status: "unsupported" }); expect(b.exitCode).toBe(3);
+  });
+  it.each(["advisory", "required"] as const)("marks stale heads incomplete for %s", async analysisPolicy => {
+    const r = await runWithMocks({ analysisPolicy, headMoves: true, configure: healthy });
+    expect(r.analysis?.status).toBe("incomplete"); expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0); expect(r.reviews).toHaveLength(0);
+  });
+  it.each(["advisory", "required"] as const)("records unrepresentable changed paths as unsupported (%s)", async analysisPolicy => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const diff = [
+      `diff --git a/${longPath} b/${longPath}`,
+      "index 111..222 100644",
+      `--- a/${longPath}`,
+      `+++ b/${longPath}`,
+      "@@ -1 +1,2 @@",
+      " const x = 1;",
+      "+const y = 2;",
+      "",
+    ].join("\n");
+    const r = await runWithMocks({ diff, analysisPolicy, failLevel: "high", configure: (env, deps) => {
+      deps.analysis.runScanners = async () => ({
+        findings: [{ severity: "high", file: longPath, line: 2, rule: "long-path", message: "m" }],
+        stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok" as const, applicable: true, required: true })),
+      });
+      deps.analysis.runL2Detailed = async () => ({ findings: [], stages: [] });
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "unsupported-path" }));
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+    expect(r.reviews).toHaveLength(1);
+  });
+  it.each(["advisory", "required"] as const)("records unrepresentable artifact paths as unsupported (%s)", async analysisPolicy => {
+    const longPath = "dir/".repeat(50) + "auth.ts";
+    const diff = [
+      `diff --git a/${longPath} b/${longPath}`,
+      "index 111..222 100644",
+      `--- a/${longPath}`,
+      `+++ b/${longPath}`,
+      "@@ -1 +1,2 @@",
+      " const x = 1;",
+      "+const y = 2;",
+      "",
+    ].join("\n");
+    const assessment = {
+      version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: analysisPolicy, scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 },
+    };
+    const r = await runPrivileged({ diff, assessment, analysisPolicy, failLevel: "high", findings: [{ severity: "high", file: longPath, line: 2, rule: "long-path", message: "m" }] });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "unsupported-path" }));
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+  });
+  it.each(["required", "advisory"] as const)("records unavailable needed thread context (%s)", async analysisPolicy => {
+    const generalWarning: Finding = { ...LLM_FINDING, line: 1, severity: "warning" };
+    const r = await runWithMocks({ analysisPolicy, failLevel: "none", threadHealth: "unavailable", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [generalWarning], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "thread-context" }));
+    expect(r.exitCode).toBe(analysisPolicy === "required" ? 3 : 0);
+    expect(r.reviews).toHaveLength(1);
+  });
+  it("records truncated needed thread context", async () => {
+    const generalWarning: Finding = { ...LLM_FINDING, line: 1, severity: "warning" };
+    const r = await runWithMocks({ analysisPolicy: "required", failLevel: "none", threadHealth: "truncated", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [generalWarning], execution: { mode: "single-shot", status: "completed" } });
+    } });
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({
+      code: "thread-context", message: "Needed review-thread context is truncated to the newest 100 threads.",
+    }));
+    expect(r.exitCode).toBe(3);
+  });
+  it("does not treat a legacy array-only thread port as complete required context", async () => {
+    const generalWarning: Finding = { ...LLM_FINDING, line: 1, severity: "warning" };
+    const r = await runWithMocks({ analysisPolicy: "required", failLevel: "none", configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbe = async () => ({ ok: true, findings: [generalWarning], execution: { mode: "single-shot", status: "completed" } });
+      delete deps.gh.readReviewThreads;
+    } });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "thread-context" }));
+    expect(r.exitCode).toBe(3);
+  });
+  it("records unavailable needed thread context on the artifact flow", async () => {
+    const assessment = {
+      version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "required", scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 },
+    };
+    const r = await runPrivileged({ analysisPolicy: "required", threadHealth: "unavailable", findings: [{ ...LLM_FINDING, line: 1, severity: "warning" }], assessment });
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.analysis?.coverage.issues).toContainEqual(expect.objectContaining({ code: "thread-context" }));
+    expect(r.exitCode).toBe(3);
+    expect(r.reviews).toHaveLength(1);
+  });
+});
+
 interface MockOpts {
+  analysisPolicy?: "advisory" | "required";
+  configure?: (env: RunEnv, deps: Deps) => void;
   githubToken?: string;
   llmAgent?: boolean;
   /** Drive one linked-repo tool call through the agent ToolContext (clone is expected to fail). */
   agentToolProbe?: boolean;
+  /** Linked alias the agent probe reads (default someone/else). */
+  probeRepo?: string;
   /** Size in KB reported by the getRepoSize fake (default 1024). */
   repoSizeKb?: number;
   llmApiKey?: string;
@@ -283,10 +502,12 @@ interface MockOpts {
   summaryPrefill?: string;
   /** Findings returned by the runScanners fake (default []). */
   scan?: Finding[];
-  /** Resolved review threads returned by the listReviewThreads fake (default none). */
+  observeExec?: (kind: "scanner" | "native", env: NodeJS.ProcessEnv | undefined) => void;
+  /** Resolved review threads returned by the thread-read fake (default none). */
   threads?: ReviewThread[];
-  /** listReviewThreads throws (fail-open pin). */
+  /** Legacy listReviewThreads throws (legacy fail-open pin). */
   threadsError?: boolean;
+  threadHealth?: "ok" | "truncated" | "unavailable";
   /** Actor login returned by the getActor fake (default "test-actor"). */
   actor?: string | undefined;
   /** getActor resolves undefined (identity unknown → skip reopen). */
@@ -327,7 +548,7 @@ async function runWithMocks(o: MockOpts = {}) {
       ? commentPayload
       : o.prNumber === null
         ? {}
-        : { action: o.action ?? "synchronize", pull_request: { number: 7 } },
+        : { action: o.action ?? "synchronize", pull_request: { number: 7 }, repository: { full_name: "o/r" } },
     inputs: inputsFor(o),
     workDir: root,
     artifactDir,
@@ -350,18 +571,21 @@ async function runWithMocks(o: MockOpts = {}) {
       issueBody: o.issueBody,
       threads: o.threads,
       threadsError: o.threadsError,
+      threadHealth: o.threadHealth,
       actor: o.actor,
       actorMissing: o.actorMissing,
       actorError: o.actorError,
       info: { isFork: o.forkReadonly === true, headRepo: o.forkReadonly ? "fork/r" : "o/r" },
     }),
     analysis: {
-      runScanners: async () => {
-        rec.scanEnv = { ...process.env };
+      runScanners: async (_options, execution) => {
+        rec.scanEnv = execution?.env;
+        o.observeExec?.("scanner", execution?.env);
         return o.sbomMissing ? { findings: [], sbomPath: join(sbomDir, "sbom.cdx.json") } : { findings: o.scan ?? [] };
       },
-      runL2: async (_dir, changedFiles) => {
-        rec.l2Env = { ...process.env };
+      runL2: async (_dir, changedFiles, execution) => {
+        rec.l2Env = execution?.env;
+        o.observeExec?.("native", execution?.env);
         rec.l2Changed = changedFiles;
         return [];
       },
@@ -423,7 +647,7 @@ async function runWithMocks(o: MockOpts = {}) {
         rec.agentMaxTurns = (opts as { maxTurns?: number }).maxTurns;
         rec.agentMaxSeconds = (opts as { maxSeconds?: number }).maxSeconds;
         if (o.agentToolProbe === true) {
-          const res = await executeTool("read_file", { path: "README.md", repo: "someone/else" }, toolCtx);
+          const res = await executeTool("read_file", { path: "README.md", repo: o.probeRepo ?? "someone/else" }, toolCtx);
           rec.toolOutput = res.output;
           rec.toolError = res.isError;
         }
@@ -433,6 +657,8 @@ async function runWithMocks(o: MockOpts = {}) {
     },
   };
 
+  if (o.analysisPolicy) env.inputs.analysisPolicy = o.analysisPolicy;
+  o.configure?.(env, deps);
   const out = await run(env, deps);
   return {
     ...out,
@@ -472,6 +698,9 @@ async function runWithMocks(o: MockOpts = {}) {
 }
 
 interface PrivOpts {
+  analysisPolicy?: "advisory" | "required";
+  threadHealth?: "ok" | "truncated" | "unavailable";
+  assessment?: unknown;
   metaPr?: number;
   prsByHead?: number[];
   findings?: unknown[];
@@ -513,6 +742,7 @@ async function runPrivileged(o: PrivOpts = {}) {
     }),
   );
   writeFileSync(join(artifactDir, "findings.json"), JSON.stringify(o.findings ?? [LLM_FINDING]));
+  if (o.assessment !== undefined) writeFileSync(join(artifactDir, "analysis.json"), JSON.stringify(o.assessment));
   writeFileSync(join(artifactDir, "diff.patch"), o.diff ?? DIFF);
   const summaryPath = join(root, "summary.md");
   writeFileSync(summaryPath, "");
@@ -547,10 +777,12 @@ async function runPrivileged(o: PrivOpts = {}) {
   const spyFail = (name: string) => () => {
     throw new Error(`${name} must not be invoked in the privileged flow`);
   };
+  env.inputs.analysisPolicy = o.analysisPolicy ?? "advisory";
   const deps: Deps = {
     gh: gatewayFor(rec, {
       prsByHead: o.prsByHead,
       staleDuringPost: o.staleDuringPost,
+      threadHealth: o.threadHealth,
       info: { headRepo: o.liveRepo ?? "o/r", headRef: o.liveRef ?? "feature", headSha: o.liveSha ?? SHA_HEAD },
     }),
     analysis: {
@@ -565,10 +797,102 @@ async function runPrivileged(o: PrivOpts = {}) {
     },
   };
   const out = await run(env, deps);
-  return { ...out, reviews: rec.reviews, payloads: rec.reviews, reviewAttempts: rec.reviewAttempts, summaryPath };
+  return { ...out, reviews: rec.reviews, payloads: rec.reviews, reviewAttempts: rec.reviewAttempts, summaryPath, artifactDir };
 }
 
 describe("run() orchestration", () => {
+  it("Flow B rejects array scanner health instead of passing required coverage", async () => {
+    const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "required", scope: "semantic", status: "complete",
+      stages: ["semantic", "semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: stage === "semgrep" ? ["failed"] : "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 1, hunksReviewed: 1, issues: [], issuesOmitted: 0 } };
+    const r = await runPrivileged({ assessment, analysisPolicy: "required", findings: [], failLevel: "none" });
+    expect(r.analysis?.stages).toContainEqual(expect.objectContaining({ stage: "artifact-assessment", reason: "coverage-unavailable" }));
+    expect(r.analysis?.status).toBe("unsupported");
+    expect(r.exitCode).toBe(3);
+    expect(r.reviews[0]?.event).toBe("COMMENT");
+    expect(r.reviews[0]?.body).toContain("unsupported");
+  });
+  it.each([
+    { maxBytes: 1000, extraStages: 40 },
+    { maxBytes: 100000, extraStages: 40 },
+    { maxBytes: 100000, extraStages: 0 },
+  ])("keeps persisted coverage safe when oversized metadata prevents readback ($maxBytes bytes, $extraStages extra stages)", async ({ maxBytes, extraStages }) => {
+    const secret = "synthetic-assessment-runtime-secret";
+    const r = await runWithMocks({ analysisPolicy: "required", failLevel: "none", llmApiKey: secret, maxArtifactBytes: maxBytes,
+      configure: (env, deps) => {
+        healthy(env, deps);
+        deps.analysis.runScanners = async () => ({ findings: [{ severity: "info", file: "src/a.ts", line: 2, rule: "fixture", message: "Retained scanner evidence" }], stages: ["semgrep", "gitleaks", "trivy", ...Array.from({ length: extraStages }, (_, i) => `extra-${i}`)]
+          .map(stage => ({ stage, status: "ok", applicable: true, required: true, reason: secret })) });
+        deps.analysis.callWithProbe = async () => ({ ok: true, findings: [], execution: { mode: "single-shot", status: "completed" },
+          verdicts: { pairs: Array.from({ length: 10000 }, () => [0, 0] as [number, number]), links: [], malformed: 0 } });
+      } });
+    const raw = readFileSync(join(r.artifactDir, "analysis.json"), "utf8");
+    const persisted = JSON.parse(raw);
+    expect(Buffer.byteLength(readFileSync(join(r.artifactDir, "pr-meta.json")))).toBeGreaterThan(maxBytes);
+    expect(r.analysis).toEqual(persisted);
+    expect(r.analysis?.status).toBe("incomplete");
+    expect(r.exitCode).toBe(3);
+    expect(r.reviews[0]?.event).toBe("COMMENT");
+    expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(maxBytes);
+    expect(r.reviews[0]?.comments).toHaveLength(1);
+    expect(r.reviews[0]?.comments[0]?.body).toContain("Retained scanner evidence");
+    if (maxBytes === 100000) expect(r.analysis?.coverage.issues).toContainEqual({
+      code: "assessment-unavailable", message: "Persisted assessment could not be validated against PR metadata.",
+    });
+    expect(r.analysis!.stages.length).toBeLessThanOrEqual(32);
+    expect(r.analysis!.coverage.issues.length).toBeLessThanOrEqual(200);
+    expect(r.analysis!.coverage.issuesOmitted + r.analysis!.coverage.issues.length).toBeGreaterThan(0);
+    for (const text of [raw, JSON.stringify(r.analysis), r.body!, readFileSync(r.summaryPath, "utf8")]) {
+      expect(text).not.toContain(secret);
+      expect(text).toContain("incomplete");
+    }
+    expect(readFileSync(r.summaryPath, "utf8").length).toBeLessThanOrEqual(DEFAULT_MAX_REVIEW_BODY_CHARS);
+    expect(r.body!.length).toBeLessThanOrEqual(DEFAULT_MAX_REVIEW_BODY_CHARS);
+  });
+  it("Flow B cannot turn a deterministic producer claim into required semantic coverage", async () => {
+    const assessment = { version: 1, baseSha: SHA_BASE, headSha: SHA_HEAD, policy: "advisory", scope: "deterministic", status: "complete",
+      stages: ["semgrep", "gitleaks", "trivy"].map(stage => ({ stage, status: "ok", required: true, applicable: true })),
+      coverage: { filesTotal: 1, hunksTotal: 1, filesReviewed: 0, hunksReviewed: 0, issues: [], issuesOmitted: 0 } };
+    const r = await runPrivileged({ assessment, analysisPolicy: "required", findings: [], failLevel: "none" });
+    expect(r.analysis).toMatchObject({ policy: "required", scope: "semantic", status: "unsupported" });
+    expect(r.exitCode).toBe(3); expect(r.reviews[0]?.event).toBe("COMMENT");
+    const a = await runPrivileged({ assessment: { ...assessment, policy: "required" }, findings: [], failLevel: "none" });
+    expect(a.analysis?.policy).toBe("advisory"); expect(a.exitCode).toBe(0);
+  });
+  it("Flow B reports mismatched and legacy assessment coverage unavailable", async () => {
+    for (const assessment of [undefined, { version: 1, headSha: "c".repeat(40) }]) {
+      const r = await runPrivileged({ assessment, analysisPolicy: "required", findings: [] });
+      expect(r.analysis?.stages).toContainEqual(expect.objectContaining({ stage: "artifact-assessment", reason: "coverage-unavailable" }));
+      expect(r.exitCode).toBe(3);
+    }
+  });
+  it("a required successful single shot accounts for every included semantic unit", async () => {
+    const r = await runWithMocks({ analysisPolicy: "required", configure: healthy });
+    expect(r.analysis).toMatchObject({ status: "complete", coverage: { filesReviewed: 1, hunksReviewed: 1 } });
+    expect(r.exitCode).toBe(0);
+  });
+  it.each<[string, (ctx: ToolContext) => Promise<void>, string, number, { code: string; message: string } | undefined]>([
+    ["a missing path is routine exploration and stays complete",
+      async ctx => { await executeTool("read_file", { path: "missing.ts" }, ctx); }, "complete", 0, undefined],
+    ["a cancelled inspection is a coverage gap",
+      async ctx => { await executeTool("read_file", { path: "missing.ts" }, ctx, { context: { deadlineMs: Date.now() + 60_000, signal: AbortSignal.abort() } }); },
+      "incomplete", 3, { code: "tool-error", message: "read_file: inspection failed" }],
+    ["a truncated inspection is a coverage gap",
+      async ctx => { ctx.observe?.({ tool: "grep", isError: false, truncated: true, recoverable: false }); },
+      "incomplete", 3, { code: "tool-truncated", message: "grep: inspection truncated" }],
+  ])("agent tool observation: %s", async (_label, step, status, exitCode, issue) => {
+    const r = await runWithMocks({ analysisPolicy: "required", llmAgent: true, configure: (env, deps) => {
+      healthy(env, deps);
+      deps.analysis.callWithProbeAgent = async (_p, _m, _b, _k, _c, _o, ctx) => {
+        await step(ctx);
+        return { ok: true, findings: [], execution: { mode: "agent", status: "completed" } };
+      };
+    } });
+    expect(r.analysis?.status).toBe(status);
+    expect(r.exitCode).toBe(exitCode);
+    if (issue === undefined) expect(r.analysis?.coverage.issues.filter(i => i.code.startsWith("tool-"))).toEqual([]);
+    else expect(r.analysis?.coverage.issues).toContainEqual(issue);
+  });
   it("no llm key still posts fast-path review", async () => {
     const r = await runWithMocks({ llmApiKey: "" });
     expect(r.posted).toBe(true);
@@ -603,7 +927,7 @@ describe("run() orchestration", () => {
     expect(b.posted).toBe(true);
     expect(b.slowPathSkipped).toBe(true);
     expect(b.exitCode).toBe(0);
-    expect(b.body).toContain("binary-note");
+    expect(b.body).toContain("binary\\-note");
     const n = await runWithMocks({ prNumber: null });
     expect(n.posted).toBe(false);
     expect(n.exitCode).toBe(0);
@@ -779,10 +1103,10 @@ describe("run() orchestration", () => {
     const finding = { ...LLM_FINDING, suggestion: "Use a bounded check." };
     const normal = await runWithMocks({ llm: [finding] });
     expect(normal.reviews[0]!.comments[0]!.body).toContain(finding.message);
-    expect(normal.reviews[0]!.comments[0]!.body).toContain(finding.suggestion);
+    expect(normal.reviews[0]!.comments[0]!.body).toContain("Use a bounded check\\.");
     expect(normal.reviews[0]!.body).toContain("1 finding(s)");
     expect(normal.reviews[0]!.body).not.toContain(finding.message);
-    expect(normal.reviews[0]!.body).not.toContain(finding.suggestion);
+    expect(normal.reviews[0]!.body).not.toContain("Use a bounded check\\.");
   });
 
   it("normal Step Summary redacts GitHub and LLM secrets", async () => {
@@ -867,6 +1191,46 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
   });
 
+  it("blocks a high scanner finding on the actual spaced Git path in both flows", async () => {
+    const diff = "diff --git a/src b/code.ts b/src b/code.ts\n--- a/src b/code.ts\n+++ b/src b/code.ts\n@@ -0,0 +1 @@\n+danger();\n";
+    const high: Finding = { severity: "high", file: "src b/code.ts", line: 1, rule: "sec", message: "bad" };
+    const analysis = await runWithMocks({ failLevel: "high", llm: [], scan: [high], diff });
+    const privileged = await runPrivileged({ failLevel: "high", findings: [high], diff });
+    for (const result of [analysis, privileged]) {
+      expect(result.exitCode).toBe(1);
+      expect(result.reviews[0]).toMatchObject({ event: "REQUEST_CHANGES", comments: [{ path: "src b/code.ts", line: 1 }] });
+    }
+    expect(analysis.l2Changed).toEqual(new Set(["src b/code.ts"]));
+  });
+
+  it.each([{ failed: true, timedOut: false }, { failed: false, timedOut: true }])(
+    "keeps interrupted high scanner evidence in the production high gate (%j)", async (status) => {
+      const stdout = JSON.stringify({ runs: [{
+        results: [{ ruleId: "retained-high", level: "error", message: { text: "unsafe operation" },
+          locations: [{ physicalLocation: { artifactLocation: { uri: "src/a.ts" }, region: { startLine: 2 } } }] }],
+      }] });
+      const scan = fromStdout("semgrep", "semgrep", { missing: false, code: 0, stdout, ...status });
+      const result = await runWithMocks({ failLevel: "high", llm: [], scan });
+      expect(result.exitCode).toBe(1);
+      expect(result.reviews[0]).toMatchObject({
+        event: "REQUEST_CHANGES", comments: [{ path: "src/a.ts", line: 2 }],
+      });
+      expect(scan.at(-1)).toMatchObject({ rule: "scanner-failed" });
+    },
+  );
+
+  it("surfaces unresolved patch sections as safe repository warnings in both flows", async () => {
+    const diff = 'diff --git a/a b/b b/c b/d\nBinary files a/a b/b and b/c b/d differ\n' + DIFF;
+    for (const execute of [() => runWithMocks({ diff, llm: [] }), () => runPrivileged({ diff, findings: [] })]) {
+      vi.mocked(core.warning).mockClear();
+      const result = await execute();
+      expect(vi.mocked(core.warning).mock.calls.some(([message]) => String(message).includes("diff-unparsed"))).toBe(true);
+      expect(result.reviews[0]?.body).toContain("diff\\-unparsed");
+      expect(result.reviews[0]?.body).not.toContain("a/a b/b");
+      expect(result.exitCode).toBe(0);
+    }
+  });
+
   it("fail_level warning exits 2 on warning findings through run()", async () => {
     const r = await runWithMocks({ failLevel: "warning" });
     expect(r.exitCode).toBe(2);
@@ -881,7 +1245,7 @@ describe("run() orchestration", () => {
     expect(r.llmCalled).toBe(0);
   });
 
-  it("scanners and L2 see a scrubbed env; the parent env is restored afterwards", async () => {
+  it("scanners and L2 receive scrubbed env without mutating the parent during success", async () => {
     const saved = { ...process.env };
     process.env.PR_TEST_API_TOKEN = "t-secret";
     process.env.MY_SERVICE_KEY = "k-secret";
@@ -889,7 +1253,12 @@ describe("run() orchestration", () => {
     process.env.ACTIONS_RUNTIME_TOKEN = "rt-secret";
     process.env.RUNNER_TEMP = "/tmp/opencode/rt";
     try {
-      const r = await runWithMocks({});
+      const seen: string[] = [];
+      const r = await runWithMocks({ observeExec: (kind) => {
+        seen.push(kind);
+        expect(process.env.GITHUB_TOKEN).toBe("ghs_secret");
+      } });
+      expect(seen).toEqual(["scanner", "native"]);
       for (const env of [r.scanEnv, r.l2Env]) {
         expect(env).toBeDefined();
         expect(env?.PR_TEST_API_TOKEN).toBeUndefined();
@@ -908,8 +1277,26 @@ describe("run() orchestration", () => {
   });
 
   it("passes the parsed-diff changed set to runL2", async () => {
+    // Existing gofmt file scoping is kept through the additive options seam.
     const r = await runWithMocks({ scan: [] });
     expect(r.l2Changed).toEqual(new Set(["src/a.ts"])); // exact changed paths of the DIFF fixture
+  });
+
+  it.each(["scanner", "native"] as const)("keeps parent env unchanged while %s rejects", async (rejectedKind) => {
+    const saved = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "parent-secret";
+    try {
+      const parent = { ...process.env };
+      await expect(runWithMocks({ observeExec: (kind, env) => {
+        expect(env?.GITHUB_TOKEN).toBeUndefined();
+        expect(process.env).toEqual(parent);
+        if (kind === rejectedKind) throw new Error("owned test rejection");
+      } })).rejects.toThrow("owned test rejection");
+      expect(process.env).toEqual(parent);
+    } finally {
+      if (saved === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = saved;
+    }
   });
 
   it("the LLM slow path keeps its key (not scrubbed; it is intended API use)", async () => {
@@ -1026,7 +1413,7 @@ describe("run() orchestration", () => {
     const dumped = JSON.stringify(r.reviews);
     expect(dumped).not.toContain("gh-secret-token-123");
     expect(dumped).not.toContain("sk-secret-key-456");
-    expect(dumped).toContain("[REDACTED]");
+    expect(dumped).toContain("\\\\[REDACTED\\\\]");
   });
 
   it("fast findings echoing the token are masked in the early findings.json", async () => {
@@ -1075,14 +1462,15 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({
       llmAgent: true,
       agentToolProbe: true,
-      prBody: "See https://github.com/someone/else for context",
+      prBody: "See https://github.com/o/other for context",
+      probeRepo: "o/other",
     });
     expect(r.posted).toBe(true);
     expect(r.toolError).toBe(true);
-    // Gating passes (the body links someone/else), so the real clone is attempted and fails;
-    // the size pre-check inside ensureLinkedRepo proves the clone path was reached.
-    expect(r.toolOutput).toContain("repository not accessible: someone/else");
-    expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
+    // Gating passes (the body links o/other, same owner as the reviewed o/r), so the real clone
+    // is attempted and fails; the size pre-check inside ensureLinkedRepo proves the clone path was reached.
+    expect(r.toolOutput).toContain("repository unavailable: o/other");
+    expect(r.repoSizeCalls).toContainEqual(["o", "other"]);
   });
 
   it("oversized linked repo is short-circuited by the size guard (no clone) and the review still posts", async () => {
@@ -1091,17 +1479,18 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({
       llmAgent: true,
       agentToolProbe: true,
-      prBody: "See https://github.com/someone/else for context",
+      prBody: "See https://github.com/o/other for context",
+      probeRepo: "o/other",
       repoSizeKb: 300000000,
     });
     expect(r.posted).toBe(true);
     expect(r.toolError).toBe(true);
     // The size guard short-circuits before any clone: the tool surfaces the
     // not-accessible error while getRepoSize proves the pre-check ran.
-    expect(r.toolOutput).toContain("repository not accessible: someone/else");
-    expect(r.repoSizeCalls).toContainEqual(["someone", "else"]);
+    expect(r.toolOutput).toContain("repository unavailable: o/other");
+    expect(r.repoSizeCalls).toContainEqual(["o", "other"]);
     const lines = info.mock.calls.map((c) => String(c[0]));
-    expect(lines).toContain("agent linked repositories: someone/else");
+    expect(lines).toContain("agent linked repositories: o/other");
   });
 
   it("agent slow path makes no second getPr fetch (body is threaded through)", async () => {
@@ -1123,7 +1512,7 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
     expect(r.agentToolCtx?.ensureLinked).toBeDefined();
     const refused = await r.agentToolCtx!.ensureLinked!("evil/x");
-    expect(refused).toEqual({ error: "repository not accessible: evil/x" });
+    expect(refused).toEqual({ error: "repository not linked: evil/x" });
     const turns =
       (r.agentConv as { turns?: Array<{ role?: string; text?: string }> } | undefined)?.turns ?? [];
     expect(
@@ -1134,15 +1523,19 @@ describe("run() orchestration", () => {
   });
 
   it("unlinked alias is refused at the gate while a mixed-case linked alias passes it", async () => {
-    const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/someone/else for context" });
+    const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/o/Other for context" });
     expect(r.posted).toBe(true);
     const gate = r.agentToolCtx!.ensureLinked!;
-    expect(await gate("evil/x")).toEqual({ error: "repository not accessible: evil/x" });
+    expect(await gate("evil/x")).toEqual({ error: "repository not linked: evil/x" });
+    // Through the real tool path, the refused alias is a recoverable lookup, not a coverage gap.
+    const refused = await executeTool("read_file", { path: "a.txt", repo: "evil/x" }, r.agentToolCtx!);
+    expect(JSON.parse(refused.output)).toEqual({ error: "repository not linked: evil/x" });
+    expect(isRecoverableToolError(refused.output)).toBe(true);
     // Refusal happened at the gate: ensureLinkedRepo (and its getRepoSize pre-check) never ran.
     expect(r.repoSizeCalls).not.toContainEqual(["evil", "x"]);
-    // Mixed-case linked alias passes the gate: the size pre-check sees the alias as passed through.
-    await gate("Someone/Else");
-    expect(r.repoSizeCalls).toContainEqual(["Someone", "Else"]);
+    // Mixed-case same-owner alias passes the gate: the size pre-check sees the alias as passed through.
+    await gate("O/other");
+    expect(r.repoSizeCalls).toContainEqual(["O", "other"]);
   });
 
   it("logs the linked repo SHA on reuse", async () => {
@@ -1169,6 +1562,9 @@ describe("run() orchestration", () => {
       expect(r.posted).toBe(true);
       const lines = info.mock.calls.map((c) => String(c[0]));
       expect(lines).toContain(`agent linked repo someone/else at ${sha}`);
+      // Another owner's repository is never checked out with the action's credentials.
+      expect(lines).toContain("agent linked repo someone/else cloned without credentials (different owner)");
+      expect(r.repoSizeCalls).not.toContainEqual(["someone", "else"]);
     } finally {
       if (prevRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
       else process.env.RUNNER_TEMP = prevRunnerTemp;
@@ -1254,19 +1650,19 @@ describe("run() orchestration", () => {
   it("fork PR re-triggered by comment with an App token: L2 is skipped, a finding says so, the review still posts", async () => {
     const r = await runWithMocks({ comment: true, forkReadonly: true, tokenType: "app" });
     expect(r.l2Env).toBeUndefined();
-    expect(r.body).toContain("l2-skipped");
+    expect(r.body).toContain("l2\\-skipped");
     expect(r.posted).toBe(true);
   });
 
   it("same-repo comment re-trigger still runs L2", async () => {
     const r = await runWithMocks({ comment: true });
     expect(r.l2Env).toBeDefined();
-    expect(r.body).not.toContain("l2-skipped");
+    expect(r.body).not.toContain("l2\\-skipped");
   });
 
   it("quoted non-ASCII git paths decode to real names (quotePath residue)", async () => {
     const r = await runWithMocks({ diff: QUOTED_BINARY });
-    expect(r.body).toContain("café.bin");
+    expect(r.body).toContain("café\\.bin");
     expect(r.body).not.toContain("caf\\303");
   });
 });
@@ -1320,7 +1716,8 @@ index 111..222 100644
     expect(r.exitCode).toBe(0);
     expect(r.reviews[0]!.comments).toHaveLength(1);
     expect(r.reviews[0]!.comments[0]).toMatchObject({ path: "src/a.ts", line: 3, side: "RIGHT" });
-    expect(r.reviews[0]!.body).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body.split("\n\nAnalysis")[0]).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body).not.toContain("Findings not placed inline");
   });
 
   it("LEFT-only high stays inline LEFT but never gates: COMMENT + exit 0, no body item, no note", async () => {
@@ -1331,7 +1728,8 @@ index 111..222 100644
     expect(r.exitCode).toBe(0);
     expect(r.reviews[0]!.comments).toHaveLength(1);
     expect(r.reviews[0]!.comments[0]).toMatchObject({ path: "src/a.ts", line: 2, side: "LEFT" });
-    expect(r.reviews[0]!.body).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body.split("\n\nAnalysis")[0]).toBe("lupa: 1 finding(s).");
+    expect(r.reviews[0]!.body).not.toContain("Findings not placed inline");
   });
 
   it("lineless sensitive-path high on a touched file still blocks: REQUEST_CHANGES + exit 1", async () => {
@@ -1340,7 +1738,7 @@ index 111..222 100644
     expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
     expect(r.exitCode).toBe(1);
     expect(r.reviews[0]!.comments).toEqual([]);
-    expect(r.reviews[0]!.body).toContain("- **high** **blocking** id_rsa [sensitive-path]");
+    expect(r.reviews[0]!.body).toContain("- **high** **blocking** id\\_rsa [sensitive\\-path]");
     expect(r.reviews[0]!.body).not.toContain("outside the PR diff");
   });
 
@@ -1350,7 +1748,8 @@ index 111..222 100644
     expect(r.reviews[0]!.event).toBe("COMMENT");
     expect(r.exitCode).toBe(0);
     expect(r.reviews[0]!.comments).toEqual([]);
-    expect(r.reviews[0]!.body).toBe("lupa: no findings.");
+    expect(r.reviews[0]!.body.split("\n\nAnalysis")[0]).toBe("lupa: no findings.");
+    expect(r.reviews[0]!.body).not.toContain("Findings not placed inline");
   });
 
   it("posted payload comments carry no rule key", async () => {
@@ -1388,8 +1787,8 @@ index 111..222 100644
     const r = await runWithMocks({ llm, maxInlineComments: 1 });
     expect(r.posted).toBe(true);
     expect(r.body).toContain("**Findings not placed inline:**");
-    expect(r.body).toContain("- src/a.ts:3 (non-blocking)");
-    expect(r.body).not.toContain("- src/a.ts:2 (non-blocking)");
+    expect(r.body).toContain("- src\\/a\\.ts\\:3 (non-blocking)");
+    expect(r.body).not.toContain("- src\\/a\\.ts\\:2 (non-blocking)");
   });
 
   it("dry-run computes blocking before the early return: off-diff high keeps high=1 with blocking=0 and exit 0", async () => {
@@ -1423,7 +1822,7 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
     expect(r.exitCode).toBe(1);
-    expect(r.reviews[0]!.body).toContain("- **high** **reopened** src/other.ts:1 [off-rule]");
+    expect(r.reviews[0]!.body).toContain("- **high** **reopened** src\\/other\\.ts\\:1 [off\\-rule]");
     expect(r.threadCalls).toBe(1);
     expect(r.actorCalls).toBe(1);
   });
@@ -1443,7 +1842,7 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(r.reviews[0]!.event).toBe("REQUEST_CHANGES");
     expect(r.exitCode).toBe(1);
     expect(r.reviews[0]!.comments).toHaveLength(1);
-    expect(r.reviews[0]!.comments[0]!.body).toContain("**high** **reopened** [ctx-rule]");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("**high** **reopened** [ctx\\-rule]");
   });
 
   it("gone → stays resolved: COMMENT + exit 0", async () => {
@@ -1456,13 +1855,47 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(r.reviews[0]!.body).not.toContain("reopened");
   });
 
-  it("thread API failure → diff-only gating: COMMENT + exit 0", async () => {
+  it("unavailable structured thread read → diff-only gating: COMMENT + exit 0", async () => {
     vi.mocked(core.warning).mockClear();
     const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threadsError: true });
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.event).toBe("COMMENT");
     expect(r.exitCode).toBe(0);
     expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).startsWith("lupa:"))).toBe(true);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+  });
+
+  it("throwing structured thread read records thread-context and warns", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({
+      failLevel: "high", llm: [offHigh],
+      configure: (_env, deps) => {
+        deps.gh.readReviewThreads = async () => { throw new Error("threads boom"); };
+      },
+    });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+    expect(r.analysis?.coverage.issues.map(i => i.code)).not.toContain("actor-context");
+    expect(vi.mocked(core.warning).mock.calls.map(([m]) => String(m))).toContain("lupa: review-thread re-read failed; gating on diff membership only");
+  });
+
+  it("throwing legacy listReviewThreads records thread-context and warns", async () => {
+    vi.mocked(core.warning).mockClear();
+    const r = await runWithMocks({
+      failLevel: "high", llm: [offHigh],
+      configure: (_env, deps) => {
+        delete deps.gh.readReviewThreads;
+        deps.gh.listReviewThreads = async () => { throw new Error("threads boom"); };
+      },
+    });
+    expect(r.posted).toBe(true);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.exitCode).toBe(0);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "thread-context", message: "Needed review-thread context is unavailable." });
+    expect(r.analysis?.coverage.issues.map(i => i.code)).not.toContain("actor-context");
+    expect(vi.mocked(core.warning).mock.calls.map(([m]) => String(m))).toContain("lupa: review-thread re-read failed; gating on diff membership only");
   });
 
   it("unknown actor → skip reopen with a warning: COMMENT + exit 0", async () => {
@@ -1485,16 +1918,20 @@ describe("Q02 wrongly-resolved reopen", () => {
     expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).includes("review actor unknown"))).toBe(false);
   });
 
-  it("getActor throw → fail-open diff-only gating: warn, COMMENT + exit 0, no throw", async () => {
+  it("getActor throw → actor-context, actor warning, diff-only gating: COMMENT + exit 0, no throw", async () => {
     vi.mocked(core.warning).mockClear();
     const r = await runWithMocks({ failLevel: "high", llm: [offHigh], threads: [offThread], actorError: true });
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.event).toBe("COMMENT");
     expect(r.exitCode).toBe(0);
-    expect(vi.mocked(core.warning).mock.calls.some(([m]) => String(m).includes("review-thread re-read failed"))).toBe(true);
+    expect(r.analysis?.coverage.issues).toContainEqual({ code: "actor-context", message: "Needed review actor recheck is unavailable." });
+    const warnings = vi.mocked(core.warning).mock.calls.map(([m]) => String(m));
+    expect(warnings).toContain("lupa: review actor unknown; skipping the wrongly-resolved re-check");
+    expect(warnings).not.toContain("lupa: review-thread re-read failed; gating on diff membership only");
+    expect(r.threadCalls).toBe(0);
   });
 
-  it("all-introduced → getActor and listReviewThreads never called", async () => {
+  it("all-introduced → getActor and thread read never called", async () => {
     const addedHigh: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "add-rule", message: "new high" };
     const r = await runWithMocks({ failLevel: "high", llm: [addedHigh] });
     expect(r.posted).toBe(true);
@@ -1608,21 +2045,22 @@ describe("Fluxo B bindings and sanitizing", () => {
     expect(body).toContain("abcdef\nline\tend");
     expect(body).not.toContain("\u0007");
     expect(body).not.toContain("r".repeat(100));
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
   });
 
-  it("caps file paths at 200 chars (over-long safe path becomes a capped general note)", async () => {
+  it("rejects over-long file paths instead of truncating an alias (becomes an unplaced general note)", async () => {
     const f: Finding = { severity: "warning", file: "d/".repeat(150), line: 2, rule: "r", message: "m" };
     const r = await runPrivileged({ findings: [f] });
     expect(r.payloads[0].body).not.toContain("d/".repeat(120));
-    expect(r.payloads[0].body).toContain(TRUNC);
+    expect(r.payloads[0].body).toContain("artifact path rejected");
+    expect(r.payloads[0].comments).toEqual([]);
   });
 
   it("caps by code points: an emoji message never leaves a lone surrogate", async () => {
     const f: Finding = { severity: "warning", file: "src/a.ts", line: 2, rule: "r", message: "😀".repeat(2500) };
     const r = await runPrivileged({ findings: [f] });
     const body = r.payloads[0].comments[0].body;
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
     expect(body).not.toContain("😀".repeat(2000));
     expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
   });
@@ -1631,7 +2069,7 @@ describe("Fluxo B bindings and sanitizing", () => {
     const f: Finding = { severity: "warning", file: "src/a.ts", line: 2, rule: "r", message: "x".repeat(5000) };
     const r = await runPrivileged({ findings: [f] });
     const body = r.payloads[0].comments[0].body;
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
     expect(body).not.toContain("x".repeat(2000));
   });
 
@@ -1646,7 +2084,7 @@ describe("Fluxo B bindings and sanitizing", () => {
     };
     const r = await runPrivileged({ findings: [f] });
     const body = r.payloads[0].comments[0].body;
-    expect(body).toContain(TRUNC);
+    expect(body).toContain("…\\[truncated\\]");
     expect(body).not.toContain("y".repeat(4000));
   });
 
@@ -1655,7 +2093,7 @@ describe("Fluxo B bindings and sanitizing", () => {
     const r = await runPrivileged({ findings: [f] });
     expect(r.payloads[0].comments).toHaveLength(0);
     expect(r.payloads[0].body).toContain("artifact path rejected");
-    expect(r.payloads[0].body).toContain("(repository)");
+    expect(r.payloads[0].body).toContain("\\(repository\\)");
   });
 
   it("an absolute path becomes a repository-level note", async () => {
@@ -1776,14 +2214,14 @@ describe("findings from binaries, renames and skip paths", () => {
   it("a binary over 500 KB on disk triggers large-file (real stat, not hunk length)", async () => {
     const big = 'diff --git a/big.bin b/big.bin\nBinary files a/big.bin and b/big.bin differ\n';
     const r = await runWithMocks({ diff: big, workFiles: { "big.bin": 600 * 1024 } });
-    expect(r.body).toContain("large-file");
-    expect(r.body).toContain("binary-note");
+    expect(r.body).toContain("large\\-file");
+    expect(r.body).toContain("binary\\-note");
   });
 
   it("a small binary does not trigger large-file", async () => {
     const small = 'diff --git a/small.bin b/small.bin\nBinary files a/small.bin and b/small.bin differ\n';
     const r = await runWithMocks({ diff: small, workFiles: { "small.bin": 10 * 1024 } });
-    expect(r.body).not.toContain("large-file");
+    expect(r.body).not.toContain("large\\-file");
   });
 
   it("a rename (a != b) reports the new path, not the old one", async () => {
@@ -1796,8 +2234,8 @@ describe("findings from binaries, renames and skip paths", () => {
       "",
     ].join("\n");
     const r = await runWithMocks({ diff: rename });
-    expect(r.body).toContain("new.bin");
-    expect(r.body).not.toContain("old.bin");
+    expect(r.body).toContain("new\\.bin");
+    expect(r.body).not.toContain("old\\.bin");
   });
 
   it("a quoted rename reports the decoded new path", async () => {
@@ -1808,8 +2246,8 @@ describe("findings from binaries, renames and skip paths", () => {
       "",
     ].join("\n");
     const r = await runWithMocks({ diff: rename });
-    expect(r.body).toContain("café.bin");
-    expect(r.body).not.toContain("old.bin");
+    expect(r.body).toContain("café\\.bin");
+    expect(r.body).not.toContain("old\\.bin");
   });
 
   it("a non-triggering event writes a visible summary line (not an empty summary)", async () => {
@@ -2180,9 +2618,9 @@ ${FUNNEL_DIFF_LINES.join("\n")}
     expect(payload.body).toContain(OMISSION_300);
     expect(payload.body).not.toContain("> Note: review body truncated");
     // Folded excess keeps mapping order after the general section.
-    expect(payload.body).toContain("- src/a.ts:32");
-    expect(payload.body).toContain("- src/a.ts:41");
-    expect(payload.body.indexOf("- src/a.ts:32")).toBeLessThan(payload.body.indexOf("- src/a.ts:41"));
+    expect(payload.body).toContain("- src\\/a\\.ts\\:32");
+    expect(payload.body).toContain("- src\\/a\\.ts\\:41");
+    expect(payload.body.indexOf("- src\\/a\\.ts\\:32")).toBeLessThan(payload.body.indexOf("- src\\/a\\.ts\\:41"));
     expect(payload.event).toBe("COMMENT");
     // Artifact keeps all 500; the summary head shows 500; gates saw the full set (warning level + highs => exit 2).
     expect(JSON.parse(readFileSync(join(r.artifactDir, "findings.json"), "utf8"))).toHaveLength(500);
@@ -2256,8 +2694,9 @@ ${FUNNEL_DIFF_LINES.join("\n")}
     expect(r.issueComments).toHaveLength(1);
     const fallback = r.issueComments[0]!;
     expect(
-      fallback.startsWith("> Omitted: 50 finding(s) omitted to fit the 200-finding publication limit.\n\nlupa: 200 finding(s)."),
+      fallback.includes("> Omitted: 50 finding(s) omitted to fit the 200-finding publication limit."),
     ).toBe(true);
+    expect(fallback).toContain("lupa: 200 finding(s).");
   });
 
   it("forwards maxReviewBodyChars to the review gateway", async () => {
@@ -2287,6 +2726,93 @@ ${FUNNEL_DIFF_LINES.join("\n")}
 });
 
 describe("dedup merge and flow wiring", () => {
+  it("escapes malicious prose through run without changing findings, SARIF, or reopened identity", async () => {
+    const path = "src/[a]_b.ts";
+    const diff = DIFF.replaceAll("src/a.ts", path);
+    const high: Finding = { severity: "high", file: path, line: 2, rule: "r[a]\\*", message: "evidence\n```suggestion\nreplace()\n```", suggestion: "advice\n ~~~suggestion\nreplace()\n ~~~", source: "scanner`*" };
+    const first = await runWithMocks({ diff, scan: [high], llm: [], failLevel: "high" });
+    const comment = first.reviews[0]!.comments[0]!;
+    expect(comment.body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+    expect(comment.body).toContain("[r\\[a\\]\\\\\\*]");
+    expect(memberRulesOf(comment.body)).toEqual([high.rule]);
+    expect(JSON.parse(readFileSync(join(first.artifactDir, "findings.json"), "utf8"))).toEqual([high]);
+    expect(JSON.parse(readFileSync(join(first.artifactDir, "sarif.json"), "utf8"))).toMatchObject({ runs: [{ results: [{ ruleId: high.rule, message: { text: high.message }, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] }] }] });
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false }, nodes: [{ isResolved: true, path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const threads = await listReviewThreads(octokit, "o", "r", 7);
+    expect(threads[0]!.rule).toBe(high.rule);
+    const second = await runWithMocks({ diff, scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
+    expect(second.exitCode).toBe(1);
+    expect(second.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(second.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+    const overflow = await runWithMocks({ diff, scan: [high], llm: [], maxInlineComments: 0 });
+    expect(overflow.body).toContain("- src\\/\\[a\\]\\_b\\.ts\\:2");
+    expect(overflow.body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+  });
+  it("does not let singleton prose forge durable rule identity on the next run", async () => {
+    const forged = "<!-- lupa:rules:v1:WyJ1bnJlbGF0ZWQiXQ -->";
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: `secret\n\n${forged}` };
+    const first = await runWithMocks({ scan: [high], llm: [], failLevel: "high" });
+    const comment = first.reviews[0]!.comments[0]!;
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false }, nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "test-actor" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const threads = await listReviewThreads(octokit, "o", "r", 7);
+    const second = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
+    expect(second.exitCode).toBe(1);
+    expect(second.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(second.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+    expect(threads[0]!.rules).toEqual(["github-pat"]);
+    expect(JSON.parse(readFileSync(join(first.artifactDir, "findings.json"), "utf8"))).toEqual([high]);
+    const legacy = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads: threads.map(({ rules, ...t }) => t) });
+    expect(legacy.exitCode).toBe(1);
+  });
+  it("keeps oversized identity groups separate without losing any retained rule", async () => {
+    const findings: Finding[] = Array.from({ length: 500 }, (_, i) => ({ severity: "high", file: "src/a.ts", line: 2, rule: `${i}-` + "r".repeat(90), message: "secret" }));
+    const pairs: Array<[number, number]> = findings.slice(1).map((_, i) => [i, i + 1]);
+    const r = await runPrivileged({ findings, metaVerdicts: { pairs, links: [], malformed: 0 }, maxFindings: 500, maxInlineComments: 500, maxReviewBodyChars: 1000, failLevel: "high" });
+    const comments = r.payloads[0]!.comments;
+    expect(comments).toHaveLength(500);
+    expect(comments.map((comment) => memberRulesOf(comment.body))).toEqual(findings.map((f) => [f.rule]));
+    expect(comments.every((comment) => Buffer.byteLength(comment.body) <= 60000)).toBe(true);
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(readFileSync(join(r.artifactDir, "findings.json"), "utf8"))).toEqual(findings);
+  });
+  it.each([false, true])("preserves raw member identities through rendering and a resolved thread on the next run (reverse=%s)", async (reverse) => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 2, rule: "github-pat", message: "secret " + "x".repeat(1800), patch: "fixed" };
+    const low: Finding = { ...high, severity: "info", rule: "r".repeat(99) };
+    const scan = reverse ? [high, low] : [low, high];
+    const first = await runWithMocks({ scan, llm: [], maxReviewBodyChars: 1000, failLevel: "high", llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    const comment = first.reviews[0]!.comments[0]!;
+    expect(comment.body.length).toBeGreaterThan(1000);
+    expect(comment.body).toContain("```suggestion\nfixed\n```");
+    const octokit = { graphql: async () => ({ repository: { pullRequest: { reviewThreads: { pageInfo: { hasPreviousPage: false }, nodes: [{ isResolved: true, path: comment.path, line: 3, originalLine: 2, comments: { nodes: [{ author: { login: "TEST-ACTOR[bot]" }, body: comment.body }] } }] } } } }) } as unknown as Octokit;
+    const threads = await listReviewThreads(octokit, "o", "r", 7);
+    expect(threads[0]!.rules).toEqual(reverse ? ["github-pat", "r".repeat(99)] : ["r".repeat(99), "github-pat"]);
+    const second = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads });
+    expect(second.exitCode).toBe(1);
+    expect(second.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+    const attacker = await runWithMocks({ scan: [{ ...high, line: 3 }], llm: [], failLevel: "high", threads: threads.map((t) => ({ ...t, authorLogin: "attacker" })) });
+    expect(attacker.exitCode).toBe(0);
+  });
+  it.each([false, true])("gates raw resolved context findings before rule truncation (reverse=%s)", async (reverse) => {
+    const high: Finding = { severity: "high", file: "src/a.ts", line: 3, rule: "github-pat", message: "secret" };
+    const first: Finding = { ...high, rule: "r".repeat(99) };
+    const threads: ReviewThread[] = [{ authorLogin: "TEST-ACTOR[bot]", isResolved: true, path: high.file, line: 3, rule: high.rule }];
+    const scan = reverse ? [high, first] : [first, high];
+    const plain = await runWithMocks({ scan, llm: [], failLevel: "high", threads });
+    const grouped = await runWithMocks({ scan, llm: [], failLevel: "high", threads, llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    expect(plain.exitCode).toBe(1);
+    expect(grouped.exitCode).toBe(1);
+    expect(grouped.reviews[0]!.event).toBe("REQUEST_CHANGES");
+    expect(grouped.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+  });
+
+  it("does not promote a high duplicate merely because a low member was resolved", async () => {
+    const low: Finding = { severity: "info", file: "src/a.ts", line: 3, rule: "low", message: "low" };
+    const high: Finding = { ...low, severity: "high", rule: "high" };
+    const r = await runWithMocks({ scan: [low, high], llm: [], failLevel: "high", threads: [{ authorLogin: "test-actor", isResolved: true, path: low.file, line: 3, rule: "low" }], llmVerdicts: { pairs: [[0, 1]], links: [], malformed: 0 } });
+    expect(r.exitCode).toBe(0);
+    expect(r.reviews[0]!.event).toBe("COMMENT");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("**reopened**");
+  });
   const CUT_DIFF = [
     "diff --git a/f.ts b/f.ts",
     "index 111..222 100644",
@@ -2315,7 +2841,7 @@ describe("dedup merge and flow wiring", () => {
     expect(readPrMeta(r.artifactDir)!.verdicts).toEqual({ pairs: [[0, 1]], links: [[2, 0]], malformed: 0 });
     // All three merge into one inline comment; the summary head keeps the full pre-merge count.
     expect(r.reviews[0]!.comments).toHaveLength(1);
-    expect(r.reviews[0]!.comments[0]!.body).toContain("scan-a+scan-b+llm-c");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("scan\\-a\\+scan\\-b\\+llm\\-c");
     expect(r.reviews[0]!.body).toContain("lupa: 3 finding(s).");
     // The single-shot prompt carries ids and the verdict instructions.
     expect(r.prompts!.user).toContain('"id":0');
@@ -2369,7 +2895,7 @@ describe("dedup merge and flow wiring", () => {
     // Nothing merged, nothing lost: all N findings publish.
     expect(r.reviews[0]!.body).toContain(`lupa: ${N} finding(s).`);
     const dumped = JSON.stringify(r.reviews);
-    for (let i = 0; i < N; i++) expect(dumped).toContain(`cut-${i}`);
+    for (let i = 0; i < N; i++) expect(dumped).toContain(`cut\\\\-${i}`);
   });
 
   it("empty verdicts publish byte-identical output to the unmerged funnel", async () => {
@@ -2399,7 +2925,7 @@ describe("dedup merge and flow wiring", () => {
     const r = await runWithMocks({ scan, llm: [], llmVerdicts: verdicts, failLevel: "high" });
     expect(r.posted).toBe(true);
     expect(r.reviews[0]!.comments).toHaveLength(1);
-    expect(r.reviews[0]!.comments[0]!.body).toContain("h1+w1");
+    expect(r.reviews[0]!.comments[0]!.body).toContain("h1\\+w1");
     expect(r.reviews[0]!.comments[0]!.body).toContain("high evidence");
     expect(r.reviews[0]!.comments[0]!.body).toContain("warning evidence");
     expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
@@ -2454,8 +2980,8 @@ describe("dedup merge and flow wiring", () => {
     );
     expect(r.reviews[0]!.body).toContain("lupa: 2 finding(s).");
     const dumped = JSON.stringify(r.reviews);
-    expect(dumped).toContain("scan-a");
-    expect(dumped).toContain("scan-b");
+    expect(dumped).toContain("scan\\\\-a");
+    expect(dumped).toContain("scan\\\\-b");
   });
 
   it("Flow B merges the canary via pr-meta verdicts; a missing key posts unmerged", async () => {
@@ -2467,8 +2993,8 @@ describe("dedup merge and flow wiring", () => {
     expect(merged.posted).toBe(true);
     expect(merged.payloads[0]!.comments).toHaveLength(1);
     expect(merged.payloads[0]!.comments[0]!.body).toContain("**high**");
-    expect(merged.payloads[0]!.comments[0]!.body).toContain("[github-pat]");
-    expect(merged.payloads[0]!.comments[0]!.body).toContain("[REDACTED]");
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("[github\\-pat]");
+    expect(merged.payloads[0]!.comments[0]!.body).toContain("\\[REDACTED\\]");
     const plain = await runPrivileged({ findings });
     expect(plain.posted).toBe(true);
     expect(plain.payloads[0]!.comments).toHaveLength(2);
@@ -2572,7 +3098,7 @@ describe("finding provenance rendering (Q04)", () => {
     const scan: Finding = { ...LLM_FINDING, source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" } };
     const r = await runWithMocks({ llmApiKey: "", scan: [scan] });
     expect(r.reviews).toHaveLength(1);
-    expect(r.reviews[0].comments[0].body).toContain("`src:semgrep · conf 90`");
+    expect(r.reviews[0].comments[0].body).toContain("src:semgrep · conf 90");
     const summary = readFileSync(r.summaryPath, "utf8");
     expect(summary).toContain("- Source:");
     expect(summary).toContain("semgrep");

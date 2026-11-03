@@ -1,7 +1,60 @@
 import * as fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("workflow templates", () => {
+  it.each([["0", 0], ["2", 0], ["1", 1], ["3", 1], ["", 1], ["garbage", 1]] as const)(
+    "executes the actual gate shell for output %j (exit %i)", (exitCode, expectedExit) => {
+      const template = fs.readFileSync("docs/workflow-template.yml", "utf8");
+      const block = template.slice(template.indexOf("      - name: Enforce fail_level"));
+      const script = block.slice(block.indexOf("        run: |\n") + "        run: |\n".length)
+        .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+      const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], { env: { ...process.env, EXIT_CODE: exitCode }, encoding: "utf8" });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(expectedExit);
+      if (expectedExit === 1) expect(result.stderr).toContain(`gate failed (exit code: ${exitCode || "none"})`);
+    },
+  );
+
+  it("makes advisory setup explicit in both trusted action inputs", () => {
+    for (const file of ["docs/workflow-template.yml", "docs/workflow-template-privileged.yml"]) {
+      const text = fs.readFileSync(file, "utf8");
+      const inputBlock = text.slice(text.indexOf("uses: cpenaforte/lupa@"));
+      expect(inputBlock).toMatch(/^ {10}analysis_policy: advisory$/m);
+    }
+  });
+  it("uploads analysis.json with the review artifact on unsuccessful analysis runs", () => {
+    const text = fs.readFileSync("docs/workflow-template.yml", "utf8");
+    const upload = text.split(/^      - name: /m).find(step => step.startsWith("Upload review artifact\n"))!;
+    expect(upload).toMatch(/^        if: always\(\)$/m);
+    expect(upload).toMatch(/^        uses: actions\/upload-artifact@[0-9a-f]{40}/m);
+    expect(upload).toMatch(/^          name: pr-reviewer-out$/m);
+    const paths = upload.split("          path: |\n")[1]!.trim().split("\n").map(line => line.trim());
+    expect(paths).toEqual([
+      "${{ runner.temp }}/pr-reviewer-out/diff.patch",
+      "${{ runner.temp }}/pr-reviewer-out/pr-meta.json",
+      "${{ runner.temp }}/pr-reviewer-out/findings.json",
+      "${{ runner.temp }}/pr-reviewer-out/analysis.json",
+      "${{ runner.temp }}/pr-reviewer-out/sarif.json",
+      "${{ runner.temp }}/pr-reviewer-out/sbom.cdx.json",
+    ]);
+  });
+  it("consumer jobs have a 30 minute wall-clock backstop", () => {
+    for (const file of ["docs/workflow-template.yml", "docs/workflow-template-privileged.yml"]) {
+      const text = fs.readFileSync(file, "utf8");
+      const jobs = text.split(/^  [a-zA-Z][\w-]*:\s*$/m).slice(1);
+      expect(jobs.length).toBeGreaterThan(0);
+      for (const job of jobs.filter((entry) => /^    runs-on:/m.test(entry))) {
+        expect(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]).toBe("30");
+      }
+    }
+  });
+  it("passes only the trusted Actions actor variable, empty when unset", () => {
+    for (const file of ["docs/workflow-template.yml", "docs/workflow-template-privileged.yml"]) {
+      const text = fs.readFileSync(file, "utf8");
+      expect(text.match(/^\s+review_actor: (.+)$/gm)?.map((line) => line.trim())).toEqual(["review_actor: ${{ vars.PR_REVIEWER_ACTOR }}"]);
+    }
+  });
   it("both templates pin the v0.9.0 release SHA", () => {
     for (const file of [
       "docs/workflow-template.yml",

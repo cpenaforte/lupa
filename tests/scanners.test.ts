@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, readdi
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { runProcess, type ProcessResult } from "../src/runtime/process.js";
 import {
   semgrepArgv,
   shouldUploadSarif,
@@ -33,7 +34,171 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return { ...actual, writeFile: vi.fn(actual.writeFile) };
 });
 
+vi.mock("../src/runtime/process.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/runtime/process.js")>();
+  return { ...actual, runProcess: vi.fn(actual.runProcess) };
+});
+
+it("runExec passes a scrubbed explicit environment to the real child", async () => {
+  const result = await runExec(process.execPath,
+    ["-e", "console.log(JSON.stringify(process.env))"], process.cwd(),
+    { PATH: process.env.PATH, GITHUB_TOKEN: "secret", RUNNER_TEMP: "/owned", NODE_OPTIONS: "--bad" });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ PATH: process.env.PATH, RUNNER_TEMP: "/owned" });
+});
+
+it("owns unique container cleanup names and rejects incomplete SARIF, gitleaks, and SBOM even after zero exit", async () => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  const names: string[] = [];
+  const removals: string[] = [];
+  const clean: ProcessResult = {
+    exitCode: 0, signal: null, stdout: '{"runs":[]}', stderr: "", missing: false, timedOut: false, cancelled: false,
+  };
+  try {
+    vi.mocked(runProcess).mockImplementation(async (command, args, options) => {
+      expect(options.env.GITHUB_TOKEN).toBeUndefined();
+      if (args[0] === "rm") {
+        expect(command).toBe("docker");
+        expect(args.slice(0, 2)).toEqual(["rm", "-f"]);
+        expect(options.timeoutMs).toBe(500);
+        expect(options.signal).toBeUndefined();
+        removals.push(args[2]!);
+        return { ...clean, exitCode: 1 };
+      }
+      if (command === "semgrep") return clean;
+      const name = args[args.indexOf("--name") + 1]!;
+      names.push(name);
+      expect(name).toMatch(/^lupa-[0-9a-f-]{36}$/);
+      expect(options.cleanup).toBeDefined();
+      await expect(options.cleanup!()).rejects.toThrow("owned container cleanup failed");
+      return { ...clean, stdout: args.includes("cyclonedx") ? '{"bomFormat":"CycloneDX"}' : clean.stdout, cleanupFailed: true };
+    });
+    const result = await runScanners({ dir: ".", baselineSha: "abc", sbom: true, lockfiles: ["package-lock.json"] },
+      { env: { PATH: "/test-bin", GITHUB_TOKEN: "secret" } });
+    expect(names).toHaveLength(4);
+    expect(new Set(names).size).toBe(4);
+    expect(removals).toEqual(names);
+    expect(removals).not.toContain("unrelated-container");
+    expect(result.sbomPath).toBeUndefined();
+    expect(result.findings.map((finding) => finding.source)).toEqual(["trivy", "gitleaks", "osv-scanner", "sbom"]);
+    expect(result.findings.every((finding) => finding.rule === "scanner-failed" && finding.message.includes("incomplete"))).toBe(true);
+  } finally {
+    vi.mocked(runProcess).mockImplementation(original);
+  }
+});
+
 // ---- argv / gating / pins ------------------------------------------------
+
+const INTERRUPTED_SARIF = JSON.stringify({ runs: [{
+  invocations: [{ executionSuccessful: true }],
+  results: [{ ruleId: "retained-high", level: "error", message: { text: "unsafe operation" },
+    locations: [{ physicalLocation: { artifactLocation: { uri: "src/a.ts" }, region: { startLine: 2 } } }] }],
+}] });
+const INTERRUPTIONS: { name: string; result: Partial<ProcessResult> }[] = [
+  { name: "cleanup failure after exit zero", result: { exitCode: 0, cleanupFailed: true } },
+  { name: "cancellation after exit zero", result: { exitCode: 0, cancelled: true } },
+  { name: "abnormal termination", result: { exitCode: null, signal: "SIGKILL" } },
+  { name: "timeout after exit zero", result: { exitCode: 0, timedOut: true } },
+];
+const CLEAN_PROCESS: ProcessResult = {
+  exitCode: 0, signal: null, stdout: '{"runs":[]}', stderr: "", missing: false, timedOut: false, cancelled: false,
+};
+
+it.each([0, 1, 2, null])("retains gitleaks report findings and records health for exit %s", async exitCode => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  const report = JSON.parse(INTERRUPTED_SARIF);
+  delete report.runs[0].invocations;
+  try {
+    vi.mocked(runProcess).mockImplementation(async (_command, args) => {
+      const mount = args.find(arg => arg.endsWith(":/out"));
+      if (!mount) return CLEAN_PROCESS;
+      writeFileSync(join(mount.slice(0, -":/out".length), "report.sarif"), JSON.stringify(report));
+      return { ...CLEAN_PROCESS, exitCode };
+    });
+    const r = await runScanners({ dir: ".", baselineSha: "abc" });
+    expect(r.findings).toContainEqual(expect.objectContaining({ rule: "retained-high", severity: "high", source: "gitleaks" }));
+    if (exitCode === 0 || exitCode === 1) {
+      expect(r.stages).toContainEqual({ stage: "gitleaks", status: "ok", required: true, applicable: true });
+      expect(r.findings.some(f => f.rule === "scanner-failed")).toBe(false);
+    } else {
+      expect(r.stages).toContainEqual({ stage: "gitleaks", status: "failed", required: true, applicable: true, reason: exitCode === null ? "execution-incomplete" : "unsuccessful-exit" });
+      expect(r.findings).toContainEqual(expect.objectContaining({ rule: "scanner-failed", source: "gitleaks" }));
+    }
+  } finally { vi.mocked(runProcess).mockImplementation(original); }
+});
+
+it("records structured interruptions, aggregated lockfile failures and optional SBOM failure", async () => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  try {
+    vi.mocked(runProcess).mockResolvedValue({ ...CLEAN_PROCESS, stdout: INTERRUPTED_SARIF, cleanupFailed: true });
+    const r = await runScanners({ dir: ".", baselineSha: "abc", sbom: true, lockfiles: ["a/package-lock.json", "b/package-lock.json"] });
+    expect(r.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "semgrep", status: "failed", required: true }),
+      expect.objectContaining({ stage: "gitleaks", status: "failed", required: true }),
+      expect.objectContaining({ stage: "osv-scanner", status: "failed", reason: expect.stringContaining("2 failed") }),
+      expect.objectContaining({ stage: "sbom", status: "failed", required: false }),
+    ]));
+    expect(r.findings.some(f => f.rule === "retained-high")).toBe(true);
+  } finally { vi.mocked(runProcess).mockImplementation(original); }
+});
+
+it.each(INTERRUPTIONS)("retains bounded stdout findings and failure on $name", async ({ result }) => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  try {
+    for (const stdout of [INTERRUPTED_SARIF, '{"runs":[]}', "", "not SARIF"]) {
+      vi.mocked(runProcess).mockResolvedValue({ ...CLEAN_PROCESS, ...result, stdout });
+      const executed = await runExec("semgrep", [], ".");
+      const findings = fromStdout("semgrep", "semgrep", executed);
+      expect(findings.filter((finding) => finding.rule === "retained-high")).toEqual(
+        stdout === INTERRUPTED_SARIF ? [{
+          severity: "high", file: "src/a.ts", line: 2, rule: "retained-high", message: "unsafe operation",
+          source: "semgrep", confidence: 90, evidence: { analyzer: "semgrep" },
+        }] : []);
+      expect(findings.at(-1)).toMatchObject({ rule: "scanner-failed", severity: "warning", source: "semgrep" });
+      const capped = fromStdout("semgrep", "semgrep", executed, TOOL_TIMEOUT_MS, 1);
+      expect(capped.some((finding) => finding.rule === "retained-high")).toBe(false);
+      expect(capped.some((finding) => finding.rule === "scanner-failed")).toBe(true);
+    }
+  } finally {
+    vi.mocked(runProcess).mockImplementation(original);
+  }
+});
+
+it.each(INTERRUPTIONS)("retains bounded gitleaks report findings and failure on $name", async ({ result }) => {
+  const original = vi.mocked(runProcess).getMockImplementation()!;
+  let reportDir: string | undefined;
+  try {
+    for (const report of [INTERRUPTED_SARIF, '{"runs":[]}', "", "not SARIF", undefined]) {
+      vi.mocked(runProcess).mockImplementation(async (_command, args) => {
+        const mount = args.find((arg) => arg.endsWith(":/out"));
+        if (!mount) return CLEAN_PROCESS;
+        reportDir = mount.slice(0, -":/out".length);
+        if (report !== undefined) writeFileSync(join(reportDir, "report.sarif"), report);
+        return { ...CLEAN_PROCESS, ...result };
+      });
+      const { findings } = await runScanners({ dir: ".", baselineSha: "abc" });
+      expect(findings.filter((finding) => finding.rule === "retained-high")).toEqual(
+        report === INTERRUPTED_SARIF ? [{
+          severity: "high", file: "src/a.ts", line: 2, rule: "retained-high", message: "unsafe operation",
+          source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" },
+        }] : []);
+      expect(findings.at(-1)).toMatchObject({ rule: "scanner-failed", severity: "warning", source: "gitleaks" });
+      expect(existsSync(reportDir!)).toBe(false);
+    }
+  } finally {
+    vi.mocked(runProcess).mockImplementation(original);
+    if (reportDir) rmSync(reportDir, { recursive: true, force: true });
+  }
+});
+
+it("inherits missing SARIF severity from a referenced rule default (synthetic)", () => {
+  const findings = parseSarif(JSON.stringify({ runs: [{
+    tool: { driver: { rules: [{ id: "critical-rule", defaultConfiguration: { level: "error" } }] } },
+    results: [{ ruleId: "critical-rule", message: { text: "issue" } },
+      { ruleIndex: 0, message: { text: "indexed" } }],
+  }] }));
+  expect(findings?.map((finding) => finding.severity)).toEqual(["high", "high"]);
+});
 
 describe("argv builders and gates", () => {
   it("no-token argv uses scan+sarif+baseline-commit and no env", () => {
@@ -231,35 +396,35 @@ describe("parseSarif", () => {
 const FAKE_SEMGREP_CLEAN = `#!/bin/sh\nprintf '%s' '{"runs":[]}'\nexit 0\n`;
 
 /**
- * Fake docker. Records every invocation in $SCAN_LOG; answers the CycloneDX request with
- * a JSON document (or, with $SBOM_MODE=fail|garbage, a failure / non-JSON output); with
- * $EMPTY_TRIVY / $EMPTY_OSV the trivy / osv calls exit 5 / 6 with no stdout; for gitleaks
- * (the only call mounting `:/out`) writes a SARIF report unless $NO_REPORT is set; all
- * other calls exit with $FAKE_EXIT (default 0).
+ * Fake docker. Records every invocation in $RUNNER_SCAN_LOG; answers the CycloneDX request with
+ * a JSON document (or, with $RUNNER_SBOM_MODE=fail|garbage, a failure / non-JSON output); with
+ * $RUNNER_EMPTY_TRIVY / $RUNNER_EMPTY_OSV the trivy / osv calls exit 5 / 6 with no stdout; for gitleaks
+ * (the only call mounting `:/out`) writes a SARIF report unless $RUNNER_NO_REPORT is set; all
+ * other calls exit with $RUNNER_FAKE_EXIT (default 0).
  */
 const FAKE_DOCKER = `#!/bin/sh
-echo "$*" >> "$SCAN_LOG"
+echo "$*" >> "$RUNNER_SCAN_LOG"
 case "$*" in
   *cyclonedx*)
-    case "$SBOM_MODE" in
+    case "$RUNNER_SBOM_MODE" in
       fail) exit 4;;
       garbage) printf '%s' 'nope'; exit 0;;
       valid-nonzero) printf '%s' '{"bomFormat":"CycloneDX"}'; exit 4;;
       no-bomformat) printf '%s' '{}'; exit 0;;
     esac
     printf '%s' '{"bomFormat":"CycloneDX"}'; exit 0;;
-  *--severity*) if [ -n "$EMPTY_TRIVY" ]; then exit 5; fi;;
-  *" -L "*) if [ -n "$EMPTY_OSV" ]; then exit 6; fi;;
+  *--severity*) if [ -n "$RUNNER_EMPTY_TRIVY" ]; then exit 5; fi;;
+  *" -L "*) if [ -n "$RUNNER_EMPTY_OSV" ]; then exit 6; fi;;
 esac
 for a in "$@"; do case "$a" in *:/out) host="\${a%:/out}";; esac; done
 if [ -n "$host" ]; then
-  echo "$host" >> "$SCAN_LOG.reportdirs"
-  if [ -z "$NO_REPORT" ]; then
+  echo "$host" >> "$RUNNER_SCAN_LOG.reportdirs"
+  if [ -z "$RUNNER_NO_REPORT" ]; then
     printf '%s' '{"runs":[{"results":[{"ruleId":"G1","level":"error","message":{"text":"secret"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"x.env"},"region":{"startLine":2}}}]}]}]}' > "$host/report.sarif"
   fi
 fi
 printf '%s' '{"runs":[]}'
-exit "\${FAKE_EXIT:-0}"
+exit "\${RUNNER_FAKE_EXIT:-0}"
 `;
 
 /** Temp dirs created during a test; removed in afterEach so no run leaves scratch dirs behind. */
@@ -288,7 +453,7 @@ describe("runScanners", () => {
     tmp = mkdtempSync(join(tmpdir(), "scan-test-"));
     created = [tmp];
     log = join(tmp, "calls.log");
-    process.env.SCAN_LOG = log;
+    process.env.RUNNER_SCAN_LOG = log;
   });
 
   afterEach(() => {
@@ -296,7 +461,7 @@ describe("runScanners", () => {
     else process.env.PATH = savedPath;
     if (savedTmpdir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = savedTmpdir;
-    for (const k of ["SCAN_LOG", "NO_REPORT", "FAKE_EXIT", "SBOM_MODE", "EMPTY_TRIVY", "EMPTY_OSV"]) {
+    for (const k of ["RUNNER_SCAN_LOG", "RUNNER_NO_REPORT", "RUNNER_FAKE_EXIT", "RUNNER_SBOM_MODE", "RUNNER_EMPTY_TRIVY", "RUNNER_EMPTY_OSV"]) {
       delete process.env[k];
     }
     for (const d of created) rmSync(d, { recursive: true, force: true });
@@ -374,11 +539,11 @@ describe("runScanners", () => {
 
   it("gitleaks exit 0 with no report is clean; non-zero exit with no report is scanner-failed", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.NO_REPORT = "1";
+    process.env.RUNNER_NO_REPORT = "1";
     const clean = await runScanners({ dir: tmp, baselineSha: "abc" });
     expect(clean.findings).toEqual([]);
 
-    process.env.FAKE_EXIT = "3";
+    process.env.RUNNER_FAKE_EXIT = "3";
     const failed = await runScanners({ dir: tmp, baselineSha: "abc" });
     expect(failed.findings).toContainEqual({
       severity: "warning",
@@ -406,7 +571,7 @@ describe("runScanners", () => {
 
   it("sbom non-zero exit with valid CycloneDX stdout is accepted (parity with SARIF)", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.SBOM_MODE = "valid-nonzero";
+    process.env.RUNNER_SBOM_MODE = "valid-nonzero";
     const r = await runScanners({ dir: tmp, baselineSha: "abc", sbom: true, outDir: tmp });
     expect(r.sbomPath).toBeDefined();
     expect(readFileSync(r.sbomPath as string, "utf8")).toBe('{"bomFormat":"CycloneDX"}');
@@ -415,7 +580,7 @@ describe("runScanners", () => {
 
   it("sbom JSON without bomFormat CycloneDX is a scanner-failed warning", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.SBOM_MODE = "no-bomformat";
+    process.env.RUNNER_SBOM_MODE = "no-bomformat";
     const r = await runScanners({ dir: tmp, baselineSha: "abc", sbom: true, outDir: tmp });
     expect(r.sbomPath).toBeUndefined();
     expect(r.findings).toContainEqual({
@@ -444,7 +609,7 @@ describe("runScanners", () => {
 
   it("sbom non-zero exit is a scanner-failed warning and no sbomPath", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.SBOM_MODE = "fail";
+    process.env.RUNNER_SBOM_MODE = "fail";
     const r = await runScanners({ dir: tmp, baselineSha: "abc", sbom: true, outDir: tmp });
     expect(r.sbomPath).toBeUndefined();
     expect(r.findings).toContainEqual({
@@ -458,7 +623,7 @@ describe("runScanners", () => {
 
   it("sbom exit 0 with non-JSON stdout is a scanner-failed warning", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.SBOM_MODE = "garbage";
+    process.env.RUNNER_SBOM_MODE = "garbage";
     const r = await runScanners({ dir: tmp, baselineSha: "abc", sbom: true, outDir: tmp });
     expect(r.sbomPath).toBeUndefined();
     expect(r.findings).toContainEqual({
@@ -479,7 +644,7 @@ describe("runScanners", () => {
 
   it("trivy non-zero exit with empty stdout is a warning", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.EMPTY_TRIVY = "1";
+    process.env.RUNNER_EMPTY_TRIVY = "1";
     const { findings } = await runScanners({ dir: tmp, baselineSha: "abc" });
     expect(findings).toContainEqual({
       severity: "warning",
@@ -492,7 +657,7 @@ describe("runScanners", () => {
 
   it("osv non-zero exit with empty stdout is a warning naming the lockfile", async () => {
     process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-    process.env.EMPTY_OSV = "1";
+    process.env.RUNNER_EMPTY_OSV = "1";
     const { findings } = await runScanners({ dir: tmp, baselineSha: "abc", lockfiles: ["a/package-lock.json"] });
     expect(findings).toContainEqual({
       severity: "warning",
@@ -519,9 +684,9 @@ describe("runScanners", () => {
     process.env.PATH = makeBin({
       semgrep: FAKE_SEMGREP_CLEAN,
       docker: `#!/bin/sh
-echo "$*" >> "$SCAN_LOG"
+echo "$*" >> "$RUNNER_SCAN_LOG"
 for a in "$@"; do case "$a" in *:/out) host="\${a%:/out}";; esac; done
-if [ -n "$host" ]; then echo "$host" >> "$SCAN_LOG.reportdirs"; fi
+if [ -n "$host" ]; then echo "$host" >> "$RUNNER_SCAN_LOG.reportdirs"; fi
 /bin/sleep 3
 exit 0
 `,
@@ -814,7 +979,7 @@ describe("artifact byte caps (F15)", () => {
     const tmp = mkdtempSync(join(tmpdir(), "scan-cap-"));
     try {
       process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-      process.env.SCAN_LOG = join(tmp, "calls.log");
+      process.env.RUNNER_SCAN_LOG = join(tmp, "calls.log");
       const { findings } = await runScanners({ dir: tmp, baselineSha: "abc", maxArtifactBytes: 20 });
       expect(findings).toEqual([
         { severity: "warning", file: "", rule: "scanner-failed", message: "gitleaks output exceeds the artifact read limit (20 bytes); results dropped", source: "gitleaks" },
@@ -822,7 +987,7 @@ describe("artifact byte caps (F15)", () => {
     } finally {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
-      delete process.env.SCAN_LOG;
+      delete process.env.RUNNER_SCAN_LOG;
       rmSync(tmp, { recursive: true, force: true });
     }
   });
@@ -832,8 +997,8 @@ describe("artifact byte caps (F15)", () => {
     const tmp = mkdtempSync(join(tmpdir(), "scan-cap-"));
     try {
       process.env.PATH = makeBin({ semgrep: FAKE_SEMGREP_CLEAN, docker: FAKE_DOCKER });
-      process.env.SCAN_LOG = join(tmp, "calls.log");
-      process.env.NO_REPORT = "1"; // keep gitleaks quiet so only the SBOM warning remains
+      process.env.RUNNER_SCAN_LOG = join(tmp, "calls.log");
+      process.env.RUNNER_NO_REPORT = "1"; // keep gitleaks quiet so only the SBOM warning remains
       const r = await runScanners({ dir: tmp, baselineSha: "abc", sbom: true, outDir: tmp, maxArtifactBytes: 10 });
       expect(r.sbomPath).toBeUndefined();
       expect(r.findings).toContainEqual({
@@ -846,8 +1011,8 @@ describe("artifact byte caps (F15)", () => {
     } finally {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
-      delete process.env.SCAN_LOG;
-      delete process.env.NO_REPORT;
+      delete process.env.RUNNER_SCAN_LOG;
+      delete process.env.RUNNER_NO_REPORT;
       rmSync(tmp, { recursive: true, force: true });
     }
   });

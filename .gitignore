@@ -1,2 +1,7 @@
 node_modules/
 lib/
+
+# Local audit reports and Superpowers planning/execution records.
+/.local/
+/.superpowers/
+/docs/superpowers/

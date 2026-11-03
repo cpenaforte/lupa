@@ -35,6 +35,7 @@ jobs:
       && github.event.workflow_run.event == 'pull_request'
       && github.event.workflow_run.head_repository.full_name != github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Create GitHub App token (optional; App tokens may write on fork PRs)
         id: app
@@ -69,6 +70,7 @@ jobs:
           for f in diff.patch pr-meta.json findings.json; do
             test -s "$ARTIFACT_DIR/$f" || { echo "lupa: missing $f in artifact" >&2; exit 1; }
           done
+          # analysis.json is optional for legacy producers; missing coverage is reported unavailable.
 
       - name: Post review
         # Reporting only: it does not gate merges (the PR run's gate does).
@@ -80,5 +82,8 @@ jobs:
           PR_REVIEWER_ISSUE_FALLBACK: "false"
         with:
           github_token: ${{ steps.app.outputs.token || github.token }}
+          review_actor: ${{ vars.PR_REVIEWER_ACTOR }}
           post_comment: "true"
           fail_level: warning
+          # Trusted publication policy; producer analysis.json cannot override this input.
+          analysis_policy: advisory

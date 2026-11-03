@@ -53,6 +53,7 @@ jobs:
       group: pr-reviewer-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
     steps:
@@ -130,6 +131,7 @@ jobs:
           PR_REVIEWER_ISSUE_FALLBACK: "false"
         with:
           github_token: ${{ github.token }}
+          review_actor: ${{ vars.PR_REVIEWER_ACTOR }}
           pr_number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
           # llm_api_style is optional. Values:
           #   auto (default)      error-driven probe (no model map): tries openai-chat, openai-responses,
@@ -145,6 +147,8 @@ jobs:
           llm_model: ${{ vars.PR_REVIEWER_MODEL }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
           fail_level: warning
+          # Opt in to required only after configuring the documented analysis profile.
+          analysis_policy: advisory
 
       # This step is evaluated on every event. Its guard checks only that the event has a same-repository
       # PR head. It needs BOTH security-events: write and actions: read (commented out above); without
@@ -177,10 +181,12 @@ jobs:
             ${{ runner.temp }}/pr-reviewer-out/diff.patch
             ${{ runner.temp }}/pr-reviewer-out/pr-meta.json
             ${{ runner.temp }}/pr-reviewer-out/findings.json
+            ${{ runner.temp }}/pr-reviewer-out/analysis.json
             ${{ runner.temp }}/pr-reviewer-out/sarif.json
             ${{ runner.temp }}/pr-reviewer-out/sbom.cdx.json
 
       - name: Enforce fail_level (warning check never blocks)
+        # Required non-complete analysis reports 3; a missing output also fails this gate.
         if: always()
         env:
           EXIT_CODE: ${{ steps.review.outputs.exit-code }}

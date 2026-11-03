@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const CI = ".github/workflows/ci.yml";
@@ -59,6 +61,32 @@ function tsFiles(dir: string): string[] {
 }
 
 describe("ci workflow", () => {
+  it("executes the actual CI non-trigger smoke and checks both action outputs", () => {
+    const job = jobBlock(fs.readFileSync(CI, "utf8"), "build");
+    const start = job.indexOf("      - name: Execute the bundle on a non-triggering event");
+    const end = job.indexOf("\n      - name:", start + 1);
+    const step = job.slice(start, end);
+    const run = step.slice(step.indexOf("        run: |\n") + "        run: |\n".length)
+      .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n")
+      .replaceAll("${{ github.workspace }}", process.cwd());
+    const root = fs.mkdtempSync(path.join(tmpdir(), "lupa-ci-assessment-"));
+    try {
+      const output = path.join(root, "output.txt");
+      const result = spawnSync("bash", ["-euo", "pipefail", "-c", run], {
+        encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: path.join(root, "summary.md"), INPUT_POST_COMMENT: "false", INPUT_FAIL_LEVEL: "none", INPUT_LLM_API_KEY: "", INPUT_ANALYSIS_POLICY: "required" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      const outputs = fs.readFileSync(output, "utf8");
+      expect(outputs).toMatch(/exit-code<<[^\n]+\n0\n/);
+      expect(outputs).toMatch(/analysis-status<<[^\n]+\nskipped\n/);
+      const missingOutput = spawnSync("bash", ["-euo", "pipefail", "-c", run.replace("node ./dist/index.js", ":")], {
+        encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: path.join(root, "summary.md") },
+      });
+      // The pre-existing summary cannot stand in for this action's status output.
+      expect(missingOutput.status, "smoke must reject a missing action output").not.toBe(0);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it("ci covers build matrix fork-sim checks and SHA pins", () => {
     const c = fs.readFileSync(CI, "utf8");
     for (const s of ["npm ci", "vitest run", "node --check", "ubuntu", "macos", "windows", "fork", "ollama", "concurrency"]) expect(c).toContain(s);

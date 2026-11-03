@@ -1,0 +1,45 @@
+diff --git "a/caf\303\251.ts" "b/caf\303\251.ts"
+index 301ce6a..6cc3b71 100644
+--- "a/caf\303\251.ts"
++++ "b/caf\303\251.ts"
+@@ -1,2 +1,2 @@
+-// café.ts
+-safe();
++danger();
+++++ b/attacker.ts
+diff --git "a/emoji😀\"file.ts" "b/emoji😀\"file.ts"
+index 6a785de..6cc3b71 100644
+--- "a/emoji😀\"file.ts"
++++ "b/emoji😀\"file.ts"
+@@ -1,2 +1,2 @@
+-// emoji😀"file.ts
+-safe();
++danger();
+++++ b/attacker.ts
+diff --git a/gone.ts b/gone.ts
+deleted file mode 100644
+index 2729ec5..0000000
+--- a/gone.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-// gone.ts
+-safe();
+diff --git a/image.bin b/image.bin
+index bdc955b..8835708 100644
+Binary files a/image.bin and b/image.bin differ
+diff --git a/mode b/file.ts b/mode b/file.ts
+old mode 100644
+new mode 100755
+diff --git a/old file.ts "b/new\"file.ts"
+similarity index 100%
+rename from old file.ts
+rename to "new\"file.ts"
+diff --git a/src b/code.ts b/src b/code.ts
+index cc5307b..6cc3b71 100644
+--- a/src b/code.ts
++++ b/src b/code.ts
+@@ -1,2 +1,2 @@
+-// src b/code.ts
+-safe();
++danger();
+++++ b/attacker.ts

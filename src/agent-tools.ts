@@ -1,3 +1,4 @@
+import { requestExpired, type RequestContext } from "./runtime/context.js";
 import { closeSync, type Dirent, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -9,9 +10,62 @@ export interface ToolRoots {
   linked?: Map<string, string>;
 }
 
+/**
+ * `recoverable` marks an error the model can correct by retrying with a different
+ * lookup or arguments. Only recoverable errors leave analysis coverage unaffected.
+ */
+export type ToolObservation = { tool: string; isError: boolean; truncated: boolean; recoverable: boolean };
+
+/**
+ * Error messages that name a lookup mistake the model can correct by choosing another
+ * path, pattern, range or linked alias. Matched on the whole message shape: a generic
+ * I/O failure, a clone failure or a deadline must never match. The tests pin each
+ * pattern against the message the tool actually produces; keep the two in step.
+ */
+const RECOVERABLE_ERROR_PATTERNS: readonly RegExp[] = [
+  /^path not accessible: /,
+  /^invalid regex: /,
+  /^invalid line range: /,
+  /^file not found: /,
+  /^not a file: /,
+  /^directory not found: /,
+  /^not a directory: /,
+  /^repository not linked: [^:]+$/,
+  /^file too large: /,
+];
+// Malformed or unknown calls (`invalid tool arguments`, `unknown tool`) are deliberately NOT
+// recoverable: the required-policy eval pins them as an execution deficit. Unreadable paths,
+// clone failures and deadlines are not recoverable either.
+
+export function isRecoverableToolError(output: string): boolean {
+  let message: unknown;
+  try {
+    message = (JSON.parse(output) as { error?: unknown }).error;
+  } catch {
+    return false;
+  }
+  return typeof message === "string" && RECOVERABLE_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/** Lookup mistakes (missing or wrong-type path) get their own recoverable message; other I/O failures stay generic. */
+function fsErrorMessage(error: unknown, kind: "file" | "directory", rel: string): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (kind === "file") {
+    // ENOTDIR: a parent component is a file, so the requested path does not exist.
+    if (code === "ENOENT" || code === "ENOTDIR") return `file not found: ${rel}`;
+    if (code === "EISDIR") return `not a file: ${rel}`;
+    return `cannot read file: ${rel}`;
+  }
+  if (code === "ENOENT") return `directory not found: ${rel}`;
+  if (code === "ENOTDIR") return `not a directory: ${rel}`;
+  return `cannot list directory: ${rel}`;
+}
+
 export interface ToolContext {
+  observe?: (event: ToolObservation) => void;
+  context?: RequestContext;
   roots: ToolRoots;
-  ensureLinked?: (alias: string, opts?: { deadlineMs?: number }) => Promise<{ dir: string; sha: string } | { error: string }>;
+  ensureLinked?: (alias: string, opts?: { deadlineMs?: number; context?: RequestContext }) => Promise<{ dir: string; sha: string } | { error: string }>;
 }
 
 const DRIVE_LETTER = /^[a-zA-Z]:/;
@@ -128,15 +182,23 @@ function okResult(payload: unknown): { output: string; isError: boolean } {
 }
 
 async function resolveRoot(repo: unknown, ctx: ToolContext, deadlineMs?: number): Promise<string | { error: string }> {
+  if (requestExpired(ctx.context)) return { error: "tool request cancelled" };
   const alias = repo === undefined || repo === null || repo === "" ? "self" : String(repo);
   if (alias === "self") return ctx.roots.self;
   const linked = ctx.roots.linked?.get(alias);
   if (linked) return linked;
   if (ctx.ensureLinked) {
-    const res = deadlineMs !== undefined ? await ctx.ensureLinked(alias, { deadlineMs }) : await ctx.ensureLinked(alias);
+    const res = deadlineMs !== undefined || ctx.context !== undefined
+      ? await ctx.ensureLinked(alias, { deadlineMs, ...(ctx.context ? { context: ctx.context } : {}) })
+      : await ctx.ensureLinked(alias);
     if ("dir" in res) return res.dir;
+    // The gate's refusal (an alias outside the declared linked set) is a lookup mistake and
+    // passes through unchanged. Clone, size and deadline failures are masked: the model gets a
+    // deterministic, non-recoverable message and never the git detail.
+    if (res.error === `repository not linked: ${alias}`) return { error: res.error };
+    return { error: `repository unavailable: ${alias}` };
   }
-  return { error: `repository not accessible: ${alias}` };
+  return { error: `repository not linked: ${alias}` };
 }
 
 async function rootFor(args: Record<string, unknown>, ctx: ToolContext, deadlineMs?: number): Promise<{ root: string } | { error: string }> {
@@ -147,6 +209,7 @@ async function rootFor(args: Record<string, unknown>, ctx: ToolContext, deadline
 
 async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: { maxBytes?: number; endMs?: number }): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" ? args.path : "";
@@ -156,8 +219,8 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: 
   let size: number;
   try {
     size = statSync(target).size;
-  } catch {
-    return errorResult(`cannot read file: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "file", rel));
   }
   if (size > READ_MAX_BYTES) {
     return errorResult(
@@ -168,8 +231,8 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: 
   let raw: string;
   try {
     raw = readFileSync(target, "utf8");
-  } catch {
-    return errorResult(`cannot read file: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "file", rel));
   }
 
   const lines = raw.split("\n");
@@ -219,6 +282,7 @@ interface DirEntry {
 
 async function listDir(args: Record<string, unknown>, ctx: ToolContext, endMs?: number, maxBytes?: number): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   const rel = typeof args.path === "string" && args.path !== "" ? args.path : ".";
@@ -228,8 +292,8 @@ async function listDir(args: Record<string, unknown>, ctx: ToolContext, endMs?: 
   let dirents;
   try {
     dirents = readdirSync(target, { withFileTypes: true });
-  } catch {
-    return errorResult(`cannot list directory: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "directory", rel));
   }
 
   const entries: DirEntry[] = [];
@@ -582,7 +646,8 @@ type GrepWorkerResult =
   | { isError: true; output: string }
   | { isError: false; matches: GrepMatch[]; filesScanned: number; hitLimit: boolean };
 
-function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeoutMs: number): Promise<GrepWorkerResult> {
+function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeoutMs: number, context?: RequestContext): Promise<GrepWorkerResult> {
+  if (requestExpired(context)) return Promise.resolve({ isError: true, output: errorResult("grep cancelled").output });
   return new Promise((resolvePromise) => {
     let worker: Worker;
     try {
@@ -601,10 +666,13 @@ function runGrepWorker(pattern: string, files: WalkFile[], limit: number, timeou
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      void worker.terminate();
-      resolvePromise(result);
+      context?.signal.removeEventListener("abort", cancel);
+      void worker.terminate().then(() => resolvePromise(result), () => resolvePromise(result));
     };
+    const cancel = (): void => finish({ isError: true, output: errorResult("grep cancelled").output });
     timer = setTimeout(() => finish({ isError: true, output: errorResult("grep timed out").output }), timeoutMs);
+    context?.signal.addEventListener("abort", cancel, { once: true });
+    if (context?.signal.aborted) cancel();
 
     worker.on("message", (msg: { matches: GrepMatch[]; filesScanned: number; hitLimit: boolean }) => {
       finish({ isError: false, matches: msg.matches, filesScanned: msg.filesScanned, hitLimit: msg.hitLimit });
@@ -634,6 +702,7 @@ export async function grepInRoot(
   limits?: WalkLimits,
   endMs?: number,
   maxBytes?: number,
+  context?: RequestContext,
 ): Promise<{ output: string; isError: boolean }> {
   const pattern = typeof args.pattern === "string" ? args.pattern : "";
   try {
@@ -672,7 +741,7 @@ export async function grepInRoot(
   const limit = Number.isFinite(requested) ? Math.max(0, Math.min(requested, GREP_MAX_MATCHES)) : GREP_MAX_MATCHES;
 
   const effectiveTimeout = endMs === undefined ? timeoutMs : Math.min(timeoutMs, Math.max(0, endMs - Date.now()));
-  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout);
+  const outcome = await runGrepWorker(pattern, files, limit, effectiveTimeout, context);
   if (outcome.isError) return { output: outcome.output, isError: true };
 
   const { matches, filesScanned, hitLimit } = outcome;
@@ -696,6 +765,7 @@ export async function grepInRoot(
 
 async function grep(args: Record<string, unknown>, ctx: ToolContext, opts?: { timeoutMs?: number; endMs?: number; maxBytes?: number }): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, opts?.endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
   return grepInRoot(
     resolvedRoot.root,
@@ -709,11 +779,13 @@ async function grep(args: Record<string, unknown>, ctx: ToolContext, opts?: { ti
     undefined,
     opts?.endMs,
     opts?.maxBytes,
+    ctx.context,
   );
 }
 
 async function glob(args: Record<string, unknown>, ctx: ToolContext, endMs?: number, maxBytes?: number): Promise<{ output: string; isError: boolean }> {
   const resolvedRoot = await rootFor(args, ctx, endMs);
+  if (requestExpired(ctx.context)) return errorResult("tool request cancelled");
   if ("error" in resolvedRoot) return errorResult(resolvedRoot.error);
 
   if (endMs !== undefined && endMs - Date.now() <= 0) {
@@ -769,7 +841,6 @@ export const TOOL_DEFS: readonly ToolDef[] = [
         path: { type: "string", description: "Repository-relative directory path. Defaults to the repository root." },
         repo: { type: "string", description: "Repository alias; omit or use \"self\" for the reviewed repository." },
       },
-      required: ["path"],
     },
   },
   {
@@ -801,14 +872,59 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
 ];
 
-export async function executeTool(
+/** Validate wire argument shapes before resolving repositories or touching files.
+ * Numeric range and integer rules remain with the individual tools.
+ */
+export function validateToolArgs(name: string, args: unknown):
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; message: string } {
+  const definition = TOOL_DEFS.find((tool) => tool.name === name);
+  if (!definition) return { ok: false, message: `unknown tool: ${name}` };
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return { ok: false, message: `invalid tool arguments for ${name}: expected an object` };
+  }
+  const values = args as Record<string, unknown>;
+  // Copied lazily: the caller's object is returned unchanged unless a null optional is dropped.
+  let out = values;
+  const required = definition.parameters.required as string[] | undefined;
+  const properties = definition.parameters.properties as Record<string, { type: string }>;
+  for (const [field, schema] of Object.entries(properties)) {
+    if (!Object.prototype.hasOwnProperty.call(values, field)) {
+      if (required?.includes(field)) {
+        return { ok: false, message: `invalid tool arguments for ${name}: ${field} is required` };
+      }
+      continue;
+    }
+    // `null` on an optional field means "omitted" (some providers send it that way).
+    if (values[field] === null && !required?.includes(field)) {
+      if (out === values) out = { ...values };
+      delete out[field];
+      continue;
+    }
+    const primitive = schema.type === "integer" ? "number" : schema.type;
+    if (typeof values[field] !== primitive) {
+      return { ok: false, message: `invalid tool arguments for ${name}: ${field} must be a ${primitive}` };
+    }
+  }
+  return { ok: true, args: out };
+}
+
+async function dispatchTool(
   name: string,
   args: unknown,
   ctx: ToolContext,
-  limits?: { deadlineMs?: number; maxResultBytes?: number },
+  limits?: { deadlineMs?: number; maxResultBytes?: number; context?: RequestContext },
 ): Promise<{ output: string; isError: boolean }> {
-  const a: Record<string, unknown> = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const context = limits?.context ?? ctx.context;
+  if (requestExpired(context)) return errorResult("tool request cancelled");
+  if (context !== undefined) {
+    ctx = { ...ctx, context };
+    limits = { ...limits, deadlineMs: Math.min(limits?.deadlineMs ?? Infinity, context.deadlineMs) };
+  }
   try {
+    const validated = validateToolArgs(name, args);
+    if (!validated.ok) return errorResult(validated.message);
+    const a = validated.args;
     switch (name) {
       case "read_file":
         return await readFile(a, ctx, { maxBytes: limits?.maxResultBytes, endMs: limits?.deadlineMs });
@@ -824,4 +940,16 @@ export async function executeTool(
   } catch (e) {
     return errorResult(e instanceof Error ? e.message : String(e));
   }
+}
+
+export async function executeTool(
+  name: string, args: unknown, ctx: ToolContext,
+  limits?: { deadlineMs?: number; maxResultBytes?: number; context?: RequestContext },
+): Promise<{ output: string; isError: boolean }> {
+  const result = await dispatchTool(name, args, ctx, limits);
+  let truncated = false;
+  try { truncated = JSON.parse(result.output).truncated === true; } catch { /* error envelope */ }
+  const recoverable = result.isError && isRecoverableToolError(result.output);
+  ctx.observe?.({ tool: name, isError: result.isError, truncated, recoverable });
+  return result;
 }

@@ -8,6 +8,7 @@ import {
 
 const INPUT_NAMES = [
   "github_token",
+  "review_actor",
   "llm_provider",
   "llm_base_url",
   "llm_api_style",
@@ -18,6 +19,7 @@ const INPUT_NAMES = [
   "llm_top_p",
   "pr_number",
   "fail_level",
+  "analysis_policy",
   "max_diff_chars",
   "max_prompt_chars",
   "post_comment",
@@ -61,9 +63,11 @@ afterEach(() => {
 describe("getInputs defaults", () => {
   it("defaults match spec", () => {
     const i = getInputs();
+    expect(i.reviewActor).toBeUndefined();
     expect(i.llmProvider).toBe("openai");
     expect(i.llmApiStyle).toBe("auto");
     expect(i.failLevel).toBe("warning");
+    expect(i.analysisPolicy).toBe("advisory");
     expect(i.maxDiffChars).toBe(60000);
     expect(i.maxPromptChars).toBe(120000);
     expect(i.timeoutSeconds).toBe(90);
@@ -79,6 +83,30 @@ describe("getInputs defaults", () => {
     expect(i.maxInlineComments).toBe(30);
     expect(i.maxReviewBodyChars).toBe(60000);
     expect(i.maxArtifactBytes).toBe(8388608);
+  });
+});
+
+describe("getInputs analysis_policy", () => {
+  it.each(["advisory", "required"])("accepts the %s profile", (analysis_policy) => {
+    setInputs({ analysis_policy });
+    expect(getInputs().analysisPolicy).toBe(analysis_policy);
+  });
+
+  it.each(["strict", "Required", "none"])("rejects unknown profile %s", (analysis_policy) => {
+    setInputs({ analysis_policy });
+    expect(() => getInputs()).toThrow(/analysis_policy/);
+  });
+});
+
+describe("getInputs review_actor", () => {
+  it("accepts a trusted bot login", () => {
+    setInputs({ review_actor: "Lupa-Bot[bot]" });
+    expect(getInputs().reviewActor).toBe("Lupa-Bot[bot]");
+  });
+
+  it.each([" bot", "bot ", "bot\n", "a b", "bot\u0001", "[bot]", "**bot**"])("rejects unsafe actor %j without trimming", (review_actor) => {
+    setInputs({ review_actor });
+    expect(() => getInputs()).toThrow(/review_actor/);
   });
 });
 
@@ -313,6 +341,21 @@ describe("getInputs agent inputs", () => {
     expect(() => getInputs()).toThrow(/llm_agent_max_seconds/);
   });
 
+  it.each(["0", "1", "10"])("rejects llm_agent_max_seconds = %s (under the 10s reserve plus one model call)", (value) => {
+    setInputs({ llm_agent_max_seconds: value });
+    expect(() => getInputs()).toThrow(/llm_agent_max_seconds.*between 11 and 21600/);
+  });
+
+  it.each(["21601", "2147484"])("rejects llm_agent_max_seconds = %s (above the 6 hour job limit)", (value) => {
+    setInputs({ llm_agent_max_seconds: value });
+    expect(() => getInputs()).toThrow(/llm_agent_max_seconds.*between 11 and 21600/);
+  });
+
+  it.each(["11", "180", "21600"])("accepts llm_agent_max_seconds = %s", (value) => {
+    setInputs({ llm_agent_max_seconds: value });
+    expect(getInputs().llmAgentMaxSeconds).toBe(Number(value));
+  });
+
   it("rejects invalid llm_agent naming the input", () => {
     setInputs({ llm_agent: "yes" });
     expect(() => getInputs()).toThrow(/llm_agent/);
@@ -351,9 +394,20 @@ describe("getInputs aggregate limits (F15)", () => {
 
   it.each([
     ["max_inline_comments", "0"],
-    ["max_artifact_bytes", "0"],
   ])("rejects %s = 0 (must be >= 1)", (name, v) => {
     setInputs({ [name]: v });
     expect(() => getInputs()).toThrow(new RegExp(name));
+  });
+
+  it.each(["0", "1", "1023"])("rejects max_artifact_bytes = %s below the minimum assessment record", (v) => {
+    setInputs({ max_artifact_bytes: v });
+    expect(() => getInputs()).toThrow(/max_artifact_bytes.*>= 1024/);
+  });
+
+  it("requires max_artifact_bytes to fit the minimal assessment record", () => {
+    setInputs({ max_artifact_bytes: "1023" });
+    expect(() => getInputs()).toThrow(/max_artifact_bytes.*>= 1024/);
+    setInputs({ max_artifact_bytes: "1024" });
+    expect(getInputs().maxArtifactBytes).toBe(1024);
   });
 });

@@ -7,6 +7,7 @@ vi.mock("@actions/core", async (importOriginal) => {
 import {
   fetchActor,
   listReviewThreads,
+  readReviewThreads,
   ReadonlyTokenError,
   StaleHeadError,
   getRepoSize,
@@ -181,6 +182,14 @@ describe("shouldTrigger", () => {
 });
 
 describe("postReview", () => {
+  it("escapes hostile file locators on the off-diff retry", async () => {
+    const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
+    const path = "src/[a].ts\n```suggestion\nreplace()\n```";
+    await postReview(f.octokit, 7, { ...payload, comments: [{ path, line: 2, side: "RIGHT", body: "safe prose" }] });
+    const body = String(f.reviewArgs[1].body);
+    expect(body).not.toMatch(/^[ \t]{0,3}(`{3,}|~{3,})suggestion\b/gmi);
+    expect(body).toContain("src\\/\\[a\\]\\.ts");
+  });
   it("422 off-diff degrades to general and retries once; stale sha throws StaleHeadError", async () => {
     const calls: string[] = [];
     const r = await postReviewWithMock(calls);
@@ -208,7 +217,7 @@ describe("postReview", () => {
     await postReview(f.octokit, 7, payload);
     const retry = f.reviewArgs[1];
     expect(retry.comments).toEqual([]);
-    expect(String(retry.body)).toContain("a.ts:4");
+    expect(String(retry.body)).toContain("a\\.ts\\:4");
     expect(String(retry.body)).toContain("**high** [r] m");
     expect(retry.pull_number).toBe(7);
     expect(retry.owner).toBe("owner");
@@ -223,7 +232,7 @@ describe("postReview", () => {
     const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
     await postReview(f.octokit, 1, multi);
     const body = String(f.reviewArgs[1].body);
-    expect(body).toContain("- b.ts:9\n  **medium** [r] first\n  second line\n  third line");
+    expect(body).toContain("- b\\.ts\\:9\n  **medium** [r] first\n  second line\n  third line");
   });
 
   it("CRLF and stray CR in a comment body are normalized before the fold indent", async () => {
@@ -234,7 +243,7 @@ describe("postReview", () => {
     const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
     await postReview(f.octokit, 1, crlf);
     const body = String(f.reviewArgs[1].body);
-    expect(body).toContain("- c.ts:2\n  first\n  second\n  third");
+    expect(body).toContain("- c\\.ts\\:2\n  first\n  second\n  third");
     expect(body).not.toContain("\r");
   });
 
@@ -246,7 +255,7 @@ describe("postReview", () => {
     const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
     await postReview(f.octokit, 1, trailing);
     const body = String(f.reviewArgs[1].body);
-    expect(body.endsWith("- d.ts:5\n  only line")).toBe(true);
+    expect(body.endsWith("- d\\.ts\\:5\n  only line")).toBe(true);
     expect(body).not.toMatch(/\n[ \t]+$/);
   });
 
@@ -259,7 +268,7 @@ describe("postReview", () => {
       const f = fakeOctokit([httpError(422, OFF_DIFF_MSG, OFF_DIFF_ERRORS), "ok"]);
       await postReview(f.octokit, 1, empty);
       const folded = String(f.reviewArgs[1].body);
-      expect(folded.endsWith("- e.ts:6")).toBe(true);
+      expect(folded.endsWith("- e\\.ts\\:6")).toBe(true);
       expect(folded).not.toMatch(/\n[ \t]*$/);
     }
   });
@@ -406,9 +415,9 @@ describe("postReview fold non-blocking markers", () => {
       commentKeys: [keyFor("rA", "a.ts", 4), keyFor("rB", "b.ts", 9)],
     });
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).toContain("- a.ts:4 (non-blocking)");
-    expect(body).toContain("- b.ts:9\n ");
-    expect(body).not.toContain("- b.ts:9 (non-blocking)");
+    expect(body).toContain("- a\\.ts\\:4 (non-blocking)");
+    expect(body).toContain("- b\\.ts\\:9\n ");
+    expect(body).not.toContain("- b\\.ts\\:9 (non-blocking)");
   });
 
   it("treats a null key as blocking (no marker)", async () => {
@@ -418,8 +427,8 @@ describe("postReview fold non-blocking markers", () => {
       commentKeys: [null, keyFor("rB", "b.ts", 9)],
     });
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).not.toContain("- a.ts:4 (non-blocking)");
-    expect(body).toContain("- a.ts:4\n ");
+    expect(body).not.toContain("- a\\.ts\\:4 (non-blocking)");
+    expect(body).toContain("- a\\.ts\\:4\n ");
   });
 
   it("treats a length mismatch as blocking (no marker on the unkeyed tail)", async () => {
@@ -429,20 +438,33 @@ describe("postReview fold non-blocking markers", () => {
       commentKeys: [keyFor("rA", "a.ts", 4)],
     });
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).toContain("- a.ts:4 (non-blocking)");
-    expect(body).not.toContain("- b.ts:9 (non-blocking)");
+    expect(body).toContain("- a\\.ts\\:4 (non-blocking)");
+    expect(body).not.toContain("- b\\.ts\\:9 (non-blocking)");
   });
 
   it("emits no markers without blocking keys (hand-built comments stay marker-free)", async () => {
     const f = fakeOctokit([offDiff(), "ok"]);
     await postReview(f.octokit, 1, blockingPayload);
     const body = String(f.reviewArgs[1]!.body);
-    expect(body).toContain("- a.ts:4\n ");
+    expect(body).toContain("- a\\.ts\\:4\n ");
     expect(body).not.toContain("(non-blocking)");
   });
 });
 
 describe("getRepoSize", () => {
+  it("passes cancellation into the Octokit metadata request", async () => {
+    const controller = new AbortController();
+    let received: AbortSignal | undefined;
+    const client = {
+      rest: { repos: { get: async (options: { request?: { signal?: AbortSignal } }) => {
+        received = options.request?.signal;
+        return { data: { size: 4321 } };
+      } } },
+    } as unknown as Octokit;
+    expect(await getRepoSize(client, "o", "r", { signal: controller.signal })).toBe(4321);
+    expect(received).toBe(controller.signal);
+  });
+
   it("getRepoSize returns the Octokit size in KB and undefined on error", async () => {
     const ok = { rest: { repos: { get: async () => ({ data: { size: 4321 } }) } } } as unknown as Octokit;
     await expect(getRepoSize(ok, "o", "r")).resolves.toBe(4321);
@@ -525,7 +547,7 @@ describe("postReview fold re-cap", () => {
     expect(retry).not.toContain("99999");
     expect(noteCount(retry)).toBe(1);
     expect(retry.endsWith("> Note: review body truncated to the 500-character limit.")).toBe(true);
-    expect(retry).toContain("- a.ts:4");
+    expect(retry).toContain("- a\\.ts\\:4");
   });
 
   it("backs up before an indented folded fence when the cut lands inside it", async () => {
@@ -557,7 +579,7 @@ describe("postReview fold re-cap", () => {
     await postReview(f.octokit, 1, testPayload, { maxBodyChars: 60000 });
     const retry = String(f.reviewArgs[1].body);
     expect(noteCount(retry)).toBe(0);
-    expect(retry).toContain("- a.ts:4");
+    expect(retry).toContain("- a\\.ts\\:4");
   });
 });
 
@@ -630,6 +652,50 @@ describe("listReviewThreads", () => {
     const out = await listReviewThreads(octokit, "o", "r", 7);
     expect(out[0]!.authorLogin).toBeNull();
   });
+
+  it("returns structured health for a complete read", async () => {
+    const { octokit } = gqlOk([threadNode()]);
+    const r = await readReviewThreads(octokit, "o", "r", 7);
+    expect(r.health).toBe("ok");
+    expect(r.threads).toEqual([expect.objectContaining({ path: "a.ts", rule: "r" })]);
+  });
+
+  it("reports truncation while retaining the newest 100", async () => {
+    const { octokit } = gqlOk([threadNode()], true);
+    const r = await readReviewThreads(octokit, "o", "r", 7);
+    expect(r).toMatchObject({ health: "truncated", reason: "more-than-100-threads" });
+    expect(r.threads).toHaveLength(1);
+  });
+
+  it("reports malformed and failed reads without leaking the remote error", async () => {
+    const malformed = { graphql: vi.fn(async () => ({ repository: { pullRequest: { reviewThreads: {} } } })) } as unknown as Octokit;
+    await expect(readReviewThreads(malformed, "o", "r", 7)).resolves.toEqual({ threads: [], health: "unavailable", reason: "malformed-response" });
+    const failed = { graphql: vi.fn(async () => { throw new Error("secret-token"); }) } as unknown as Octokit;
+    const r = await readReviewThreads(failed, "o", "r", 7);
+    expect(r).toEqual({ threads: [], health: "unavailable", reason: "graphql-error" });
+    expect(JSON.stringify(r)).not.toContain("secret-token");
+  });
+
+  it.each([
+    ["missing", { nodes: [threadNode()] }],
+    ["null", { pageInfo: null, nodes: [threadNode()] }],
+    ["non-boolean", { pageInfo: { hasPreviousPage: "false" }, nodes: [threadNode()] }],
+  ] as const)("reports a %s pageInfo as malformed", async (_label, reviewThreads) => {
+    const octokit = {
+      graphql: vi.fn(async () => ({ repository: { pullRequest: { reviewThreads } } })),
+    } as unknown as Octokit;
+    await expect(readReviewThreads(octokit, "o", "r", 7)).resolves.toEqual({
+      threads: [], health: "unavailable", reason: "malformed-response",
+    });
+  });
+
+  it("does not log from the structured read; the compatibility wrapper warns without the remote error", async () => {
+    const failed = { graphql: vi.fn(async () => { throw new Error("secret-token"); }) } as unknown as Octokit;
+    await readReviewThreads(failed, "o", "r", 7);
+    expect(vi.mocked(core.warning)).not.toHaveBeenCalled();
+    await listReviewThreads(failed, "o", "r", 7);
+    expect(vi.mocked(core.warning).mock.calls.map(([m]) => String(m))).toEqual(["lupa: review-thread re-read failed; gating on diff membership only"]);
+  });
 });
 
 describe("fetchActor", () => {
@@ -672,17 +738,28 @@ describe("fetchActor", () => {
     expect(listReviews).not.toHaveBeenCalled();
   });
 
-  it("falls back to the newest lupa-body review across pages (match on page two wins)", async () => {
-    const { octokit, paginate } = actorOk({
+  it("never authenticates review prose, even after a genuine bot review", async () => {
+    const { octokit, paginate, listReviews } = actorOk({
       authed: new Error("403"),
       pages: [
-        [review("human", "LGTM"), review("old-bot", LUPA)],
-        [review("new-bot", LUPA)],
+        [review("lupa-bot[bot]", LUPA), review("attacker", "lupa: hello")],
       ],
     });
-    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBe("new-bot");
-    const params = paginate.mock.calls[0]![1] as Record<string, unknown>;
-    expect(params).toMatchObject({ owner: "o", repo: "r", pull_number: 7, per_page: 100 });
+    await expect(fetchActor(octokit, "o", "r", 7)).resolves.toBeUndefined();
+    expect(paginate).not.toHaveBeenCalled();
+    expect(listReviews).not.toHaveBeenCalled();
+  });
+
+  it("uses the trusted configured login only when authentication is unavailable", async () => {
+    const failed = actorOk({ authed: new Error("403") });
+    await expect(fetchActor(failed.octokit, "o", "r", 7, { trustedLogin: "lupa-bot[bot]" })).resolves.toBe("lupa-bot[bot]");
+    const authenticated = actorOk({ authed: "self" });
+    await expect(fetchActor(authenticated.octokit, "o", "r", 7, { trustedLogin: "lupa-bot[bot]" })).resolves.toBe("self");
+  });
+
+  it.each(["a b", " bot", "bot ", "bot\n", "bot\u0000", "[bot]", "**bot**", "-bot", "bot-"])("rejects invalid configured identity %j", async (trustedLogin) => {
+    const { octokit } = actorOk({ authed: new Error("403") });
+    await expect(fetchActor(octokit, "o", "r", 7, { trustedLogin })).rejects.toThrow(/review_actor/);
   });
 
   it("warns and returns undefined when both identity paths fail", async () => {

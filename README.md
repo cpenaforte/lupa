@@ -35,6 +35,7 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | Input | Default | Meaning |
 |---|---|---|
 | `github_token` | `${{ github.token }}` | Reads the diff and posts the review. |
+| `review_actor` | empty | Trusted GitHub login (optionally ending in `[bot]`) used only when authenticated identity is unavailable. |
 | `llm_provider` | `openai` | `openai`, `anthropic`, `google`, `groq`, `mistral`, `openrouter`, `ollama`, `opencode-zen`, `opencode-go`, `custom`. |
 | `llm_base_url` | (preset) | Overrides the preset base URL. Required for `custom`. |
 | `llm_api_style` | `auto` | `auto`, `openai-chat`, `openai-responses`, `anthropic-messages`, `google-models`, `custom-path`. See API styles below. |
@@ -45,19 +46,20 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | `llm_max_tokens` | `2000` | Maximum output tokens. |
 | `llm_agent` | `false` | Enable read-only repository tools so the reviewer can verify claims before reporting. |
 | `llm_agent_max_turns` | `10` | Maximum number of tool-call rounds the agent may take. |
-| `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. |
+| `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. Accepted range `11`–`21600`. |
 | `pr_number` | (empty) | Used only by `workflow_dispatch`. |
 | `fail_level` | `warning` | `none`, `warning` or `high`. See the gate section. |
+| `analysis_policy` | `advisory` | `advisory` preserves severity exits; `required` returns 3 for a triggered non-complete analysis. Non-complete includes a superseded (stale) head, truncated agent tool results, agent tool errors other than routine lookup mistakes (cancellation, budget, I/O), and L2 checks that timed out, were killed by a signal or could not be spawned. Routine agent lookup errors (missing file or directory, a file given where a directory is expected or the reverse, bad regex, invalid line range, an oversized file the model can narrow with grep or glob, a repository outside the declared linked set) do not count. Malformed or unknown tool calls, unreadable paths, linked-repository clone or deadline failures and truncation do. |
 | `max_diff_chars` | `60000` | Diff ceiling sent to the LLM. |
 | `max_prompt_chars` | `120000` | Total UTF-8 byte budget for the assembled LLM user message (diff, findings, issue context, headers, skipped-files note); the fixed system prompt is excluded. Note: `max_diff_chars` is counted in UTF-16 code units, not bytes. |
 | `max_findings` | `200` | Total findings published (inline + body). |
 | `max_inline_comments` | `30` | Inline comments posted per review. |
 | `max_review_body_chars` | `60000` | Maximum review body size in Unicode code points. |
-| `max_artifact_bytes` | `8388608` | Maximum bytes read from SARIF, SBOM, findings, and pr-meta artifacts. |
+| `max_artifact_bytes` | `8388608` | Maximum bytes read from SARIF, SBOM, findings, pr-meta, and analysis artifacts, and the cap for persisted analysis metadata (minimum `1024`). |
 | `post_comment` | `true` | `false` makes a dry-run. |
 | `timeout_seconds` | `90` | LLM request timeout. A timeout degrades to a summary without retry. |
 
-Output: `exit-code` (`0` pass, `2` warning findings, `1` high-severity findings).
+Outputs: `exit-code` (`0` pass, `2` warning findings, `1` high-severity findings, `3` required non-complete analysis) and `analysis-status` (`complete`, `incomplete`, `unsupported`, `failed`, `skipped`).
 
 ## Providers
 
@@ -103,7 +105,7 @@ The default wire format is `openai-chat`: `POST {base_url}/chat/completions` wit
 
 ## Agent mode
 
-Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock). Values under ~11 seconds leave no time for a model call (a 10 second reserve is held back) and abort immediately.
+Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock). Values outside `11`–`21600` are rejected at input time: a 10 second reserve is held back for the final model call, and `21600` is GitHub's 6 hour job limit.
 
 | Tool | What it does | Caps |
 |---|---|---|
@@ -114,7 +116,7 @@ Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repos
 
 At most 4 tool calls run per turn, each result is capped at 32768 bytes, and the loop stops when 131072 total result bytes are reached. Paths that escape the checkout, absolute paths, `..` segments and `.git` are rejected.
 
-Linked repositories: `owner/repo` references (github.com URLs or bare `owner/repo` mentions) in the PR body, up to 3, are lazily cloned at the default branch (`--depth 1 --single-branch`) with `github_token` when a tool call names them. Only repositories mentioned in the PR body can be cloned; other aliases are refused. Parsing is logged as `agent linked repositories: ...`.
+Linked repositories: `owner/repo` references (github.com URLs or bare `owner/repo` mentions) in the PR body, up to 3, are lazily cloned at the default branch (`--depth 1 --single-branch`) with `github_token` when a tool call names them. Only repositories mentioned in the PR body can be cloned; other aliases are refused. Credentials and the size pre-check are used only for repositories owned by the same owner as the reviewed repository. Other owners are cloned without credentials, so only public repositories work for them. For those the size pre-check is skipped: the clone downloads up to the 60 second clone timeout, and the checkout is then rejected if it exceeds the size cap. Parsing is logged as `agent linked repositories: ...`.
 
 Fallback: a model whose endpoint rejects the tool-call shape (an HTTP 400 on the tool-call turn that succeeds without tools) is remembered as tools-unsupported and the run falls back to a single-shot review with the warning `agent tools unsupported for this model: using single-shot`.
 
@@ -133,7 +135,7 @@ Budget figures are estimates. Prices change: check your provider's price page, a
 
 ## Gate: `fail_level`
 
-Only PR-touched findings block. The review event and the exit code read the blocking set — findings on added lines, plus lineless findings on touched files — under the active level:
+With the default `analysis_policy: advisory`, the review event and exit code read the existing blocking set — findings on added lines, qualifying lineless findings on touched files, and wrongly-resolved findings described below — under the active level:
 
 | `fail_level` | Review event | Exit code |
 |---|---|---|
@@ -141,13 +143,25 @@ Only PR-touched findings block. The review event and the exit code read the bloc
 | `warning` | `COMMENT` | `2` if any blocking finding is `warning` or `high`; `0` for info-only |
 | `high` | `REQUEST_CHANGES` when a blocking high-severity finding exists; otherwise `COMMENT` | `1` if any blocking high finding; `0` otherwise |
 
+Opt in with `analysis_policy: required` to require complete analysis of the recorded semantic scope. A triggered review with incomplete, unsupported, or failed analysis exits `3`, independently of `fail_level`; this coverage failure alone does not request changes. The `analysis-status` output, review body, summary, and SHA-bound `analysis.json` artifact disclose completion and coverage limitations. Non-trigger events remain skipped/0. A stale head prevents publication and exits 3 in required mode (advisory retains its stale no-op/0 behavior). Completion describes recorded execution, not proof of model correctness or approval.
+
+For the required profile, configure a reachable model and its BYOK key (or the documented keyless provider), install Semgrep and provide Docker for Gitleaks/Trivy and OSV on changed supported lockfiles, and make each detected L2 check available. Configure `PR_REVIEWER_ACTOR` as described below when the posting credential cannot resolve its identity. Then change `analysis_policy: advisory` to `analysis_policy: required` in the PR workflow; choose `fail_level` separately. Flow B has its own trusted publication inputs and cannot repair a producer's missing analysis. Keep the PR workflow's gate required in branch protection if it should enforce this policy.
+
+The required scope includes successful semantic execution for every eligible changed hunk. Missing tools/model/key or unknown invocation health report `unsupported`; failed invocations report `failed`; clipped/omitted hunks, exhausted agent inspection, malformed tool arguments, unavailable needed issue/actor context, and unresolved attribution report non-complete coverage. Binary, minified, source-map, and unrepresentable paths without an applicable analyzer are unsupported. If `llm_agent: true` is requested, a model fallback without tool support is unsupported even if it returns a valid empty findings object. In advisory keyless deterministic runs, the body records that semantic review did not run. A `complete` assessment describes execution of its recorded scope; it does not measure correctness, replace human review, or authorize automatic approval or merge.
+
+With zero findings, a non-complete review still shows `Analysis: incomplete`, `unsupported`, or `failed`, its scope, semantic file/hunk counts, and the reason in both the summary and review body. Coverage alone posts `COMMENT` when publication is safe. `analysis.json` stores the capped, redacted assessment bound to the recorded base/head SHAs. In Flow B this is an untrusted producer reporting claim: it never sets token type, actor, severity policy, or merge acceptance, and publication never reruns analysis. Legacy or invalid/mismatched assessment artifacts remain publishable with coverage unavailable; trusted required policy returns 3. PR metadata or live/workflow head binding mismatches refuse publication entirely.
+
+Required mode also accepts a finding's optional causal `change` anchor: `{ "file": "src/auth.ts", "line": 2, "side": "LEFT" }`. The exact path and line must name an actual removed LEFT or added RIGHT line in the bound patch; a rename may use the old path for LEFT. This lets a removed protection or new caller make a finding eligible even when its display location is unchanged context or another file. The anchor is a supported model claim, not deterministic proof of causality, and does not move the review comment. Existing added-line/reopened eligibility still works without an anchor. An unresolved high in a touched file, or any invalid anchor, makes required attribution incomplete; a purely untouched baseline issue without a claim remains non-blocking advice. Malformed, lossy, or secret-redacted claims retain an internal `changeInvalid: true` diagnostic so they cannot silently become missing legacy anchors. Advisory mode keeps its existing eligibility regardless of anchors.
+
 - The action never approves automatically in v1.
 - A `REQUEST_CHANGES` review always has a body.
-- The action step exits non-zero for `1` and `2`, so the template runs it with `continue-on-error: true` and reads `steps.review.outputs.exit-code` in a separate gate step.
-- The template's gate passes on `0` and `2` and fails on `1`. Warning findings never block a merge. A failed run (for example an action error, where no exit code is produced) still fails the gate. To block on high-severity findings, set `fail_level: high`.
-- A prompt-budget skip passes the gate on fast findings only; the skip is recorded in the step summary.
+- The action step exits non-zero for `1`, `2`, and `3`, so the template runs it with `continue-on-error: true` and reads `steps.review.outputs.exit-code` in a separate gate step.
+- The template's gate passes on `0` and `2` and fails on `1` and `3`. Warning findings never block a merge; required coverage is a separate gate. A failed run (for example an action error, where no exit code is produced) still fails the gate. To block on high-severity findings, set `fail_level: high`.
+- In advisory mode a prompt-budget skip gates on fast findings only; required mode reports non-complete coverage and exits 3. The skip is recorded in the step summary.
 - Findings outside the PR diff never block on their own: they stay visible in the review body under `**Findings not placed inline:**`, preceded by a `**Note:** <n> finding(s) below are outside the PR diff and do not block.` header when at least one body item is non-blocking. Body items in the blocking set carry a `**blocking**` marker after the severity; folded excess inline comments outside the blocking set render `- path:line (non-blocking)`. Markers denote blocking-set membership read under the active fail level (a marked `warning` under `fail_level: high` still exits 0).
-- **Wrongly-resolved findings re-block.** Clicking Resolve on a review thread while the flagged issue still persists re-arms the gate: the next run re-reads the PR's review threads and any of our own resolved threads whose finding is still reported blocks again, marked `**reopened**` (in the body, or inline when the line drifted to a commentable context line — never promoted, only marked). Matching is exact on file and line with rule intersection, so a re-merged thread still reopens its members. Identity is the token's own login, falling back to the newest `lupa:`-bodied review on installation tokens; when neither resolves, or the thread read fails, the run gates on diff membership only (fail-open, with a warning). Only the newest 100 threads are read (older ones warn-truncate).
+- **Wrongly-resolved findings re-block.** Clicking Resolve on a review thread while the flagged issue still persists re-arms the gate: the next run re-reads the PR's review threads and any of our own resolved threads whose finding is still reported blocks again, marked `**reopened**` (in the body, or inline when the line drifted to a commentable context line). Matching is exact on file and line. Blocking and severity use the original findings before display grouping; grouped inline comments retain original member rules in versioned hidden metadata, while older threads use the displayed rule intersection. Actor comparisons ignore case and treat `name` and `name[bot]` as aliases. Identity is the token's authenticated login, then the workflow's trusted `review_actor`; review prose never supplies identity. When identity is unavailable, or the thread read fails, the run gates on diff membership only, with an unavailable recheck warning. Only the newest 100 threads are read (older ones warn-truncate).
+
+For tokens that cannot resolve an authenticated user (including some installation tokens), set the repository or organization Actions variable `PR_REVIEWER_ACTOR` to the actual review author's GitHub login, including `[bot]` where applicable. Both templates pass this trusted variable as `review_actor` (empty when unset). Obtain the login from a known review by your configured credentials; an App slug is not a substitute. Values containing whitespace, control characters, or Markdown are rejected. This input establishes fallback identity only; it grants no token permissions and does not change fork publication policy. With the variable unset and authenticated identity unavailable, the wrongly-resolved recheck is unavailable.
 - Only model-supplied replacement code renders in an applicable suggestion fence; explanatory text always renders as advice. A finding's `patch` fences inline as a GitHub `suggestion` on the new side, or renders as a plain advice-only replacement block elsewhere (the fallback report adds a `- Proposed patch (advice only):` row); `suggestion` never fences.
 
 ## Scanners and their runtimes
@@ -155,7 +169,7 @@ Only PR-touched findings block. The review event and the exit code read the bloc
 - **semgrep** runs from the PyPI package, pinned to `semgrep==1.180.0`. The unprivileged template installs it into a venv. No docker is needed for semgrep. Without `SEMGREP_APP_TOKEN` it runs `semgrep scan --config p/default --metrics=off` (`--config auto` is rejected when `--metrics=off` is set: "Cannot create auto config when metrics are off"); with a token it runs `semgrep ci` (diff-aware via `SEMGREP_BASELINE_COMMIT`).
 - **gitleaks, trivy and osv-scanner** run from docker images pinned by digest. The runner needs docker for them. Without docker, each one reports a `scanner-missing` warning and the run continues.
 - Docker scanners mount the checkout at `/src`, so SARIF reports absolute `/src/<path>` (or `file:///src/<path>`) artifact URIs. These are normalized back to repo-relative paths before findings are mapped, so inline comments still land on the right file.
-- **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate sees the blocking subset of the merged set; the summary head/counts and the dry-run high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
+- **Cross-scanner dedupe:** trivy and gitleaks can report the same secret or dependency once each. The single-shot LLM judges duplicates pairwise (`duplicates` index pairs, `duplicateOf` restatements) and deterministic code merges them: same file and line only, severity is the maximum, rules join with `+`, messages cite each rule. A wrong model pair never swallows an unrelated location — cross-file and cross-line verdicts are ignored with a warning. The gate sees original findings before display merging; the summary head/counts and the dry-run high count see the full pre-merge set; only the funnel (inline/body), SARIF, and marker counts use the merged set, while `findings.json` keeps the pre-merge set. When the slow path is skipped (no LLM) findings publish unmerged with a `lupa: dedup skipped` note; agent mode publishes unmerged with no note, by design.
 
 ## Finding provenance
 
@@ -175,7 +189,7 @@ With `post_comment: false` the action runs the whole pipeline, writes the summar
 
 ## Forks and the two-workflow setup
 
-A fork PR gets a read-only `GITHUB_TOKEN`, so the review cannot be posted from the PR workflow. In that case the action writes the summary and uploads the review artifact (`pr-reviewer-out`, containing `diff.patch`, `pr-meta.json`, `findings.json`, `sarif.json` and `sbom.cdx.json`). Issue comments and code-scanning uploads do not work on read-only fork runs either.
+A fork PR gets a read-only `GITHUB_TOKEN`, so the review cannot be posted from the PR workflow. In that case the action writes the summary and uploads the review artifact (`pr-reviewer-out`, containing `diff.patch`, `pr-meta.json`, `findings.json`, `analysis.json`, `sarif.json` and `sbom.cdx.json` where produced). Issue comments and code-scanning uploads do not work on read-only fork runs either.
 
 To post reviews on fork PRs, use the two-workflow pattern:
 

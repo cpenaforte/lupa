@@ -143,17 +143,18 @@ describe("buildMessages agent variant", () => {
 });
 
 describe("PR_REVIEW_SCHEMA", () => {
-  it("requires findings with strict item shape and all nine keys", () => {
+  it("requires findings with strict item shape and nullable causal anchors", () => {
     const item = (PR_REVIEW_SCHEMA.schema.properties.findings as any).items;
-    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch"]);
+    expect(item.required).toEqual(["severity", "file", "line", "rule", "message", "suggestion", "duplicateOf", "confidence", "patch", "change"]);
     expect(Object.keys(item.properties).sort()).toEqual(
-      ["confidence", "duplicateOf", "file", "line", "message", "patch", "rule", "severity", "suggestion"],
+      ["change", "confidence", "duplicateOf", "file", "line", "message", "patch", "rule", "severity", "suggestion"],
     );
     expect(item.additionalProperties).toBe(false);
     expect(item.properties.severity.enum).toEqual(["info", "warning", "high"]);
     expect(item.properties.duplicateOf).toEqual({ type: ["integer", "null"] });
     expect(item.properties.confidence).toEqual({ type: ["integer", "null"] });
     expect(item.properties.patch).toEqual({ type: ["string", "null"] });
+    expect(item.properties.change).toEqual({ type: ["object", "null"], additionalProperties: false, required: ["file", "line", "side"], properties: { file: { type: "string" }, line: { type: "integer", minimum: 1 }, side: { type: "string", enum: ["LEFT", "RIGHT"] } } });
     expect(PR_REVIEW_SCHEMA.schema.additionalProperties).toBe(false);
     expect(PR_REVIEW_SCHEMA.schema.required).toEqual(["findings", "duplicates"]);
   });

@@ -1,9 +1,12 @@
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { runProcess, type ProcessOptions } from "./runtime/process.js";
+import { cleanEnvForExec, type ExecutionOptions } from "./runtime/exec-env.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
-import type { Finding } from "./fastpath.js";
-import type { PrMeta } from "./diff.js";
+import type { Finding } from "./domain/finding.js";
+import type { StageResult } from "./domain/assessment.js";
+import type { PrMeta } from "./domain/diff.js";
 import { byteCheck, oversizeMessage, readCappedFileSync, sourceForLabel } from "./artifact-limits.js";
 import { DEFAULT_MAX_ARTIFACT_BYTES } from "./inputs.js";
 
@@ -142,7 +145,7 @@ function firstPhysicalLocation(locations: unknown): { file: string; line?: numbe
   return { file, line };
 }
 
-/** SARIF 2.1.0 level → severity. A missing level defaults to "warning" per the spec. */
+/** SARIF 2.1.0 level → severity, after resolving the referenced rule default. */
 function severityOf(level: unknown): Finding["severity"] {
   if (level === undefined) return "warning";
   if (level === "error") return "high";
@@ -167,15 +170,22 @@ export function parseSarif(text: string): Finding[] | undefined {
   const out: Finding[] = [];
   for (const run of log.runs) {
     if (!isObj(run) || !Array.isArray(run.results)) continue;
+    const tool = isObj(run.tool) ? run.tool : undefined;
+    const driver = isObj(tool?.driver) ? tool.driver : undefined;
+    const rules = Array.isArray(driver?.rules) ? driver.rules : [];
     for (const res of run.results) {
       if (!isObj(res)) continue;
+      const indexed = typeof res.ruleIndex === "number" ? rules[res.ruleIndex] : undefined;
+      const rule = isObj(indexed) && (res.ruleId === undefined || indexed.id === res.ruleId)
+        ? indexed : rules.find((candidate) => isObj(candidate) && candidate.id === res.ruleId);
+      const defaults = isObj(rule) && isObj(rule.defaultConfiguration) ? rule.defaultConfiguration : undefined;
       const { file, line } = firstPhysicalLocation(res.locations);
       const msg = isObj(res.message) ? res.message.text : undefined;
       out.push({
-        severity: severityOf(res.level),
+        severity: severityOf(res.level ?? defaults?.level),
         file,
         line,
-        rule: typeof res.ruleId === "string" ? res.ruleId : "unknown",
+        rule: typeof res.ruleId === "string" ? res.ruleId : isObj(rule) && typeof rule.id === "string" ? rule.id : "unknown",
         message: typeof msg === "string" ? msg : "scanner finding",
       });
     }
@@ -193,33 +203,27 @@ interface Exec {
   code: number | null; // 0 on success; numeric exit code otherwise (null if killed by signal)
   stdout: string;
   timedOut: boolean; // killed by the timeout
+  failed?: boolean; // cancellation, output overflow, or unsuccessful cleanup
 }
 
-/** Runs one tool. Exported for tests (the timeout parameter is the seam). */
-export function runExec(
+/** Compatibility adapter, with an explicit scrubbed child environment. */
+export async function runExec(
   file: string,
   args: string[],
   cwd: string,
   env?: NodeJS.ProcessEnv,
   timeoutMs: number = TOOL_TIMEOUT_MS,
+  execution: Pick<ProcessOptions, "signal" | "cleanup"> = {},
 ): Promise<Exec> {
-  return new Promise((resolve) => {
-    execFile(
-      file,
-      args,
-      { cwd, env: { ...process.env, ...env }, maxBuffer: MAX_BUFFER, timeout: timeoutMs },
-      (err, stdout) => {
-        if (!err) return resolve({ missing: false, code: 0, stdout: String(stdout), timedOut: false });
-        const e = err as NodeJS.ErrnoException & { killed?: boolean };
-        if (e.code === "ENOENT") return resolve({ missing: true, code: null, stdout: "", timedOut: false });
-        // execFile sets `killed` when its timeout fires.
-        const timedOut = e.killed === true;
-        // Non-zero exit (scanners exit 1 when findings exist): keep stdout, which may hold SARIF.
-        const code = typeof e.code === "number" ? e.code : null;
-        resolve({ missing: false, code, stdout: stdout ? String(stdout) : "", timedOut });
-      },
-    );
+  const r = await runProcess(file, args, {
+    cwd, env: cleanEnvForExec(env ?? process.env), timeoutMs,
+    maxBufferBytes: MAX_BUFFER, signal: execution.signal, cleanup: execution.cleanup,
   });
+  return {
+    missing: r.missing, code: r.exitCode, stdout: r.stdout, timedOut: r.timedOut,
+    ...(r.cancelled || r.cleanupFailed || (r.errorCode !== undefined && !r.missing) || (r.exitCode === null && !r.missing && !r.timedOut)
+      ? { failed: true } : {}),
+  };
 }
 
 export function warning(rule: string, message: string, source?: string): Finding {
@@ -277,7 +281,8 @@ function findingsExitCodes(label: string): number[] {
 /**
  * Interpret a scanner whose SARIF arrives on stdout. Fail-open: a non-zero exit (or
  * any exit) with empty/unparseable stdout is a `scanner-failed` warning, never a clean pass.
- * The `maxBytes` byte check runs before parsing (after the missing/timedOut guards).
+ * The `maxBytes` byte check runs before parsing. Interrupted execution keeps any
+ * bounded parseable findings and appends a failure, even if SARIF claims success.
  * The timeout message names the actual `timeoutMs` budget the tool ran under.
  * Parsed findings are always kept; a failed invocation appends a `scanner-failed`
  * warning, never substituted. Explicit invocation success wins over a contradictory
@@ -286,14 +291,18 @@ function findingsExitCodes(label: string): number[] {
 export function fromStdout(tool: string, label: string, r: Exec, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Finding[] {
   const source = sourceForLabel(label);
   if (r.missing) return [warning("scanner-missing", `${label} unavailable: ${tool} not found`, source)];
-  if (r.timedOut) return [warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`, source)];
+  const interruption = r.timedOut
+    ? warning("scanner-failed", `${label} timed out after ${timeoutMs / 1000}s`, source)
+    : r.failed ? warning("scanner-failed", `${label} execution incomplete`, source) : undefined;
   const over = byteCheck(r.stdout, maxBytes, label);
-  if (over !== undefined) return over;
+  if (over !== undefined) return interruption ? [...over, interruption] : over;
   const parsed = r.stdout.trim() ? parseSarif(r.stdout) : undefined;
   if (!parsed) {
+    if (interruption) return [interruption];
     return [warning("scanner-failed", `${label} exited ${r.code ?? "abnormally"} without parseable SARIF`, source)];
   }
   const provenanced = parsed.map((f) => ({ ...f, source, confidence: 90, evidence: { analyzer: source } }));
+  if (interruption) return [...provenanced, interruption];
   const health = invocationFailed(r.stdout);
   if (health === true) {
     return [...provenanced, warning("scanner-failed", `${label} reported an unsuccessful run`, source)];
@@ -316,13 +325,34 @@ function dockerArgs(
   image: string,
   digest: string,
   args: string[],
+  name: string,
   extraMounts: string[] = [],
 ): string[] {
   const mounts = [`${dir}:/src`, ...extraMounts].flatMap((m) => ["-v", m]);
-  return ["run", "--rm", ...mounts, "-w", "/src", `${image}@${digest}`, ...args];
+  return ["run", "--rm", "--name", name, ...mounts, "-w", "/src", `${image}@${digest}`, ...args];
+}
+
+/** Own the container identity and its separately bounded forced-removal command. */
+async function runDocker(
+  dir: string, image: string, digest: string, args: string[], env: NodeJS.ProcessEnv,
+  timeoutMs: number, execution: ExecutionOptions, extraMounts: string[] = [],
+): Promise<Exec> {
+  const name = `lupa-${randomUUID()}`;
+  return runExec("docker", dockerArgs(dir, image, digest, args, name, extraMounts), dir, env, timeoutMs, {
+    signal: execution.signal,
+    cleanup: async () => {
+      const removed = await runProcess("docker", ["rm", "-f", name], {
+        cwd: dir, env, timeoutMs: 500, maxBufferBytes: 64 * 1024,
+      });
+      if (removed.exitCode !== 0 || removed.timedOut || removed.cancelled || removed.cleanupFailed) {
+        throw new Error("owned container cleanup failed");
+      }
+    },
+  });
 }
 
 export interface ScannerResult {
+  stages?: StageResult[];
   findings: Finding[];
   /** Path of the CycloneDX SBOM when `sbom` was requested and generated. */
   sbomPath?: string;
@@ -350,8 +380,13 @@ export async function runScanners(o: {
   outDir?: string;
   timeoutMs?: number;
   maxArtifactBytes?: number;
-}): Promise<ScannerResult> {
+}, execution: ExecutionOptions = {}): Promise<ScannerResult> {
   const findings: Finding[] = [];
+  const stages: StageResult[] = [];
+  const record = (label: string, r: Exec): void => {
+    stages.push(scannerStage(label, r, o.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES));
+  };
+  const env = cleanEnvForExec(execution.env ?? process.env);
   const jobs = o.jobs ?? resolveJobs();
   const dir = resolvePath(o.dir);
   const timeoutMs = o.timeoutMs ?? TOOL_TIMEOUT_MS;
@@ -359,27 +394,44 @@ export async function runScanners(o: {
 
   // semgrep (binary, not docker)
   const sg = semgrepArgv({ baselineSha: o.baselineSha, jobs, hasToken: !!o.hasSemgrepToken });
-  findings.push(...fromStdout("semgrep", "semgrep", await runExec("semgrep", sg.argv, dir, sg.env, timeoutMs), timeoutMs, maxArtifactBytes));
+  const semgrep = await runExec("semgrep", sg.argv, dir, { ...env, ...sg.env }, timeoutMs, execution);
+  record("semgrep", semgrep);
+  findings.push(...fromStdout("semgrep", "semgrep", semgrep, timeoutMs, maxArtifactBytes));
 
   // trivy (docker image pinned by digest)
-  const tv = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv(".")), dir, undefined, timeoutMs);
+  const tv = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, trivyArgv("."), env, timeoutMs, execution);
+  record("trivy", tv);
   findings.push(...fromStdout("docker", "trivy", tv, timeoutMs, maxArtifactBytes));
 
   // gitleaks (docker image pinned by digest; SARIF goes to a report file in a temp dir)
-  findings.push(...(await runGitleaks(dir, timeoutMs, maxArtifactBytes)));
+  findings.push(...(await runGitleaks(dir, timeoutMs, maxArtifactBytes, env, execution, stages)));
 
   // osv-scanner (docker image pinned by digest), one run per lockfile
+  const osvStages: StageResult[] = [];
   for (const lock of o.lockfiles ?? []) {
-    const osv = await runExec("docker", dockerArgs(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock)), dir, undefined, timeoutMs);
+    const osv = await runDocker(dir, OSV_IMAGE, OSV_DIGEST, osvArgv(lock), env, timeoutMs, execution);
+    osvStages.push(scannerStage("osv-scanner", osv, maxArtifactBytes));
     findings.push(...fromStdout("docker", `osv-scanner (${lock})`, osv, timeoutMs, maxArtifactBytes));
+  }
+  if (osvStages.length) {
+    const failed = osvStages.filter(s => s.status === "failed").length;
+    const unsupported = osvStages.filter(s => s.status === "unsupported").length;
+    stages.push({ stage: "osv-scanner", required: true, applicable: true,
+      status: failed ? "failed" : unsupported ? "unsupported" : "ok",
+      reason: `${osvStages.length} lockfile(s): ${failed} failed, ${unsupported} unsupported, ${osvStages.length - failed - unsupported} completed.` });
   }
 
   // SBOM (trivy fs --format cyclonedx). Written under a unique mkdtemp dir inside outDir.
   let sbomPath: string | undefined;
   if (o.sbom) {
-    const sb = await runExec("docker", dockerArgs(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv(".")), dir, undefined, timeoutMs);
+    const sb = await runDocker(dir, TRIVY_IMAGE, TRIVY_DIGEST, sbomArgv("."), env, timeoutMs, execution);
+    const sbStage: StageResult = { stage: "sbom", required: false, applicable: true,
+      status: sb.missing ? "unsupported" : "failed", reason: sb.missing ? "missing-binary" : "SBOM not generated" };
+    stages.push(sbStage);
     if (sb.missing) {
       findings.push(warning("scanner-missing", "sbom unavailable: docker not found", "sbom"));
+    } else if (sb.timedOut || sb.failed) {
+      findings.push(warning("scanner-failed", sb.timedOut ? `sbom timed out after ${timeoutMs / 1000}s` : "sbom execution incomplete", "sbom"));
     } else {
       const over = byteCheck(sb.stdout, maxArtifactBytes, "sbom");
       if (over !== undefined) {
@@ -395,6 +447,8 @@ export async function runScanners(o: {
           const out = join(sbomDir, "sbom.cdx.json");
           await writeFile(out, sb.stdout, "utf8");
           sbomPath = out;
+          sbStage.status = "ok";
+          delete sbStage.reason;
         } catch (e) {
           // A failed write must not leave a half-created dir behind: remove it best-effort.
           if (sbomDir) await rm(sbomDir, { recursive: true, force: true }).catch(() => undefined);
@@ -404,7 +458,15 @@ export async function runScanners(o: {
     }
   }
 
-  return { findings, sbomPath };
+  return { findings, sbomPath, stages };
+}
+
+function scannerStage(stage: string, r: Exec, maxBytes: number): StageResult {
+  const reason = r.missing ? "missing-binary" : r.timedOut ? "timeout" : r.failed ? "execution-incomplete" :
+    Buffer.byteLength(r.stdout) > maxBytes ? "artifact-overflow" : !parseSarif(r.stdout) ? "invalid-SARIF" :
+    invocationFailed(r.stdout) === true ? "unsuccessful-invocation" :
+    invocationFailed(r.stdout) !== false && r.code !== 0 && (r.code === null || !findingsExitCodes(stage).includes(r.code)) ? "unsuccessful-exit" : undefined;
+  return { stage, applicable: true, required: true, status: r.missing ? "unsupported" : reason ? "failed" : "ok", ...(reason ? { reason } : {}) };
 }
 
 /** True when `text` is a CycloneDX document: a JSON object with bomFormat "CycloneDX". */
@@ -423,7 +485,9 @@ function isCycloneDx(text: string): boolean {
  * when clean and may not create the report; exit 0 with no report is therefore clean.
  * A temp-dir failure is a `scanner-failed` warning, never a throw.
  */
-async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, maxBytes: number = DEFAULT_MAX_ARTIFACT_BYTES): Promise<Finding[]> {
+async function runGitleaks(dir: string, timeoutMs: number, maxBytes: number, env: NodeJS.ProcessEnv, execution: ExecutionOptions, stages: StageResult[]): Promise<Finding[]> {
+  const stage: StageResult = { stage: "gitleaks", required: true, applicable: true, status: "failed", reason: "report-unavailable" };
+  stages.push(stage);
   let reportDir: string;
   try {
     reportDir = await mkdtemp(join(os.tmpdir(), "gitleaks-"));
@@ -432,38 +496,49 @@ async function runGitleaks(dir: string, timeoutMs: number = TOOL_TIMEOUT_MS, max
   }
   const hostReport = join(reportDir, "report.sarif");
   try {
-    const gl = await runExec(
-      "docker",
-      dockerArgs(dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"), [
-        `${reportDir}:/out`,
-      ]),
-      dir,
-      undefined,
-      timeoutMs,
+    const gl = await runDocker(
+      dir, GITLEAKS_IMAGE, GITLEAKS_DIGEST, gitleaksArgv("/src", "/out/report.sarif"),
+      env, timeoutMs, execution, [`${reportDir}:/out`],
     );
-    if (gl.missing) return [warning("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
-    if (gl.timedOut) return [warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`, "gitleaks")];
+    if (gl.missing) {
+      stage.status = "unsupported"; stage.reason = "missing-binary";
+      return [warning("scanner-missing", "gitleaks unavailable: docker not found", "gitleaks")];
+    }
+    if (gl.timedOut || gl.failed) stage.reason = gl.timedOut ? "timeout" : "execution-incomplete";
+    const interruption = gl.timedOut
+      ? warning("scanner-failed", `gitleaks timed out after ${timeoutMs / 1000}s`, "gitleaks")
+      : gl.failed ? warning("scanner-failed", "gitleaks execution incomplete", "gitleaks") : undefined;
     let text: string | undefined;
     try {
       const capped = readCappedFileSync(hostReport, maxBytes);
       if (!capped.ok) {
-        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks")];
+        return [warning("scanner-failed", oversizeMessage("gitleaks", maxBytes), "gitleaks"),
+          ...(interruption ? [interruption] : [])];
       }
       text = capped.text;
     } catch {
       text = undefined;
     }
     if (text === undefined) {
+      if (interruption) return [interruption];
+      if (gl.code === 0) { stage.status = "ok"; delete stage.reason; }
       return gl.code === 0 ? [] : [warning("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"} with no report`, "gitleaks")];
     }
     const parsed = parseSarif(text);
-    if (!parsed) return [warning("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
+    if (!parsed) return [interruption ?? warning("scanner-failed", "gitleaks report is not parseable SARIF", "gitleaks")];
     const provenanced = parsed.map((f) => ({ ...f, source: "gitleaks", confidence: 90, evidence: { analyzer: "gitleaks" } }));
-    // Exit codes do not apply here (this path parses a report file, not a process
-    // result), but invocation health still does when the SARIF carries it.
+    if (interruption) return [...provenanced, interruption];
+    // A report may survive a process failure. Preserve its findings while
+    // distinguishing Gitleaks' default findings exit (1) from an unsuccessful exit.
+    if (gl.code !== 0 && gl.code !== 1) {
+      stage.reason = "unsuccessful-exit";
+      return [...provenanced, warning("scanner-failed", `gitleaks exited ${gl.code ?? "abnormally"}`, "gitleaks")];
+    }
     if (invocationFailed(text) === true) {
+      stage.reason = "unsuccessful-invocation";
       return [...provenanced, warning("scanner-failed", "gitleaks reported an unsuccessful run", "gitleaks")];
     }
+    stage.status = "ok"; delete stage.reason;
     return provenanced;
   } finally {
     await rm(reportDir, { recursive: true, force: true }).catch(() => undefined);

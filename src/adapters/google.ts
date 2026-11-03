@@ -1,21 +1,12 @@
-import { PR_REVIEW_SCHEMA } from "../prompt.js";
+import type { RequestContext } from "../runtime/context.js";
 import type { ResolvedEndpoint } from "../providers.js";
 import type { Conversation, ToolCall } from "../agent-types.js";
-import {
-  attempt,
-  errMessage,
-  extractUsage,
-  parseContent,
-  parseVerdicts,
-  redact,
-  retryDelayMs,
-  sleep,
-  toFindings,
-  validateSampling,
-  SNIPPET_CHARS,
-  type AgentReply,
-  type LlmResult,
-} from "../llm.js";
+import { PR_REVIEW_SCHEMA } from "../llm/schema.js";
+import { attempt, errMessage, retryDelayMs, waitForRetry, requestTimeout, SNIPPET_CHARS } from "../llm/transport.js";
+import { extractUsage, parseContent, parseVerdicts, toFindings } from "../llm/schema.js";
+import { validateSampling } from "../llm/sampling.js";
+import { redact } from "../domain/text.js";
+import type { AgentReply, LlmResult } from "../llm/types.js";
 
 /** candidates[0] as an object, when present. */
 function firstCandidate(json: unknown): Record<string, unknown> | undefined {
@@ -193,10 +184,11 @@ function buildGoogleBody(
     systemInstruction: { parts: [{ text: conv.system }] },
     generationConfig,
   };
-  if (flags.allowTools && conv.tools !== undefined) {
-    body.tools = conv.tools.map((t) => ({
-      functionDeclarations: [{ name: t.name, description: t.description, parameters: googleSchema(t.parameters) }],
-    }));
+  // One Tool carries every declaration: the canonical generateContent shape.
+  if (flags.allowTools && conv.tools !== undefined && conv.tools.length > 0) {
+    body.tools = [{
+      functionDeclarations: conv.tools.map((t) => ({ name: t.name, description: t.description, parameters: googleSchema(t.parameters) })),
+    }];
   }
   return body;
 }
@@ -314,6 +306,7 @@ export async function callGoogle(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
   },
 ): Promise<LlmResult> {
   const key = o.apiKey;
@@ -356,7 +349,7 @@ export async function callGoogle(
   }
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return requestTimeout();
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail") return a.result;
   }
@@ -417,6 +410,7 @@ export async function callGoogleTurn(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
   },
   flags: { allowTools: boolean; allowFormat: boolean },
 ): Promise<AgentReply> {
@@ -456,7 +450,7 @@ export async function callGoogleTurn(
   }
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return { ok: false, result: requestTimeout() };
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail") return { ok: false, result: a.result };
   }

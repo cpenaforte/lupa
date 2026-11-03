@@ -1,7 +1,9 @@
-import { execFile } from "node:child_process";
+import { runProcess } from "./runtime/process.js";
+import { cleanEnvForExec, type ExecutionOptions } from "./runtime/exec-env.js";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Finding } from "./fastpath.js";
+import type { Finding } from "./domain/finding.js";
+import type { StageResult } from "./domain/assessment.js";
 
 export interface L2Tool {
   name: string;
@@ -19,6 +21,8 @@ export interface ToolFailure {
   output: string;
   /** True when the per-tool timeout killed the process. */
   timedOut?: boolean;
+  /** Cancellation, output overflow, or unsuccessful resource cleanup. */
+  incomplete?: boolean;
 }
 
 /** Per-tool wall-clock budget for L2 toolchains (same budget as the scanners). */
@@ -37,6 +41,7 @@ export type Spawner = (
   args: string[],
   cwd: string,
   timeoutMs?: number,
+  execution?: ExecutionOptions,
 ) => Promise<SpawnResult>;
 
 const MAX_BUFFER = 16 * 1024 * 1024;
@@ -116,36 +121,31 @@ export function l2Argv(name: string): { cmd: string; args: string[] } {
   }
 }
 
-/**
- * Real runner: `execFile` with args array (no shell). Resolves `{ failure: undefined, stdout }`
- * on success (stdout captured, never discarded); on failure the combined output stays on
- * `failure.output` while raw stdout travels alongside for interpreters.
- * `timeoutMs` kills the tool when it outlives its budget; the failure is marked `timedOut`.
- */
-export const execTool: Spawner = (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS) =>
-  new Promise((resolve) => {
-    execFile(cmd, args, { cwd, maxBuffer: MAX_BUFFER, timeout: timeoutMs }, (err, stdout, stderr) => {
-      const out = String(stdout);
-      if (!err) return resolve({ failure: undefined, stdout: out });
-      const e = err as NodeJS.ErrnoException & { signal?: NodeJS.Signals | null; killed?: boolean };
-      const code = typeof e.code === "string" || typeof e.code === "number" ? e.code : null;
-      resolve({
-        failure: {
-          code,
-          signal: e.signal ?? null,
-          output: `${out}${String(stderr)}`,
-          timedOut: e.killed === true,
-        },
-        stdout: out,
-      });
-    });
+/** Compatibility adapter: preserves stdout on clean exits (including gofmt -l). */
+export const execTool: Spawner = async (cmd, args, cwd, timeoutMs = L2_TIMEOUT_MS, execution = {}) => {
+  const r = await runProcess(cmd, args, {
+    cwd, env: cleanEnvForExec(execution.env ?? process.env),
+    timeoutMs, maxBufferBytes: MAX_BUFFER, signal: execution.signal,
   });
+  const incomplete = r.cancelled || r.cleanupFailed === true || (r.errorCode !== undefined && !r.missing) || (r.exitCode === null && !r.missing);
+  return {
+    stdout: r.stdout,
+    failure: r.exitCode === 0 && !r.timedOut && !incomplete ? undefined : {
+      code: r.errorCode ?? (r.missing ? "ENOENT" : r.exitCode),
+      signal: r.signal,
+      output: r.stdout + r.stderr,
+      timedOut: r.timedOut,
+      ...(incomplete ? { incomplete: true } : {}),
+    },
+  };
+};
 
 /** Human-readable failure reason: signal kill, errno (e.g. EACCES), or non-zero exit. */
 function describeFailure(name: string, f: ToolFailure, timeoutMs: number): string {
   if (f.timedOut) return `${name} timed out after ${timeoutMs / 1000}s`;
   if (f.signal) return `${name} killed by signal ${f.signal}`;
   if (typeof f.code === "string") return `${name} could not run (${f.code})`;
+  if (f.incomplete) return `${name} execution incomplete`;
   if (typeof f.code === "number") return `${name} reported issues (exit ${f.code})`;
   return `${name} exited abnormally`;
 }
@@ -196,7 +196,7 @@ export function interpretGofmt(
   changed: Set<string>,
   timeoutMs: number = L2_TIMEOUT_MS,
 ): Finding[] {
-  if (failure?.timedOut === true || failure?.signal != null) {
+  if (failure?.timedOut === true || failure?.signal != null || failure?.incomplete === true) {
     return interpretDefault(name, failure, stdout, changed, timeoutMs);
   }
   const files = stdout
@@ -225,21 +225,6 @@ const interpreters: Record<string, Interpreter> = {
 };
 
 /** Run one check-only command, dispatching by tool name. Silence ([]) when clean or the binary is missing (ENOENT). */
-async function runOne(
-  name: string,
-  dir: string,
-  spawn: Spawner,
-  timeoutMs: number,
-  changed: Set<string>,
-): Promise<Finding[]> {
-  const { cmd, args } = l2Argv(name);
-  const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs);
-  // Binary not installed on this runner: skip silently.
-  if (failure?.code === "ENOENT") return [];
-  const interpret = interpreters[name] ?? interpretDefault;
-  return interpret(name, failure, stdout, changed, timeoutMs);
-}
-
 /**
  * Run every detected L2 tool in `dir`, sequentially. Clean or missing binary → no finding.
  * Per-tool interpreters: gofmt reports one warning per changed unformatted file (parsed
@@ -255,10 +240,36 @@ export async function runL2(
   spawn: Spawner = execTool,
   timeoutMs: number = L2_TIMEOUT_MS,
   changedFiles: Set<string> = new Set(),
+  execution?: ExecutionOptions,
 ): Promise<Finding[]> {
+  return (await runL2Detailed(dir, spawn, timeoutMs, changedFiles, execution)).findings;
+}
+
+/**
+ * A check-only tool that ran to completion and exited non-zero has reported findings,
+ * so its stage is `ok` (its warning comes from the interpreter). Only a missing binary,
+ * a timeout, a signal kill, an incomplete run or a spawn errno is an execution failure.
+ */
+function l2StageStatus(failure: ToolFailure | undefined): StageResult["status"] {
+  if (!failure) return "ok";
+  if (failure.code === "ENOENT") return "unsupported";
+  if (failure.timedOut || failure.incomplete || failure.signal !== null || typeof failure.code !== "number") return "failed";
+  return "ok";
+}
+
+export async function runL2Detailed(
+  dir: string, spawn: Spawner = execTool, timeoutMs: number = L2_TIMEOUT_MS,
+  changedFiles: Set<string> = new Set(), execution?: ExecutionOptions,
+): Promise<{ findings: Finding[]; stages: StageResult[] }> {
   const findings: Finding[] = [];
+  const stages: StageResult[] = [];
   for (const name of detectL2Tools(dir)) {
-    findings.push(...(await runOne(name, dir, spawn, timeoutMs, changedFiles)));
+    const { cmd, args } = l2Argv(name);
+    const { failure, stdout } = await spawn(cmd, args, dir, timeoutMs, execution);
+    stages.push({ stage: `l2:${name}`, applicable: true, required: true,
+      status: l2StageStatus(failure),
+      ...(failure ? { reason: failure.code === "ENOENT" ? "missing-binary" : describeFailure(name, failure, timeoutMs) } : {}) });
+    findings.push(...(interpreters[name] ?? interpretDefault)(name, failure, stdout, changedFiles, timeoutMs));
   }
-  return findings;
+  return { findings, stages };
 }

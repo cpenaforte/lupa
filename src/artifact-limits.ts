@@ -1,5 +1,5 @@
 import { closeSync, openSync, readSync } from "node:fs";
-import type { Finding } from "./fastpath.js";
+import type { Finding } from "./domain/finding.js";
 import { DEFAULT_MAX_ARTIFACT_BYTES } from "./inputs.js";
 
 export type CappedRead = { ok: true; text: string } | { ok: false; oversize: true };

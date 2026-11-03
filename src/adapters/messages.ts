@@ -1,20 +1,11 @@
+import type { RequestContext } from "../runtime/context.js";
 import type { ResolvedEndpoint } from "../providers.js";
 import type { Conversation, ToolCall } from "../agent-types.js";
-import {
-  attempt,
-  errMessage,
-  extractUsage,
-  parseContent,
-  parseVerdicts,
-  redact,
-  retryDelayMs,
-  sleep,
-  toFindings,
-  validateSampling,
-  SNIPPET_CHARS,
-  type AgentReply,
-  type LlmResult,
-} from "../llm.js";
+import { attempt, errMessage, retryDelayMs, waitForRetry, requestTimeout, SNIPPET_CHARS } from "../llm/transport.js";
+import { extractUsage, parseContent, parseVerdicts, toFindings } from "../llm/schema.js";
+import { validateSampling } from "../llm/sampling.js";
+import { redact } from "../domain/text.js";
+import type { AgentReply, LlmResult } from "../llm/types.js";
 
 /** Concatenates `text` blocks from the response's `content[]` array. */
 function joinContentText(json: unknown): string | undefined {
@@ -47,8 +38,10 @@ type MessagesReply =
 /**
  * Builds the Anthropic Messages request body from a neutral conversation. Shared
  * by the single-shot `callMessages` (no turns, `allowTools:false`) and the agent
- * turn variant: `tools` only when `allowTools` (as `input_schema`); there is no
- * `response_format` on this protocol, so `allowFormat` never adds a field.
+ * turn variant: declared tools stay in the prefix after an assistant reply,
+ * with `tool_choice:none` when selection is disabled. A fresh no-tools request
+ * omits tools. There is no `response_format` on this protocol, so `allowFormat`
+ * never adds a field.
  * Consecutive tool-result turns collapse into ONE user message (the API wants
  * every `tool_result` block for a parallel call set in a single user turn).
  */
@@ -99,12 +92,16 @@ function buildMessagesBody(
     system: conv.system,
     messages,
   };
-  if (flags.allowTools && conv.tools !== undefined) {
+  // Signed thinking is bound to the established system/tools/message prefix.
+  // Disabling selection must not remove definitions from a continuation.
+  const hasAssistantHistory = conv.turns?.some((turn) => turn.role === "assistant") ?? false;
+  if (conv.tools !== undefined && (flags.allowTools || hasAssistantHistory)) {
     body.tools = conv.tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters,
     }));
+    if (!flags.allowTools) body.tool_choice = { type: "none" };
   }
   if (o.temperature !== undefined) body.temperature = o.temperature;
   if (o.topP !== undefined) body.top_p = o.topP;
@@ -169,6 +166,7 @@ export async function callMessages(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
   },
 ): Promise<LlmResult> {
   const key = o.apiKey;
@@ -205,7 +203,7 @@ export async function callMessages(
   if (a.kind === "fail") return a.result;
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return requestTimeout();
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail") return a.result;
   }
@@ -265,6 +263,7 @@ export async function callMessagesTurn(
     topP?: number;
     maxTokens: number;
     timeoutSeconds: number;
+    context?: RequestContext;
   },
   flags: { allowTools: boolean; allowFormat: boolean },
 ): Promise<AgentReply> {
@@ -297,7 +296,7 @@ export async function callMessagesTurn(
   if (a.kind === "fail") return { ok: false, result: a.result };
   // Retry once on 429 or 5xx only; the delay honors Retry-After (clamped).
   if (a.status === 429 || a.status >= 500) {
-    await sleep(retryDelayMs(a.retryAfter));
+    if (!await waitForRetry(retryDelayMs(a.retryAfter), o.context)) return { ok: false, result: requestTimeout() };
     a = await attempt(authEp, payload, o);
     if (a.kind === "fail") return { ok: false, result: a.result };
   }
