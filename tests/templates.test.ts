@@ -388,3 +388,47 @@ describe("workflow templates", () => {
     expect(privileged).toBe(producer);
   });
 });
+
+describe("minimal workflow template", () => {
+  const FILE = "docs/workflow-template-minimal.yml";
+  const text = () => fs.readFileSync(FILE, "utf8");
+
+  it("pins lupa to the same release SHA as the full templates", () => {
+    const pin = /uses: (cpenaforte\/lupa@[0-9a-f]{40})/.exec(fs.readFileSync("docs/workflow-template.yml", "utf8"))![1];
+    expect(text()).toContain(`uses: ${pin}`);
+  });
+
+  it("pins every third-party action by commit SHA and has no mutable refs", () => {
+    const uses = text().match(/^\s+uses:\s*\S+/gm) ?? [];
+    expect(uses.length).toBeGreaterThanOrEqual(2);
+    for (const u of uses) expect(u).toMatch(/@[0-9a-f]{40}$/);
+    expect(text()).not.toContain("pull_request_target");
+  });
+
+  it("is least privilege and supplies what the action requires", () => {
+    const t = text();
+    expect(t).toMatch(/permissions:\n {2}contents: read\n {2}pull-requests: write\n/);
+    for (const needle of [
+      "persist-credentials: false",
+      "fetch-depth: 0",
+      "PR_REVIEWER_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+      "PR_REVIEWER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+      "PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-out",
+      "/pr-reviewer-out/diff.patch",
+      "llm_api_key: ${{ secrets.LLM_API_KEY }}",
+      "llm_model: ${{ vars.PR_REVIEWER_MODEL }}",
+      "continue-on-error: true",
+      "semgrep==1.180.0",
+    ]) expect(t).toContain(needle);
+    expect(t).not.toMatch(/run:\s*.*\bgit diff[^\n]*\bHEAD(?!_SHA)\b/);
+  });
+
+  it.each([["0", 0], ["2", 0], ["1", 1], ["3", 1], ["", 1], ["garbage", 1]] as const)(
+    "executes the actual gate shell for output %j (exit %i)", (exitCode, expectedExit) => {
+      const block = text().slice(text().indexOf("      - name: Gate"));
+      const script = block.slice(block.indexOf("        run: |\n") + "        run: |\n".length)
+        .split("\n").map((line) => line.replace(/^ {10}/, "")).join("\n");
+      const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], { env: { ...process.env, EXIT_CODE: exitCode }, encoding: "utf8" });
+      expect(result.status).toBe(expectedExit);
+    });
+});

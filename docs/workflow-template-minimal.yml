@@ -1,0 +1,70 @@
+# Lupa: minimal workflow. Copy to .github/workflows/lupa.yml in your repository.
+# Reviews same-repository pull requests. For /review comments, fork pull requests and
+# code-scanning upload, start from docs/workflow-template.yml instead.
+name: Lupa
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the PR head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install semgrep (pinned, from PyPI)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/lupa-semgrep-venv"
+          "$RUNNER_TEMP/lupa-semgrep-venv/bin/pip" install --disable-pip-version-check semgrep==1.180.0
+          echo "$RUNNER_TEMP/lupa-semgrep-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Write the PR diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr-reviewer-out"
+          export GIT_CONFIG_PARAMETERS="'core.quotePath=false'"
+          git diff -U3 --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" > "$RUNNER_TEMP/pr-reviewer-out/diff.patch"
+
+      - name: Review
+        id: review
+        # Exit 2 (warnings) must not block the merge; the gate step below decides.
+        continue-on-error: true
+        uses: cpenaforte/lupa@f621b79e3bce7fc0331542b47b54ff5504d5a571 # v0.12.0
+        env:
+          PR_REVIEWER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_REVIEWER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-out
+        with:
+          pr_number: ${{ github.event.pull_request.number }}
+          llm_provider: openai
+          llm_model: ${{ vars.PR_REVIEWER_MODEL }}
+          llm_api_key: ${{ secrets.LLM_API_KEY }}
+
+      - name: Gate (0 and 2 pass; 1, 3 and a missing output fail)
+        if: always()
+        env:
+          EXIT_CODE: ${{ steps.review.outputs.exit-code }}
+        run: |
+          case "$EXIT_CODE" in
+            0|2) exit 0 ;;
+            *) echo "lupa: gate failed (exit code: ${EXIT_CODE:-none})" >&2; exit 1 ;;
+          esac

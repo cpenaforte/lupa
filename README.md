@@ -1,34 +1,106 @@
 # Lupa
 
-A reusable GitHub Action (TypeScript, Node 24) that reviews pull requests in two layers and posts the result as one review:
+Lupa is a GitHub Action that reviews pull requests and posts the result as one review. It combines two layers:
 
-- **Fast-path (always, free, any language):** diff statistics, sensitive paths, secret detection (gitleaks), TODO/FIXME markers, lockfile changes without a manifest, and scanners (semgrep, gitleaks, trivy, osv-scanner). Optional L2 native toolchains run only when the repository already has their config.
-- **Slow-path (optional, bring your own key):** an LLM reviews the diff. It runs only when `llm_api_key` is set. Without a key it is skipped with a warning and the fast-path result is posted.
+- **Fast-path (always on, free, any language):** diff statistics, sensitive paths, secret detection, TODO/FIXME markers, lockfile changes without a manifest, and scanners (semgrep, gitleaks, trivy, osv-scanner). Native toolchains (L2) run only when your repository already has their config.
+- **Slow-path (optional, bring your own key):** an LLM reviews the diff, and with `llm_agent: true` it can also read your repository to verify its claims. It runs only when `llm_api_key` is set. Without a key the slow path is skipped with a warning and the fast-path result is posted.
 
-The diff is treated as untrusted data. By default the LLM has no tools (see Agent mode for the opt-in tool loop) and its output is validated against a schema before anything is posted.
+Reviews are advisory by default: findings are review comments and the check still passes. Set `fail_level: high` to block merges on high-severity findings, or `analysis_policy: required` to also require complete analysis (see [Gate](#gate-fail_level)). The diff is treated as untrusted data, the LLM has no tools unless you enable agent mode, and its output is validated against a schema before anything is posted. Lupa never approves a PR.
 
 ## Quick start
 
-1. Pin the action to a released commit SHA (never a branch) and copy a template into your repository:
+Three steps and about five minutes. You need a repository on GitHub and an API key for any [supported provider](#providers) (OpenAI, Anthropic, Google, Groq, Mistral, OpenRouter, OpenCode, Ollama or any OpenAI-compatible endpoint).
 
-   ```bash
-   mkdir -p .github/workflows
-   cp docs/workflow-template.yml .github/workflows/lupa.yml
-   ```
+1. **Add the key and the model** under *Settings → Secrets and variables → Actions*:
 
-   Replace `OWNER` and the all-zero SHA in the template with a released `lupa` commit.
-
-2. Add secrets and variables to the repository:
-
-   | Name | Kind | Purpose |
+   | Name | Kind | Value |
    |---|---|---|
-   | `LLM_API_KEY` | secret | Key for the LLM provider. Omit it to run fast-path only. |
-   | `PR_REVIEWER_MODEL` | variable | Model name. Must belong to the provider set in the template's `llm_provider`. |
-   | `PR_REVIEWER_APP_ID` / `PR_REVIEWER_APP_KEY` | variable / secret | Only for fork PRs with the privileged template (see below). |
+   | `LLM_API_KEY` | secret | Your provider API key. Leave it out to try the fast-path only. |
+   | `PR_REVIEWER_MODEL` | variable | A model name from the provider in the workflow, for example an OpenAI model with the default `llm_provider: openai`. |
 
-   The template defaults to `llm_provider: openai`, so provider and model must match. To use OpenCode Go, set `llm_provider: opencode-go` in the template **and** set `PR_REVIEWER_MODEL` to a Go model such as `deepseek-v4-flash`. If you keep `openai`, use an OpenAI model.
+2. **Create `.github/workflows/lupa.yml`** with this workflow. It is pinned to a released commit; update the SHA when you upgrade (see the [releases](https://github.com/cpenaforte/lupa/releases)).
 
-3. Open a pull request. The review is posted for `opened`, `synchronize`, `reopened` and `ready_for_review`. You can also comment `/review` on a PR (trusted author associations only) or run `workflow_dispatch` with `pr_number`.
+```yaml
+# Lupa: minimal workflow. Copy to .github/workflows/lupa.yml in your repository.
+# Reviews same-repository pull requests. For /review comments, fork pull requests and
+# code-scanning upload, start from docs/workflow-template.yml instead.
+name: Lupa
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the PR head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install semgrep (pinned, from PyPI)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/lupa-semgrep-venv"
+          "$RUNNER_TEMP/lupa-semgrep-venv/bin/pip" install --disable-pip-version-check semgrep==1.180.0
+          echo "$RUNNER_TEMP/lupa-semgrep-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Write the PR diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr-reviewer-out"
+          export GIT_CONFIG_PARAMETERS="'core.quotePath=false'"
+          git diff -U3 --no-ext-diff --no-color "${BASE_SHA}...${HEAD_SHA}" > "$RUNNER_TEMP/pr-reviewer-out/diff.patch"
+
+      - name: Review
+        id: review
+        # Exit 2 (warnings) must not block the merge; the gate step below decides.
+        continue-on-error: true
+        uses: cpenaforte/lupa@f621b79e3bce7fc0331542b47b54ff5504d5a571 # v0.12.0
+        env:
+          PR_REVIEWER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_REVIEWER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-out
+        with:
+          pr_number: ${{ github.event.pull_request.number }}
+          llm_provider: openai
+          llm_model: ${{ vars.PR_REVIEWER_MODEL }}
+          llm_api_key: ${{ secrets.LLM_API_KEY }}
+
+      - name: Gate (0 and 2 pass; 1, 3 and a missing output fail)
+        if: always()
+        env:
+          EXIT_CODE: ${{ steps.review.outputs.exit-code }}
+        run: |
+          case "$EXIT_CODE" in
+            0|2) exit 0 ;;
+            *) echo "lupa: gate failed (exit code: ${EXIT_CODE:-none})" >&2; exit 1 ;;
+          esac
+```
+
+3. **Open a pull request.** The review is posted for `opened`, `synchronize`, `reopened` and `ready_for_review`.
+
+To use another provider, change `llm_provider` in the workflow **and** set `PR_REVIEWER_MODEL` to a model of that provider. For OpenCode Go, for example, use `llm_provider: opencode-go` with a Go model such as `deepseek-v4-flash`. A mismatched provider and model is the most common first-run problem; the job log then says the slow path was skipped and why.
+
+The minimal workflow reviews pull requests from branches in the same repository. For more, start from the full template:
+
+- [`docs/workflow-template.yml`](https://github.com/cpenaforte/lupa/blob/main/docs/workflow-template.yml) adds `/review` comments (trusted authors only), `workflow_dispatch` with `pr_number`, the code-scanning (SARIF) upload and the review artifact.
+- [`docs/workflow-template-privileged.yml`](https://github.com/cpenaforte/lupa/blob/main/docs/workflow-template-privileged.yml) is the companion that posts reviews on fork PRs. See [Forks and the two-workflow setup](#forks-and-the-two-workflow-setup).
 
 ## Inputs
 
@@ -126,7 +198,7 @@ In agent mode, whole files from the repository (and from linked repositories men
 
 ## Cost
 
-Budget figures are estimates. Prices change: check your provider's price page, and compare **Zen vs direto** (calling the model provider directly with its own key). Zen is pay-per-use through OpenCode, and its prices can differ from the direct provider prices.
+Budget figures are estimates. Prices change: check your provider's price page, and compare **Zen versus direct** (calling the model provider directly with its own key). Zen is pay-per-use through OpenCode, and its prices can differ from the direct provider prices.
 
 - **Cost of a typical PR:** about 3k input tokens plus 600 output tokens.
 - **Ceiling:** `max_prompt_chars` 120000 bytes is about 30k input tokens (≈bytes/4) plus prompt overhead. At frontier-model prices a PR at the ceiling costs roughly $0.30 to $0.60. Compare with the typical figure above (about 3k input and 600 output tokens). Lower `max_prompt_chars` to cap spend. `max_diff_chars` (60000 UTF-16 code units) stays the diff-only allowance inside that total. Files larger than the per-file cap (8000 characters) are truncated, and files over the total ceiling are skipped with a note. Any diff whose UTF-8 bytes exceed 120,000 skips the slow path at default config — e.g. ~40k units at 3 B/unit, ~60k units at 2 B/unit.
@@ -145,11 +217,11 @@ With the default `analysis_policy: advisory`, the review event and exit code rea
 
 Opt in with `analysis_policy: required` to require complete analysis of the recorded semantic scope. A triggered review with incomplete, unsupported, or failed analysis exits `3`, independently of `fail_level`; this coverage failure alone does not request changes. The `analysis-status` output, review body, summary, and SHA-bound `analysis.json` artifact disclose completion and coverage limitations. Non-trigger events remain skipped/0. A stale head prevents publication and exits 3 in required mode (advisory retains its stale no-op/0 behavior). Completion describes recorded execution, not proof of model correctness or approval.
 
-For the required profile, configure a reachable model and its BYOK key (or the documented keyless provider), install Semgrep and provide Docker for Gitleaks/Trivy and OSV on changed supported lockfiles, and make each detected L2 check available. Configure `PR_REVIEWER_ACTOR` as described below when the posting credential cannot resolve its identity. Then change `analysis_policy: advisory` to `analysis_policy: required` in the PR workflow; choose `fail_level` separately. Flow B has its own trusted publication inputs and cannot repair a producer's missing analysis. Keep the PR workflow's gate required in branch protection if it should enforce this policy.
+For the required profile, configure a reachable model and its BYOK key (or the documented keyless provider), install Semgrep and provide Docker for Gitleaks/Trivy and OSV on changed supported lockfiles, and make each detected L2 check available. Configure `PR_REVIEWER_ACTOR` as described below when the posting credential cannot resolve its identity. Then change `analysis_policy: advisory` to `analysis_policy: required` in the PR workflow; choose `fail_level` separately. The privileged post workflow has its own trusted publication inputs and cannot repair a producer's missing analysis. Keep the PR workflow's gate required in branch protection if it should enforce this policy.
 
 The required scope includes successful semantic execution for every eligible changed hunk. Missing tools/model/key or unknown invocation health report `unsupported`; failed invocations report `failed`; clipped/omitted hunks, exhausted agent inspection, malformed tool arguments, unavailable needed issue/actor context, and unresolved attribution report non-complete coverage. Binary, minified, source-map, and unrepresentable paths without an applicable analyzer are unsupported. If `llm_agent: true` is requested, a model fallback without tool support is unsupported even if it returns a valid empty findings object. In advisory keyless deterministic runs, the body records that semantic review did not run. A `complete` assessment describes execution of its recorded scope; it does not measure correctness, replace human review, or authorize automatic approval or merge.
 
-With zero findings, a non-complete review still shows `Analysis: incomplete`, `unsupported`, or `failed`, its scope, semantic file/hunk counts, and the reason in both the summary and review body. Coverage alone posts `COMMENT` when publication is safe. `analysis.json` stores the capped, redacted assessment bound to the recorded base/head SHAs. In Flow B this is an untrusted producer reporting claim: it never sets token type, actor, severity policy, or merge acceptance, and publication never reruns analysis. Legacy or invalid/mismatched assessment artifacts remain publishable with coverage unavailable; trusted required policy returns 3. PR metadata or live/workflow head binding mismatches refuse publication entirely.
+With zero findings, a non-complete review still shows `Analysis: incomplete`, `unsupported`, or `failed`, its scope, semantic file/hunk counts, and the reason in both the summary and review body. Coverage alone posts `COMMENT` when publication is safe. `analysis.json` stores the capped, redacted assessment bound to the recorded base/head SHAs. In the privileged post workflow this is an untrusted producer reporting claim: it never sets token type, actor, severity policy, or merge acceptance, and publication never reruns analysis. Legacy or invalid/mismatched assessment artifacts remain publishable with coverage unavailable; trusted required policy returns 3. PR metadata or live/workflow head binding mismatches refuse publication entirely.
 
 Required mode also accepts a finding's optional causal `change` anchor: `{ "file": "src/auth.ts", "line": 2, "side": "LEFT" }`. The exact path and line must name an actual removed LEFT or added RIGHT line in the bound patch; a rename may use the old path for LEFT. This lets a removed protection or new caller make a finding eligible even when its display location is unchanged context or another file. The anchor is a supported model claim, not deterministic proof of causality, and does not move the review comment. Existing added-line/reopened eligibility still works without an anchor. An unresolved high in a touched file, or any invalid anchor, makes required attribution incomplete; a purely untouched baseline issue without a claim remains non-blocking advice. Malformed, lossy, or secret-redacted claims retain an internal `changeInvalid: true` diagnostic so they cannot silently become missing legacy anchors. Advisory mode keeps its existing eligibility regardless of anchors.
 
@@ -214,6 +286,10 @@ The segregation matters: the privileged job reads only the artifact, so PR code 
 - `llm_api_key` is never written to logs. Prompt-injection defences are structural (delimited diff, no tools for the model, output validation, an auditable log of each call). They are not a guarantee.
 - Artifact redaction is runtime-key masking only: `findings.json` and `sarif.json` mask the run's own `github_token` and `llm_api_key` values. Secrets committed in the diff are a separate scanner concern and are not covered.
 - The model can be wrong. Treat findings as suggestions and keep human review for security-critical changes.
+
+## License
+
+Lupa is released under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for the copyright holder.
 
 ## Why the technical identifiers still say pr-reviewer
 

@@ -12,7 +12,7 @@ describe("README", () => {
       "fail_level",
       "typical",
       "peak/off-peak",
-      "Zen vs direto",
+      "Zen versus direct",
       "v1",
       "v2",
       "fork",
@@ -170,5 +170,40 @@ describe("README add-only heuristics (Q03)", () => {
   it("pins the content-evidence policy note", () => {
     const r = fs.readFileSync("README.md", "utf8");
     expect(r).toContain("a path match alone never emits");
+  });
+});
+
+describe("README adoption basics", () => {
+  const readme = () => fs.readFileSync("README.md", "utf8");
+
+  it("embeds the minimal workflow template verbatim", () => {
+    const tpl = fs.readFileSync("docs/workflow-template-minimal.yml", "utf8");
+    expect(readme()).toContain("```yaml\n" + tpl + "```");
+  });
+
+  it("quick start no longer tells users to copy from a local docs/ folder or fill placeholders", () => {
+    const r = readme();
+    expect(r).not.toContain("all-zero SHA");
+    expect(r).not.toContain("cp docs/workflow-template.yml");
+    expect(r).not.toContain("Replace `OWNER`");
+    expect(r).not.toMatch(/\bdireto\b/i);
+  });
+
+  it("links the full and privileged templates by URL and names the license", () => {
+    const r = readme();
+    expect(r).toContain("https://github.com/cpenaforte/lupa/blob/main/docs/workflow-template.yml");
+    expect(r).toContain("https://github.com/cpenaforte/lupa/blob/main/docs/workflow-template-privileged.yml");
+    expect(r).toContain("## License");
+    expect(r).toContain("Apache License 2.0");
+  });
+});
+
+describe("license metadata", () => {
+  it("ships the unmodified Apache-2.0 text, a NOTICE with the holder and a matching package license", async () => {
+    const { createHash } = await import("node:crypto");
+    const sha = createHash("sha256").update(fs.readFileSync("LICENSE")).digest("hex");
+    expect(sha).toBe("cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30");
+    expect(fs.readFileSync("NOTICE", "utf8")).toContain("Copyright 2026 Carlos Daniel Penaforte de Souza");
+    expect(JSON.parse(fs.readFileSync("package.json", "utf8")).license).toBe("Apache-2.0");
   });
 });

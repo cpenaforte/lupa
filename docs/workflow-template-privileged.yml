@@ -1,6 +1,7 @@
-# Lupa: Fluxo B (privileged). Posts the review produced by the PR run.
+# Lupa: post workflow (privileged). Posts the review produced by the PR run.
 # Runs in the base repository context. It only downloads the artifact and posts it:
-# no checkout, no scanners, no LLM. Replace OWNER and the action SHA below.
+# no checkout, no scanners, no LLM. The action is pinned to a released lupa commit;
+# update the SHA below when you upgrade, together with docs/workflow-template.yml.
 name: Lupa (post)
 
 on:

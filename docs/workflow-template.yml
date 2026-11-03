@@ -1,5 +1,6 @@
-# Lupa: Fluxo A (unprivileged). Copy into .github/workflows/ of the consuming repository.
-# Replace OWNER and the action SHA below with a released commit of lupa.
+# Lupa: full PR workflow (unprivileged). Copy into .github/workflows/ of the consuming repository.
+# The action is pinned to a released lupa commit; update the SHA below when you upgrade.
+# For a shorter starting point see docs/workflow-template-minimal.yml.
 #
 # Trust model (read before enabling):
 # - issue_comment and pull_request_review run in the BASE repository context WITH secrets. Those
@@ -44,7 +45,7 @@ permissions:
 
 jobs:
   review:
-    # Association gate at job level (M11): re-trigger comments and reviews need a trusted author.
+    # Association gate at job level: re-trigger comments and reviews need a trusted author.
     # The action repeats the check, so a missed gate here still never runs a review.
     if: >-
       (github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/review') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))

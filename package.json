@@ -2,6 +2,12 @@
   "name": "lupa",
   "version": "0.1.0",
   "description": "Reusable GitHub Action that reviews pull requests with an LLM",
+  "license": "Apache-2.0",
+  "author": "Carlos Daniel Penaforte de Souza",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cpenaforte/lupa.git"
+  },
   "private": true,
   "type": "module",
   "engines": {
