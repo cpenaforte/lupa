@@ -274,7 +274,7 @@ describe("runAgent", () => {
     expect(out.stop).toBe("final");
     const toolTurns = h.conv.turns!.filter((t) => t.role === "tool");
     expect(toolTurns).toEqual([
-      { role: "tool", id: "1", name: "read_file", output: '{"error":"repository not accessible: o/missing"}', isError: true },
+      { role: "tool", id: "1", name: "read_file", output: '{"error":"repository unavailable: o/missing"}', isError: true },
     ]);
   });
 

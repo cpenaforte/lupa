@@ -163,7 +163,7 @@ export async function slowPath(
         roots: { self: env.workDir, linked: new Map() },
         ensureLinked: async (alias, opts?) => {
           if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
-            return { error: "repository not accessible: " + alias };
+            return { error: "repository not linked: " + alias };
           // The PR body is author-controlled: the action's token (and its size lookup)
           // reaches only the reviewed owner's repositories. Other owners clone anonymously.
           const ownCredentials = sameOwner(alias, selfRepo);

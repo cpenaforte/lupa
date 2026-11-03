@@ -14,6 +14,7 @@ import {
   walkPaths,
 } from "../src/agent-tools.js";
 import type { ToolContext, ToolObservation } from "../src/agent-tools.js";
+import { isRecoverableToolError } from "../src/agent-tools.js";
 
 const created: string[] = [];
 function tempRoot(): string {
@@ -288,7 +289,7 @@ describe("executeTool", () => {
 
     const alias = await executeTool("read_file", { path: "a.txt", repo: "foo/bar" }, ctxFor(root));
     expect(alias.isError).toBe(true);
-    expect(JSON.parse(alias.output)).toEqual({ error: "repository not accessible: foo/bar" });
+    expect(JSON.parse(alias.output)).toEqual({ error: "repository not linked: foo/bar" });
   });
 
   it("repo alias resolves from the linked map or ensureLinked", async () => {
@@ -313,7 +314,7 @@ describe("executeTool", () => {
       ensureLinked: async () => ({ error: "clone failed" }),
     });
     expect(failed.isError).toBe(true);
-    expect(JSON.parse(failed.output)).toEqual({ error: "repository not accessible: o/missing" });
+    expect(JSON.parse(failed.output)).toEqual({ error: "repository unavailable: o/missing" });
   });
 });
 
@@ -841,6 +842,44 @@ describe("F11 tool-layer deadlines and byte caps", () => {
       { isError: true, recoverable: false },
       { isError: false, recoverable: false },
     ]);
+  });
+  it("keeps linked clone, deadline and size failures non-recoverable and masks the git detail", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const events: ToolObservation[] = [];
+    const failing = (error: string): ToolContext => ({
+      roots: { self: root },
+      observe: event => { events.push(event); },
+      ensureLinked: async () => ({ error }),
+    });
+    const outputs = [
+      await executeTool("read_file", { path: "a.txt", repo: "o/r" }, failing("repository not accessible: o/r: clone failed")),
+      await executeTool("read_file", { path: "a.txt", repo: "o/r" }, failing("repository not accessible: o/r: deadline exceeded")),
+      await executeTool("read_file", { path: "a.txt", repo: "o/r" }, failing("repository too large")),
+    ];
+    for (const out of outputs) expect(JSON.parse(out.output)).toEqual({ error: "repository unavailable: o/r" });
+    expect(events.map(({ recoverable }) => recoverable)).toEqual([false, false, false]);
+  });
+  it("names wrong-type and missing lookups as recoverable", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const ctx: ToolContext = { roots: { self: root } };
+    const asFile = await executeTool("read_file", { path: "." }, ctx);
+    const asDir = await executeTool("list_dir", { path: "a.txt" }, ctx);
+    const missingDir = await executeTool("list_dir", { path: "nope" }, ctx);
+    expect(JSON.parse(asFile.output)).toEqual({ error: "not a file: ." });
+    expect(JSON.parse(asDir.output)).toEqual({ error: "not a directory: a.txt" });
+    expect(JSON.parse(missingDir.output)).toEqual({ error: "directory not found: nope" });
+    for (const out of [asFile, asDir, missingDir]) expect(isRecoverableToolError(out.output)).toBe(true);
+  });
+  it("classifies only lookup messages as recoverable", () => {
+    const lookups = ["file not found: a.ts", "not a file: src", "directory not found: src", "not a directory: a.txt",
+      "repository not linked: o/r", "path not accessible: ../x", "invalid regex: (", "invalid line range: 5..1"];
+    const notLookups = ["cannot read file: a.ts", "cannot list directory: src", "repository unavailable: o/r",
+      "repository not accessible: o/r: clone failed", "file too large: a.ts (9 bytes > 1 byte limit; use grep or glob)",
+      "tool request cancelled", "grep timed out", "invalid tool arguments for grep: pattern is required", "unknown tool: x"];
+    for (const message of lookups) expect(isRecoverableToolError(JSON.stringify({ error: message }))).toBe(true);
+    for (const message of notLookups) expect(isRecoverableToolError(JSON.stringify({ error: message }))).toBe(false);
   });
   it("resolveRoot forwards the deadline to ensureLinked", async () => {
     const root = tempRoot();

@@ -17,19 +17,24 @@ export interface ToolRoots {
 export type ToolObservation = { tool: string; isError: boolean; truncated: boolean; recoverable: boolean };
 
 /**
- * Error envelopes whose message the model can correct. The tests pin each prefix
- * against the message the tool actually produces; keep the two in step.
+ * Error messages that name a lookup mistake the model can correct by choosing another
+ * path, pattern, range or linked alias. Matched on the whole message shape: a generic
+ * I/O failure, a clone failure or a deadline must never match. The tests pin each
+ * pattern against the message the tool actually produces; keep the two in step.
  */
-const RECOVERABLE_ERROR_PREFIXES = [
-  "path not accessible",
-  "cannot read file",
-  "cannot list directory",
-  "invalid regex",
-  "invalid line range",
-  "repository not accessible",
+const RECOVERABLE_ERROR_PATTERNS: readonly RegExp[] = [
+  /^path not accessible: /,
+  /^invalid regex: /,
+  /^invalid line range: /,
+  /^file not found: /,
+  /^not a file: /,
+  /^directory not found: /,
+  /^not a directory: /,
+  /^repository not linked: [^:]+$/,
 ];
 // Malformed or unknown calls (`invalid tool arguments`, `unknown tool`) are deliberately NOT
-// recoverable: the required-policy eval pins them as an execution deficit.
+// recoverable: the required-policy eval pins them as an execution deficit. Unreadable paths,
+// oversized files, clone failures and deadlines are not recoverable either.
 
 export function isRecoverableToolError(output: string): boolean {
   let message: unknown;
@@ -38,7 +43,20 @@ export function isRecoverableToolError(output: string): boolean {
   } catch {
     return false;
   }
-  return typeof message === "string" && RECOVERABLE_ERROR_PREFIXES.some((prefix) => message.startsWith(prefix));
+  return typeof message === "string" && RECOVERABLE_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/** Lookup mistakes (missing or wrong-type path) get their own recoverable message; other I/O failures stay generic. */
+function fsErrorMessage(error: unknown, kind: "file" | "directory", rel: string): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (kind === "file") {
+    if (code === "ENOENT") return `file not found: ${rel}`;
+    if (code === "EISDIR") return `not a file: ${rel}`;
+    return `cannot read file: ${rel}`;
+  }
+  if (code === "ENOENT") return `directory not found: ${rel}`;
+  if (code === "ENOTDIR") return `not a directory: ${rel}`;
+  return `cannot list directory: ${rel}`;
 }
 
 export interface ToolContext {
@@ -172,8 +190,11 @@ async function resolveRoot(repo: unknown, ctx: ToolContext, deadlineMs?: number)
       ? await ctx.ensureLinked(alias, { deadlineMs, ...(ctx.context ? { context: ctx.context } : {}) })
       : await ctx.ensureLinked(alias);
     if ("dir" in res) return res.dir;
+    // Clone, size and deadline failures are masked: the model gets a deterministic,
+    // non-recoverable message and never the git detail.
+    return { error: `repository unavailable: ${alias}` };
   }
-  return { error: `repository not accessible: ${alias}` };
+  return { error: `repository not linked: ${alias}` };
 }
 
 async function rootFor(args: Record<string, unknown>, ctx: ToolContext, deadlineMs?: number): Promise<{ root: string } | { error: string }> {
@@ -194,8 +215,8 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: 
   let size: number;
   try {
     size = statSync(target).size;
-  } catch {
-    return errorResult(`cannot read file: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "file", rel));
   }
   if (size > READ_MAX_BYTES) {
     return errorResult(
@@ -206,8 +227,8 @@ async function readFile(args: Record<string, unknown>, ctx: ToolContext, opts?: 
   let raw: string;
   try {
     raw = readFileSync(target, "utf8");
-  } catch {
-    return errorResult(`cannot read file: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "file", rel));
   }
 
   const lines = raw.split("\n");
@@ -267,8 +288,8 @@ async function listDir(args: Record<string, unknown>, ctx: ToolContext, endMs?: 
   let dirents;
   try {
     dirents = readdirSync(target, { withFileTypes: true });
-  } catch {
-    return errorResult(`cannot list directory: ${rel}`);
+  } catch (e) {
+    return errorResult(fsErrorMessage(e, "directory", rel));
   }
 
   const entries: DirEntry[] = [];

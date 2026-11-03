@@ -1469,7 +1469,7 @@ describe("run() orchestration", () => {
     expect(r.toolError).toBe(true);
     // Gating passes (the body links o/other, same owner as the reviewed o/r), so the real clone
     // is attempted and fails; the size pre-check inside ensureLinkedRepo proves the clone path was reached.
-    expect(r.toolOutput).toContain("repository not accessible: o/other");
+    expect(r.toolOutput).toContain("repository unavailable: o/other");
     expect(r.repoSizeCalls).toContainEqual(["o", "other"]);
   });
 
@@ -1487,7 +1487,7 @@ describe("run() orchestration", () => {
     expect(r.toolError).toBe(true);
     // The size guard short-circuits before any clone: the tool surfaces the
     // not-accessible error while getRepoSize proves the pre-check ran.
-    expect(r.toolOutput).toContain("repository not accessible: o/other");
+    expect(r.toolOutput).toContain("repository unavailable: o/other");
     expect(r.repoSizeCalls).toContainEqual(["o", "other"]);
     const lines = info.mock.calls.map((c) => String(c[0]));
     expect(lines).toContain("agent linked repositories: o/other");
@@ -1512,7 +1512,7 @@ describe("run() orchestration", () => {
     expect(r.posted).toBe(true);
     expect(r.agentToolCtx?.ensureLinked).toBeDefined();
     const refused = await r.agentToolCtx!.ensureLinked!("evil/x");
-    expect(refused).toEqual({ error: "repository not accessible: evil/x" });
+    expect(refused).toEqual({ error: "repository not linked: evil/x" });
     const turns =
       (r.agentConv as { turns?: Array<{ role?: string; text?: string }> } | undefined)?.turns ?? [];
     expect(
@@ -1526,7 +1526,7 @@ describe("run() orchestration", () => {
     const r = await runWithMocks({ llmAgent: true, prBody: "See https://github.com/o/Other for context" });
     expect(r.posted).toBe(true);
     const gate = r.agentToolCtx!.ensureLinked!;
-    expect(await gate("evil/x")).toEqual({ error: "repository not accessible: evil/x" });
+    expect(await gate("evil/x")).toEqual({ error: "repository not linked: evil/x" });
     // Refusal happened at the gate: ensureLinkedRepo (and its getRepoSize pre-check) never ran.
     expect(r.repoSizeCalls).not.toContainEqual(["evil", "x"]);
     // Mixed-case same-owner alias passes the gate: the size pre-check sees the alias as passed through.
