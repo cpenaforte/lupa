@@ -20978,6 +20978,17 @@ import { join as join2 } from "node:path";
 // lib/src/artifact-limits.js
 import { closeSync, openSync, readSync } from "node:fs";
 
+// lib/src/agent-types.js
+var AGENT_RESERVE_SECONDS = 10;
+var AGENT_LIMITS = {
+  maxCallsPerTurn: 4,
+  resultBytes: 32768,
+  totalBytes: 131072,
+  linkedRepos: 3,
+  cloneMs: 6e4,
+  cloneMaxBytes: 209715200
+};
+
 // lib/src/inputs.js
 var LLM_PROVIDERS = [
   "openai",
@@ -21021,18 +21032,19 @@ function readString(name, fallback = "") {
   const v = getInput(name);
   return v === "" ? fallback : v;
 }
-function parseIntValue(name, raw, min) {
+function parseIntValue(name, raw, min, max) {
   const n = Number(raw);
-  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min) {
-    throw new Error(`Invalid ${name} "${raw}": expected an integer >= ${min} (safe integer)`);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < min || max !== void 0 && n > max) {
+    const range = max === void 0 ? `>= ${min}` : `between ${min} and ${max}`;
+    throw new Error(`Invalid ${name} "${raw}": expected an integer ${range} (safe integer)`);
   }
   return n;
 }
-function readInt(name, fallback, min) {
+function readInt(name, fallback, min, max) {
   const raw = readString(name);
   if (raw === "")
     return fallback;
-  return parseIntValue(name, raw, min);
+  return parseIntValue(name, raw, min, max);
 }
 function readOptionalDecimal(name) {
   const raw = readString(name);
@@ -21092,7 +21104,7 @@ function getInputs() {
     prNumber,
     llmAgent: readBool("llm_agent", false),
     llmAgentMaxTurns: readInt("llm_agent_max_turns", 10, 1),
-    llmAgentMaxSeconds: readInt("llm_agent_max_seconds", 180, 1)
+    llmAgentMaxSeconds: readInt("llm_agent_max_seconds", 180, AGENT_RESERVE_SECONDS + 1, 21600)
   };
 }
 function readOptionalInt(name, min) {
@@ -26708,18 +26720,25 @@ import { join as join5 } from "node:path";
 import { closeSync as closeSync2, openSync as openSync2, readFileSync as readFileSync3, readSync as readSync2, readdirSync, realpathSync, statSync as statSync2 } from "node:fs";
 import { dirname, isAbsolute, join as join3, relative, resolve, sep as sep2 } from "node:path";
 import { Worker } from "node:worker_threads";
-
-// lib/src/agent-types.js
-var AGENT_LIMITS = {
-  maxCallsPerTurn: 4,
-  resultBytes: 32768,
-  totalBytes: 131072,
-  linkedRepos: 3,
-  cloneMs: 6e4,
-  cloneMaxBytes: 209715200
-};
-
-// lib/src/agent-tools.js
+var RECOVERABLE_ERROR_PREFIXES = [
+  "path not accessible",
+  "cannot read file",
+  "cannot list directory",
+  "invalid regex",
+  "invalid line range",
+  "invalid tool arguments",
+  "unknown tool",
+  "repository not accessible"
+];
+function isRecoverableToolError(output) {
+  let message;
+  try {
+    message = JSON.parse(output).error;
+  } catch {
+    return false;
+  }
+  return typeof message === "string" && RECOVERABLE_ERROR_PREFIXES.some((prefix) => message.startsWith(prefix));
+}
 var DRIVE_LETTER = /^[a-zA-Z]:/;
 var TRUNCATION_MARKER = "\n[truncated]";
 var ERROR_MESSAGE_CAP = 2e3;
@@ -27312,6 +27331,7 @@ function validateToolArgs(name, args) {
     return { ok: false, message: `invalid tool arguments for ${name}: expected an object` };
   }
   const values = args;
+  let out = values;
   const required = definition.parameters.required;
   const properties = definition.parameters.properties;
   for (const [field, schema] of Object.entries(properties)) {
@@ -27321,12 +27341,18 @@ function validateToolArgs(name, args) {
       }
       continue;
     }
+    if (values[field] === null && !required?.includes(field)) {
+      if (out === values)
+        out = { ...values };
+      delete out[field];
+      continue;
+    }
     const primitive = schema.type === "integer" ? "number" : schema.type;
     if (typeof values[field] !== primitive) {
       return { ok: false, message: `invalid tool arguments for ${name}: ${field} must be a ${primitive}` };
     }
   }
-  return { ok: true, args: values };
+  return { ok: true, args: out };
 }
 async function dispatchTool(name, args, ctx, limits) {
   const context3 = limits?.context ?? ctx.context;
@@ -27364,7 +27390,8 @@ async function executeTool(name, args, ctx, limits) {
     truncated = JSON.parse(result.output).truncated === true;
   } catch {
   }
-  ctx.observe?.({ tool: name, isError: result.isError, truncated });
+  const recoverable = result.isError && isRecoverableToolError(result.output);
+  ctx.observe?.({ tool: name, isError: result.isError, truncated, recoverable });
   return result;
 }
 
@@ -27618,6 +27645,11 @@ function cleanAlias(owner, repo) {
   if (trimmedRepo.length === 0)
     return null;
   return `${owner}/${trimmedRepo}`;
+}
+function sameOwner(alias, selfFullName) {
+  const owner = (name) => name.split("/")[0]?.toLowerCase() ?? "";
+  const selfOwner = owner(selfFullName);
+  return selfOwner !== "" && selfFullName.includes("/") && alias.includes("/") && owner(alias) === selfOwner;
 }
 function parseLinkedRepos(prBody, selfFullName, cap = 3) {
   const urlRe = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
@@ -28241,27 +28273,37 @@ async function slowPath(env, out, deps, pr, fast, promptText, issueBody, skipped
       if (linked.length > 0)
         info(`agent linked repositories: ${linked.join(", ")}`);
       const toolCtx = {
+        // Recoverable lookup errors (wrong path, bad regex) are the model's routine
+        // exploration and leave diff coverage intact; cancellation, I/O and budget
+        // failures and every truncation are real coverage gaps.
         observe: (event) => {
-          if (event.isError || event.truncated)
-            assessment?.coverage.issues.push({ code: event.isError ? "tool-error" : "tool-truncated", message: `${event.tool}: ${event.isError ? "inspection failed" : "inspection truncated"}` });
+          if (event.isError && !event.recoverable)
+            assessment?.coverage.issues.push({ code: "tool-error", message: `${event.tool}: inspection failed` });
+          else if (event.truncated)
+            assessment?.coverage.issues.push({ code: "tool-truncated", message: `${event.tool}: inspection truncated` });
         },
         roots: { self: env.workDir, linked: /* @__PURE__ */ new Map() },
         ensureLinked: async (alias, opts) => {
           if (!linked.some((l) => l.toLowerCase() === alias.toLowerCase()))
             return { error: "repository not accessible: " + alias };
+          const ownCredentials = sameOwner(alias, selfRepo);
+          if (!ownCredentials)
+            info(`agent linked repo ${alias} cloned without credentials (different owner)`);
           const r = await ensureLinkedRepo(alias, {
-            token: i.githubToken,
+            token: ownCredentials ? i.githubToken : "",
             baseDir: join5(process.env.RUNNER_TEMP ?? tmpdir(), "lupa-linked"),
             maxBytes: AGENT_LIMITS.cloneMaxBytes,
             deadlineMs: opts?.deadlineMs,
             context: opts?.context ?? owned.context,
-            sizeKb: async (a, options) => {
-              const parts = a.split("/");
-              if (parts.length !== 2)
-                return void 0;
-              const [o, n] = parts;
-              return deps.gh.getRepoSize(o, n, options);
-            }
+            ...ownCredentials ? {
+              sizeKb: async (a, options) => {
+                const parts = a.split("/");
+                if (parts.length !== 2)
+                  return void 0;
+                const [o, n] = parts;
+                return deps.gh.getRepoSize(o, n, options);
+              }
+            } : {}
           });
           if ("dir" in r) {
             toolCtx.roots.linked.set(alias, r.dir);
@@ -29457,6 +29499,15 @@ var interpreters = {
 async function runL2(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set(), execution) {
   return (await runL2Detailed(dir, spawn, timeoutMs, changedFiles, execution)).findings;
 }
+function l2StageStatus(failure) {
+  if (!failure)
+    return "ok";
+  if (failure.code === "ENOENT")
+    return "unsupported";
+  if (failure.timedOut || failure.incomplete || failure.signal !== null || typeof failure.code !== "number")
+    return "failed";
+  return "ok";
+}
 async function runL2Detailed(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, changedFiles = /* @__PURE__ */ new Set(), execution) {
   const findings = [];
   const stages = [];
@@ -29467,7 +29518,7 @@ async function runL2Detailed(dir, spawn = execTool, timeoutMs = L2_TIMEOUT_MS, c
       stage: `l2:${name}`,
       applicable: true,
       required: true,
-      status: failure?.code === "ENOENT" ? "unsupported" : failure ? "failed" : "ok",
+      status: l2StageStatus(failure),
       ...failure ? { reason: failure.code === "ENOENT" ? "missing-binary" : describeFailure(name, failure, timeoutMs) } : {}
     });
     findings.push(...(interpreters[name] ?? interpretDefault)(name, failure, stdout, changedFiles, timeoutMs));
@@ -29782,10 +29833,10 @@ function buildGoogleBody(conv, modelId, o, flags) {
     systemInstruction: { parts: [{ text: conv.system }] },
     generationConfig
   };
-  if (flags.allowTools && conv.tools !== void 0) {
-    body.tools = conv.tools.map((t) => ({
-      functionDeclarations: [{ name: t.name, description: t.description, parameters: googleSchema(t.parameters) }]
-    }));
+  if (flags.allowTools && conv.tools !== void 0 && conv.tools.length > 0) {
+    body.tools = [{
+      functionDeclarations: conv.tools.map((t) => ({ name: t.name, description: t.description, parameters: googleSchema(t.parameters) }))
+    }];
   }
   return body;
 }
@@ -30538,7 +30589,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
     };
     const timeoutFor = (remaining) => Math.max(1, Math.min(budget.timeoutSeconds, Math.floor(remaining / 1e3)));
     const timedOut = () => {
-      if (requestExpired(context3) || deadline - clock() < 1e4) {
+      if (requestExpired(context3) || deadline - clock() < AGENT_RESERVE_SECONDS * 1e3) {
         return finish({ ok: false, reason: "timeout", detail: TIMEOUT_DETAIL }, "budget", false);
       }
       return null;
@@ -30694,7 +30745,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
           return finish(timeoutLlmResult(), "budget", false);
         const call = reply.toolCalls[i];
         if (i >= maxCalls) {
-          toolCtx.observe?.({ tool: call.name, isError: true, truncated: false });
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: false, recoverable: false });
           turnsArr.push({
             role: "tool",
             id: call.id,
@@ -30706,7 +30757,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
         }
         const remainingBytes = maxTotalBytes - bytes;
         if (remainingBytes < MARKER_BYTES) {
-          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true });
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true, recoverable: false });
           turnsArr.push({
             role: "tool",
             id: call.id,
@@ -30726,7 +30777,7 @@ async function runAgent(conv, toolCtx, budget, hooks) {
         const output = capToolResult(res.output, effective);
         const replaced = output !== res.output;
         if (replaced)
-          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true });
+          toolCtx.observe?.({ tool: call.name, isError: true, truncated: true, recoverable: false });
         const isError = res.isError || replaced;
         if (!replaced) {
           const n = Buffer.byteLength(output, "utf8");
@@ -30758,15 +30809,19 @@ function buildChatBody(conv, o, flags) {
   ];
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
-      messages.push({
-        role: "assistant",
-        content: turn.text || null,
-        tool_calls: turn.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function",
-          function: { name: tc.name, arguments: tc.rawArgs }
-        }))
-      });
+      if (turn.toolCalls.length === 0) {
+        messages.push({ role: "assistant", content: turn.text });
+      } else {
+        messages.push({
+          role: "assistant",
+          content: turn.text || null,
+          tool_calls: turn.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function",
+            function: { name: tc.name, arguments: tc.rawArgs }
+          }))
+        });
+      }
     } else if (turn.role === "tool") {
       messages.push({ role: "tool", tool_call_id: turn.id, content: turn.output });
     } else {
