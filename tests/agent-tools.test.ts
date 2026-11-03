@@ -882,9 +882,10 @@ describe("F11 tool-layer deadlines and byte caps", () => {
   });
   it("classifies only lookup messages as recoverable", () => {
     const lookups = ["file not found: a.ts", "not a file: src", "directory not found: src", "not a directory: a.txt",
-      "repository not linked: o/r", "path not accessible: ../x", "invalid regex: (", "invalid line range: 5..1"];
+      "repository not linked: o/r", "path not accessible: ../x", "invalid regex: (", "invalid line range: 5..1",
+      "file too large: a.ts (9 bytes > 1 byte limit; use grep or glob)"];
     const notLookups = ["cannot read file: a.ts", "cannot list directory: src", "repository unavailable: o/r",
-      "repository not accessible: o/r: clone failed", "file too large: a.ts (9 bytes > 1 byte limit; use grep or glob)",
+      "repository not accessible: o/r: clone failed",
       "tool request cancelled", "grep timed out", "invalid tool arguments for grep: pattern is required", "unknown tool: x"];
     for (const message of lookups) expect(isRecoverableToolError(JSON.stringify({ error: message }))).toBe(true);
     for (const message of notLookups) expect(isRecoverableToolError(JSON.stringify({ error: message }))).toBe(false);

@@ -31,10 +31,11 @@ const RECOVERABLE_ERROR_PATTERNS: readonly RegExp[] = [
   /^directory not found: /,
   /^not a directory: /,
   /^repository not linked: [^:]+$/,
+  /^file too large: /,
 ];
 // Malformed or unknown calls (`invalid tool arguments`, `unknown tool`) are deliberately NOT
 // recoverable: the required-policy eval pins them as an execution deficit. Unreadable paths,
-// oversized files, clone failures and deadlines are not recoverable either.
+// clone failures and deadlines are not recoverable either.
 
 export function isRecoverableToolError(output: string): boolean {
   let message: unknown;
