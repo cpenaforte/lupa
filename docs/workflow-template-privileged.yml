@@ -75,7 +75,7 @@ jobs:
       - name: Post review
         # Reporting only: it does not gate merges (the PR run's gate does).
         continue-on-error: true
-        uses: cpenaforte/lupa@a69c377a7f34d35274456512d47e5cbd223a141e
+        uses: cpenaforte/lupa@8a02ff94252f81aacbce4988c8afefa7359f2c57
         env:
           PR_REVIEWER_ARTIFACT_DIR: ${{ runner.temp }}/pr-reviewer-priv-out
           PR_REVIEWER_TOKEN_TYPE: ${{ steps.app.outcome == 'success' && 'app' || 'workflow-run' }}
