@@ -184,10 +184,11 @@ function buildGoogleBody(
     systemInstruction: { parts: [{ text: conv.system }] },
     generationConfig,
   };
-  if (flags.allowTools && conv.tools !== undefined) {
-    body.tools = conv.tools.map((t) => ({
-      functionDeclarations: [{ name: t.name, description: t.description, parameters: googleSchema(t.parameters) }],
-    }));
+  // One Tool carries every declaration: the canonical generateContent shape.
+  if (flags.allowTools && conv.tools !== undefined && conv.tools.length > 0) {
+    body.tools = [{
+      functionDeclarations: conv.tools.map((t) => ({ name: t.name, description: t.description, parameters: googleSchema(t.parameters) })),
+    }];
   }
   return body;
 }

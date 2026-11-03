@@ -357,6 +357,20 @@ describe("callGoogleTurn", () => {
     expect((body.systemInstruction as { parts: Array<{ text: string }> }).parts[0]!.text).toBe(c.system);
   });
 
+  it("sends every tool declaration inside one Tool, in order", async () => {
+    const listDef = { name: "list_dir", description: "List a directory", parameters: { type: "object", properties: { path: { type: "string" } } } };
+    const c: Conversation = { system: "s", user: "u", tools: [toolDef, listDef] };
+    await callGoogleTurn(fakeGoogleEp(), MODEL, c, opts(), turnFlags);
+    expect(lastBody().tools).toEqual([
+      {
+        functionDeclarations: [
+          { name: "read_file", description: "Read a file", parameters: googleSchema(toolDef.parameters) },
+          { name: "list_dir", description: "List a directory", parameters: googleSchema(listDef.parameters) },
+        ],
+      },
+    ]);
+  });
+
   it("turn attaches calls:1 usage (candidates fallback) from usageMetadata", async () => {
     stubFetch(() =>
       json(200, { ...okGoogle('{"findings":[]}'), usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } }),
