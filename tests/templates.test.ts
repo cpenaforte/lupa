@@ -55,13 +55,13 @@ describe("workflow templates", () => {
       expect(text.match(/^\s+review_actor: (.+)$/gm)?.map((line) => line.trim())).toEqual(["review_actor: ${{ vars.PR_REVIEWER_ACTOR }}"]);
     }
   });
-  it("both templates pin the v0.11.0 release SHA", () => {
+  it("both templates pin the v0.12.0 release SHA", () => {
     for (const file of [
       "docs/workflow-template.yml",
       "docs/workflow-template-privileged.yml",
     ]) {
       expect(fs.readFileSync(file, "utf8")).toContain(
-        "uses: cpenaforte/lupa@48d9a9ddb3f17b476bf91b175726590a5d68200c",
+        "uses: cpenaforte/lupa@f621b79e3bce7fc0331542b47b54ff5504d5a571",
       );
     }
   });
