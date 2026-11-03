@@ -51,15 +51,20 @@ function buildChatBody(
   ];
   for (const turn of conv.turns ?? []) {
     if (turn.role === "assistant") {
-      messages.push({
-        role: "assistant",
-        content: turn.text || null,
-        tool_calls: turn.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function",
-          function: { name: tc.name, arguments: tc.rawArgs },
-        })),
-      });
+      // `tool_calls` is sent only when non-empty: OpenAI-compatible APIs reject `[]`.
+      if (turn.toolCalls.length === 0) {
+        messages.push({ role: "assistant", content: turn.text });
+      } else {
+        messages.push({
+          role: "assistant",
+          content: turn.text || null,
+          tool_calls: turn.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function",
+            function: { name: tc.name, arguments: tc.rawArgs },
+          })),
+        });
+      }
     } else if (turn.role === "tool") {
       messages.push({ role: "tool", tool_call_id: turn.id, content: turn.output });
     } else {

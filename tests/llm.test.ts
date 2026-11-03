@@ -926,6 +926,37 @@ describe("callChatTurn", () => {
     expect("response_format" in body).toBe(false);
   });
 
+  it("omits tool_calls when replaying an assistant turn that made no tool calls", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        { role: "assistant", text: "{bad", toolCalls: [] },
+        { role: "user", text: "repair" },
+      ],
+    };
+    await callChatTurn(fakeOpenAiEp(), c, turnOpts(), toolFlags);
+    const messages = lastBody().messages;
+    expect(messages[2]).toEqual({ role: "assistant", content: "{bad" });
+    expect(messages[2]).not.toHaveProperty("tool_calls");
+  });
+
+  it("still sends tool_calls for an assistant turn that made tool calls", async () => {
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        { role: "assistant", text: "", toolCalls: [{ id: "c1", name: "read_file", args: { path: "a" }, rawArgs: '{"path":"a"}' }] },
+      ],
+    };
+    await callChatTurn(fakeOpenAiEp(), c, turnOpts(), toolFlags);
+    const echoed = lastBody().messages[2];
+    expect(echoed.content).toBeNull();
+    expect(echoed.tool_calls).toEqual([
+      { id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"a"}' } },
+    ]);
+  });
+
   it("translates assistant echo and tool results", async () => {
     const c: Conversation = {
       system: "s",
