@@ -97,7 +97,7 @@ jobs:
 
 3. **Open a pull request.** The review is posted for `opened`, `synchronize`, `reopened` and `ready_for_review`.
 
-To use another provider, change `llm_provider` in the workflow **and** set `PR_REVIEWER_MODEL` to a model of that provider. For OpenCode Go, for example, use `llm_provider: opencode-go` with a Go model such as `deepseek-v4-flash`. A mismatched provider and model is the most common first-run problem; the job log then says the slow path was skipped and why.
+To use another provider, change `llm_provider` in the workflow **and** set `PR_REVIEWER_MODEL` to a model of that provider. For OpenCode Go, for example, use `llm_provider: opencode-go` with a Go model such as `deepseek-v4.1-flash`. A mismatched provider and model is the most common first-run problem; the job log then says the slow path was skipped and why.
 
 The minimal workflow reviews pull requests from branches in the same repository. For more, start from the full template:
 
