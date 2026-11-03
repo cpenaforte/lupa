@@ -46,10 +46,10 @@ The diff is treated as untrusted data. By default the LLM has no tools (see Agen
 | `llm_max_tokens` | `2000` | Maximum output tokens. |
 | `llm_agent` | `false` | Enable read-only repository tools so the reviewer can verify claims before reporting. |
 | `llm_agent_max_turns` | `10` | Maximum number of tool-call rounds the agent may take. |
-| `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. |
+| `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. Accepted range `11`–`21600`. |
 | `pr_number` | (empty) | Used only by `workflow_dispatch`. |
 | `fail_level` | `warning` | `none`, `warning` or `high`. See the gate section. |
-| `analysis_policy` | `advisory` | `advisory` preserves severity exits; `required` returns 3 for a triggered non-complete analysis. |
+| `analysis_policy` | `advisory` | `advisory` preserves severity exits; `required` returns 3 for a triggered non-complete analysis. Non-complete includes a superseded (stale) head, truncated agent tool results, agent tool errors other than routine lookup mistakes (cancellation, budget, I/O), and L2 checks that timed out, were killed by a signal or could not be spawned. Routine agent lookup errors (missing path, bad regex, unknown tool) do not count. |
 | `max_diff_chars` | `60000` | Diff ceiling sent to the LLM. |
 | `max_prompt_chars` | `120000` | Total UTF-8 byte budget for the assembled LLM user message (diff, findings, issue context, headers, skipped-files note); the fixed system prompt is excluded. Note: `max_diff_chars` is counted in UTF-16 code units, not bytes. |
 | `max_findings` | `200` | Total findings published (inline + body). |
@@ -105,7 +105,7 @@ The default wire format is `openai-chat`: `POST {base_url}/chat/completions` wit
 
 ## Agent mode
 
-Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock). Values under ~11 seconds leave no time for a model call (a 10 second reserve is held back) and abort immediately.
+Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock). Values outside `11`–`21600` are rejected at input time: a 10 second reserve is held back for the final model call, and `21600` is GitHub's 6 hour job limit.
 
 | Tool | What it does | Caps |
 |---|---|---|
@@ -116,7 +116,7 @@ Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repos
 
 At most 4 tool calls run per turn, each result is capped at 32768 bytes, and the loop stops when 131072 total result bytes are reached. Paths that escape the checkout, absolute paths, `..` segments and `.git` are rejected.
 
-Linked repositories: `owner/repo` references (github.com URLs or bare `owner/repo` mentions) in the PR body, up to 3, are lazily cloned at the default branch (`--depth 1 --single-branch`) with `github_token` when a tool call names them. Only repositories mentioned in the PR body can be cloned; other aliases are refused. Parsing is logged as `agent linked repositories: ...`.
+Linked repositories: `owner/repo` references (github.com URLs or bare `owner/repo` mentions) in the PR body, up to 3, are lazily cloned at the default branch (`--depth 1 --single-branch`) with `github_token` when a tool call names them. Only repositories mentioned in the PR body can be cloned; other aliases are refused. Credentials and the size pre-check are used only for repositories owned by the same owner as the reviewed repository. Other owners are cloned without credentials, so only public repositories work for them. Parsing is logged as `agent linked repositories: ...`.
 
 Fallback: a model whose endpoint rejects the tool-call shape (an HTTP 400 on the tool-call turn that succeeds without tools) is remembered as tools-unsupported and the run falls back to a single-shot review with the warning `agent tools unsupported for this model: using single-shot`.
 
