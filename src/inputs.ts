@@ -141,7 +141,7 @@ export function getInputs(): ActionInputs {
     llmApiKey: readString("llm_api_key"),
     ...(llmTemperature !== undefined ? { llmTemperature } : {}),
     ...(llmTopP !== undefined ? { llmTopP } : {}),
-    llmMaxTokens: readInt("llm_max_tokens", 8000, 1),
+    llmMaxTokens: readInt("llm_max_tokens", 16000, 1),
     failLevel: parseFailLevel(readString("fail_level", "warning")),
     analysisPolicy: readEnum("analysis_policy", ["advisory", "required"] as const, "advisory"),
     maxDiffChars: readInt("max_diff_chars", 60000, 1),

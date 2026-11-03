@@ -117,7 +117,7 @@ The minimal workflow reviews pull requests from branches in the same repository.
 | `llm_model` | (empty) | Model name, passed through as is. |
 | `llm_api_key` | (empty) | Provider key. Never logged. |
 | `llm_temperature`, `llm_top_p` | (unset) | Sent only when set explicitly. Left unset by default because reasoning models reject other values. |
-| `llm_max_tokens` | `8000` | Maximum output tokens. |
+| `llm_max_tokens` | `16000` | Maximum output tokens. Output is billed only as it is generated, so a higher cap costs nothing on short reviews. At 8000, reviews of a few small files were cut off mid-answer in canaries. |
 | `llm_agent` | `false` | Enable read-only repository tools so the reviewer can verify claims before reporting. |
 | `llm_agent_max_turns` | `10` | Maximum number of tool-call rounds the agent may take. |
 | `llm_agent_max_seconds` | `180` | Wall-clock budget in seconds for the agent tool loop. Accepted range `11`–`21600`. |

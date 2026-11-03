@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   getInputs,
@@ -71,7 +72,7 @@ describe("getInputs defaults", () => {
     expect(i.maxDiffChars).toBe(60000);
     expect(i.maxPromptChars).toBe(120000);
     expect(i.timeoutSeconds).toBe(90);
-    expect(i.llmMaxTokens).toBe(8000);
+    expect(i.llmMaxTokens).toBe(16000);
     expect(i.postComment).toBe(true);
     expect(i.llmTemperature).toBeUndefined();
     expect(i.llmTopP).toBeUndefined();
@@ -409,5 +410,13 @@ describe("getInputs aggregate limits (F15)", () => {
     expect(() => getInputs()).toThrow(/max_artifact_bytes.*>= 1024/);
     setInputs({ max_artifact_bytes: "1024" });
     expect(getInputs().maxArtifactBytes).toBe(1024);
+  });
+});
+
+describe("llm_max_tokens default is one value everywhere", () => {
+  it("action.yml declares the same default as the runtime", () => {
+    const action = fs.readFileSync("action.yml", "utf8");
+    const block = action.slice(action.indexOf("  llm_max_tokens:"), action.indexOf("  llm_agent:"));
+    expect(block).toContain('default: "16000"');
   });
 });
