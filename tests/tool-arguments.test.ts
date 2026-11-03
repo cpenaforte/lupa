@@ -28,8 +28,8 @@ describe("tool argument validation before repository access", () => {
     ...["read_file", "list_dir", "grep", "glob"].flatMap((name) =>
       [undefined, null, [], "bad", 42, true].map((args): [string, unknown] => [name, args])),
     ["read_file", {}], ["read_file", { path: 3 }],
-    ["read_file", { path: "a.txt", start: "1" }], ["read_file", { path: "a.txt", end: null }],
-    ["list_dir", { path: 3 }], ["list_dir", { repo: null }],
+    ["read_file", { path: "a.txt", start: "1" }], ["read_file", { path: null }],
+    ["list_dir", { path: 3 }],
     ["grep", {}], ["grep", { pattern: null }], ["grep", { pattern: 3 }],
     ["grep", { pattern: "hello", path: false }], ["grep", { pattern: "hello", glob: [] }],
     ["grep", { pattern: "hello", max_results: "1" }],
@@ -48,6 +48,22 @@ describe("tool argument validation before repository access", () => {
     expect(result.isError).toBe(true);
     expect(JSON.parse(result.output).error).toMatch(/invalid.*argument/i);
     expect(accesses).toBe(0);
+  });
+
+  // Optional parameters sent as null mean "omitted": the call must run as if the field were absent.
+  it.each<[string, unknown]>([
+    ["read_file", { path: "a.txt", start: null, end: null, repo: null }],
+    ["list_dir", { path: null, repo: null }],
+    ["grep", { pattern: "hello", path: null, glob: null, max_results: null, repo: null }],
+    ["glob", { pattern: "*.txt", repo: null }],
+  ])("accepts null for optional arguments of %s", async (name, args) => {
+    const result = await executeTool(name, args, { roots: { self: root() } });
+    expect(result.isError).toBe(false);
+  });
+
+  it("drops null optional fields before the tool sees them", () => {
+    const validated = validateToolArgs("read_file", { path: "a.txt", end: null });
+    expect(validated).toEqual({ ok: true, args: { path: "a.txt" } });
   });
 
   it("supports an explicit empty grep pattern and the list_dir root default", async () => {

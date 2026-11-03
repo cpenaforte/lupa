@@ -859,6 +859,8 @@ export function validateToolArgs(name: string, args: unknown):
     return { ok: false, message: `invalid tool arguments for ${name}: expected an object` };
   }
   const values = args as Record<string, unknown>;
+  // Copied lazily: the caller's object is returned unchanged unless a null optional is dropped.
+  let out = values;
   const required = definition.parameters.required as string[] | undefined;
   const properties = definition.parameters.properties as Record<string, { type: string }>;
   for (const [field, schema] of Object.entries(properties)) {
@@ -868,12 +870,18 @@ export function validateToolArgs(name: string, args: unknown):
       }
       continue;
     }
+    // `null` on an optional field means "omitted" (some providers send it that way).
+    if (values[field] === null && !required?.includes(field)) {
+      if (out === values) out = { ...values };
+      delete out[field];
+      continue;
+    }
     const primitive = schema.type === "integer" ? "number" : schema.type;
     if (typeof values[field] !== primitive) {
       return { ok: false, message: `invalid tool arguments for ${name}: ${field} must be a ${primitive}` };
     }
   }
-  return { ok: true, args: values };
+  return { ok: true, args: out };
 }
 
 async function dispatchTool(
