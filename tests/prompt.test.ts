@@ -136,6 +136,11 @@ describe("buildMessages agent variant", () => {
     expect(m.system).toContain("up to 10 tool-call rounds");
   });
 
+  it("tells the model it will receive tool-round progress notes", () => {
+    const m = buildMessages([], "D", undefined, [], { maxTurns: 10 });
+    expect(m.system).toContain("You will be told how many tool rounds you have used after each round.");
+  });
+
   it("omits the agent addendum when agent is not set", () => {
     const m = buildMessages([], "D");
     expect(m.system).not.toContain("read-only tools");

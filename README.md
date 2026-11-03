@@ -105,7 +105,7 @@ The default wire format is `openai-chat`: `POST {base_url}/chat/completions` wit
 
 ## Agent mode
 
-Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock). Values outside `11`–`21600` are rejected at input time: a 10 second reserve is held back for the final model call, and `21600` is GitHub's 6 hour job limit.
+Set `llm_agent: true` and the reviewer gets read-only tools to inspect the repository before reporting, so it can verify claims (callers, definitions, configs, tests) instead of guessing from the diff alone. After each tool round the model is told how many rounds it has used and how many remain. The tool loop is bounded by `llm_agent_max_turns` (default `10` tool-call rounds) and `llm_agent_max_seconds` (default `180` s wall-clock). Values outside `11`–`21600` are rejected at input time: a 10 second reserve is held back for the final model call, and `21600` is GitHub's 6 hour job limit.
 
 | Tool | What it does | Caps |
 |---|---|---|

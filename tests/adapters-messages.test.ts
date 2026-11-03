@@ -498,6 +498,31 @@ describe("callMessagesTurn", () => {
     ]);
   });
 
+  it("progress note after a tool round is its own user message following the tool_result message", async () => {
+    const note = "Tool rounds used: 1 of 3; 2 remaining. When the rounds run out, respond with ONLY the JSON findings object.";
+    const c: Conversation = {
+      system: "s",
+      user: "u",
+      turns: [
+        {
+          role: "assistant",
+          text: "",
+          toolCalls: [{ id: "t1", name: "read_file", args: { path: "a.ts" }, rawArgs: '{"path":"a.ts"}' }],
+        },
+        { role: "tool", id: "t1", name: "read_file", output: "ok" },
+        { role: "user", text: note },
+      ],
+      tools: [toolDef],
+    };
+    await callMessagesTurn(fakeMessagesEp(), c, turnOpts(), toolFlags);
+    expect(lastBody().messages).toEqual([
+      { role: "user", content: "u" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      { role: "user", content: [{ type: "text", text: note }] },
+    ]);
+  });
+
   it("keeps refusal/max_tokens mappings on the turn path", async () => {
     stubFetch(() => json(200, { type: "message", content: [], stop_reason: "refusal" }));
     expect(await callMessagesTurn(fakeMessagesEp(), conv(), turnOpts(), toolFlags)).toEqual({

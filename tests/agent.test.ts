@@ -37,6 +37,8 @@ const FINDINGS = '{"findings":[]}';
 const BUDGET_NOTE = "Tool budget exhausted. Respond with ONLY the JSON findings object matching the schema.";
 const REPAIR_NOTE =
   "Your previous message was not valid JSON. Respond with ONLY the JSON findings object matching the schema; no prose.";
+const isProgressNote = (t: { role: string; text?: string }): boolean =>
+  t.role === "user" && (t.text ?? "").startsWith("Tool rounds used:");
 
 interface Harness {
   budget: AgentBudget;
@@ -100,10 +102,11 @@ describe("runAgent", () => {
     expect(out.toolsUnsupported).toBe(false);
     expect(out.turns).toBe(2);
     expect(out.calls).toBe(1);
-    expect(h.conv.turns).toHaveLength(3);
+    expect(h.conv.turns).toHaveLength(4);
     expect(h.conv.turns![0]).toMatchObject({ role: "assistant", rawItems: [{ type: "reasoning" }] });
     expect(h.conv.turns![1]).toMatchObject({ role: "tool", id: "1", name: "read_file" });
-    expect(h.conv.turns![2]).toMatchObject({ role: "assistant" });
+    expect(h.conv.turns![2]).toMatchObject({ role: "user", text: expect.stringMatching(/^Tool rounds used: 1 of /) });
+    expect(h.conv.turns![3]).toMatchObject({ role: "assistant" });
   });
 
   it("caps tool calls per turn and returns error results for extras", async () => {
@@ -142,6 +145,75 @@ describe("runAgent", () => {
     const notes = h.conv.turns!.filter((t) => t.role === "user");
     expect(notes).toHaveLength(1);
     expect(notes[0]).toEqual({ role: "user", text: BUDGET_NOTE });
+  });
+
+  it("adds a progress note before each follow-up tool round and has it in place when the model is called", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(
+      root,
+      [
+        okText("", [tc("1", "read_file", { path: "a.txt" })]),
+        okText("", [tc("2", "read_file", { path: "a.txt" })]),
+        okText(FINDINGS),
+      ],
+      { maxTurns: 3 },
+    );
+    const lastAtCall: unknown[] = [];
+    const inner = h.hooks.call;
+    h.hooks.call = async (c, f, o) => {
+      lastAtCall.push(c.turns?.at(-1));
+      return inner(c, f, o);
+    };
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.stop).toBe("final");
+    expect(lastAtCall[0]).toBeUndefined();
+    expect(lastAtCall[1]).toEqual({
+      role: "user",
+      text: "Tool rounds used: 1 of 3; 2 remaining. When the rounds run out, respond with ONLY the JSON findings object.",
+    });
+    expect(lastAtCall[2]).toEqual({
+      role: "user",
+      text: "Tool rounds used: 2 of 3; this is your last tool round. Afterwards respond with ONLY the JSON findings object.",
+    });
+  });
+
+  it("adds one progress note per round, not per tool call", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(
+      root,
+      [
+        okText("", [tc("1", "read_file", { path: "a.txt" }), tc("2", "read_file", { path: "a.txt" })]),
+        okText(FINDINGS),
+      ],
+      { maxTurns: 3 },
+    );
+    await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(h.conv.turns!.filter(isProgressNote)).toHaveLength(1);
+  });
+
+  it("ends the notes with the budget note on the forced final round", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "a.txt"), "hello\n");
+    const h = harness(
+      root,
+      [
+        okText("", [tc("1", "read_file", { path: "a.txt" })]),
+        okText("", [tc("2", "read_file", { path: "a.txt" })]),
+        okText(FINDINGS),
+      ],
+      { maxTurns: 2 },
+    );
+    const out = await runAgent(h.conv, h.toolCtx, h.budget, h.hooks);
+    expect(out.stop).toBe("budget");
+    expect(h.conv.turns!.filter((t) => t.role === "user")).toEqual([
+      {
+        role: "user",
+        text: "Tool rounds used: 1 of 2; this is your last tool round. Afterwards respond with ONLY the JSON findings object.",
+      },
+      { role: "user", text: BUDGET_NOTE },
+    ]);
   });
 
   it("forced final on bytes budget stops executing tools", async () => {
