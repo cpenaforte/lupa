@@ -219,13 +219,13 @@ describe("ci workflow", () => {
     }
   });
 
-  it("actionlint job downloads v1.7.12, verifies the sha256, and lints ci.yml and both templates", () => {
+  it("actionlint job downloads v1.7.12, verifies the sha256, and lints ci.yml and all templates", () => {
     const c = fs.readFileSync(CI, "utf8");
     const job = jobBlock(c, "actionlint");
     expect(job).toContain("https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz");
     expect(job).toContain("8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8");
     expect(job).toContain("sha256sum -c");
-    expect(job).toContain(".github/workflows/ci.yml docs/workflow-template.yml docs/workflow-template-privileged.yml");
+    expect(job).toContain(".github/workflows/ci.yml docs/workflow-template.yml docs/workflow-template-privileged.yml docs/workflow-template-minimal.yml");
     expect(job).toContain("runs-on: ubuntu-latest");
   });
 
@@ -266,21 +266,23 @@ describe("ci workflow", () => {
     expect(sample.runs[0].results).toHaveLength(0);
   });
 
-  it("release docs: tag, canary on the tag, substitution, v1 move, marketplace, in that order, no rollback", () => {
+  it("release docs: tag, canary on the tag, re-pin PR, v1 move, marketplace, in that order, no rollback", () => {
     const d = fs.readFileSync("docs/e2e-checklist.md", "utf8");
-    expect(d).toContain("git tag -a v0.1.0");
+    expect(d).toContain('git tag -a vX.Y.Z -m "lupa vX.Y.Z"');
+    expect(d).toContain("gh release create vX.Y.Z --prerelease");
     expect(d).toContain("v1");
     expect(d).toMatch(/canary/i);
-    expect(d).toContain("OWNER/lupa@0000000000000000000000000000000000000000");
     expect(d).toMatch(/marketplace/i);
-    expect(d).toContain("docs/workflow-template.yml docs/workflow-template-privileged.yml");
-    expect(d).toMatch(/never copy them from the v0\.1\.0 tag/i);
+    expect(d).toContain("docs/workflow-template.yml docs/workflow-template-privileged.yml docs/workflow-template-minimal.yml README.md tests/templates.test.ts");
+    expect(d).toMatch(/re-pin pull request/i);
+    expect(d).not.toContain("OWNER/lupa@0000");
+    expect(d).not.toContain("v0.1.0");
     expect(d).not.toMatch(/roll ?back/i);
     expect(d).toContain("security-events: write");
     expect(d).toContain("actions: read");
     expect(d).toMatch(/security tab/i);
     const release = d.slice(d.indexOf("## Release procedure")).toLowerCase();
-    const order = ["git tag -a v0.1.0", "canary", "rev-parse", "docs/workflow-template-privileged.yml", "git tag -f v1", "marketplace"];
+    const order = ["git tag -a vx.y.z", "canary", "rev-parse", "docs/workflow-template-privileged.yml", "git tag -f v1", "marketplace"];
     const idx = order.map((s) => release.indexOf(s));
     for (const i of idx) expect(i).toBeGreaterThan(-1);
     expect([...idx].sort((a, b) => a - b)).toEqual(idx);

@@ -1,16 +1,19 @@
 # End-to-end checklist
 
-Manual checks against a disposable consumer repository, run on the **canary**: the immutable
-`v0.1.0` tag, before the marketplace listing goes live. Each case lists the PR to create and the
-assertions to verify. The unit tests cover the mapping logic (`eventFor`, `exitFor`, `buildBody`);
-these cases cover the wiring in a real GitHub run, including live Ollama, which CI does not run.
+Manual checks against a disposable consumer repository, run on the **canary**: the immutable tag of
+the release under test (for example `v0.12.0`), before the floating `v1` tag moves to it. Each case
+lists the PR to create and the assertions to verify. The unit tests cover the mapping logic
+(`eventFor`, `exitFor`, `buildBody`); these cases cover the wiring in a real GitHub run, including live
+Ollama, which CI does not run.
 
-Setup: a private test repository with the workflow from `docs/workflow-template.yml` pointing at
-`@v0.1.0`, `vars.PR_REVIEWER_MODEL` and `secrets.LLM_API_KEY` set, and `fail_level: warning`
-unless a case says otherwise. Read the review body on the PR, the job summary, and the
-`pr-reviewer-out` artifact.
+Setup: a private test repository with the workflow from `docs/workflow-template.yml`, with the
+`cpenaforte/lupa@` pin set to the commit of the tag under test, `vars.PR_REVIEWER_MODEL` and
+`secrets.LLM_API_KEY` set, and `fail_level: warning` unless a case says otherwise. Read the review body
+on the PR, the job summary, and the `pr-reviewer-out` artifact.
 
-For the assurance changes, rerun the matrix against the exact immutable commit of the release under review. The `v0.1.0` procedure below is historical release setup, not current pass evidence. Record the action SHA, workflow run/PR URLs, outputs, and artifact SHAs for each fresh run; all assurance rows below remain manual checks until that evidence is collected. No historical canary result establishes that a new release passed.
+Rerun the matrix against the exact immutable commit of every release under review. Record the action SHA,
+workflow run/PR URLs, outputs, and artifact SHAs for each fresh run. No earlier canary result establishes
+that a new release passed.
 
 Every case asserts, in addition to its own rows:
 
@@ -72,8 +75,8 @@ git diff --exit-code -- dist/index.js
 
 ## Release procedure
 
-Consumers copy the templates from `main` **after** the release. Never copy them from the v0.1.0 tag:
-that tag's templates still carry the `OWNER/lupa@0000…` placeholder by design.
+Consumers copy the templates (or the workflow in the README) from `main` **after** the re-pin merges.
+The templates inside a release tag still pin the previous release.
 
 Before starting, verify that the scanner digests are real (the scoped test in `tests/ci.test.ts`
 checks `src/`, `.github/workflows/ci.yml` and `action.yml` for placeholders):
@@ -82,21 +85,24 @@ checks `src/`, `.github/workflows/ci.yml` and `action.yml` for placeholders):
 grep -cE '^export const (TRIVY|OSV|GITLEAKS)_DIGEST = "sha256:[0-9a-f]{64}";' src/scanners.ts   # must print 3
 ```
 
-Release order (strict; `v1` moves exactly once, as the last tag move):
+Release order (strict; `v1` moves exactly once, as the last tag move). In the commands below, `vX.Y.Z`
+is the release and `OLD` is the 40-hex SHA currently pinned in the templates:
 
 1. **Release commit** on `main`. CI is green (`build`, `actionlint`, `smoke`, `no-secret-smoke`,
-   `ollama`, `guards`), and `dist/index.js` matches the build. Branding is already declared in
+   `sarif`, `ollama`, `guards`), and `dist/index.js` matches the build. Branding is already declared in
    `action.yml` (`branding:` icon `git-pull-request`, color `blue`).
-2. **Immutable tag.** Create an annotated tag on the release commit and push it. The tag is never moved:
+2. **Immutable tag and pre-release.** Create an annotated tag on the release commit, push it, and publish
+   a pre-release with generated notes. The tag is never moved:
 
    ```bash
-   git tag -a v0.1.0 -m "lupa v0.1.0"
-   git push origin v0.1.0
+   git tag -a vX.Y.Z -m "lupa vX.Y.Z"
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --prerelease --generate-notes --verify-tag
    ```
 
-3. **Canary on the immutable `v0.1.0` tag.** In the consumer test repository, pin the workflow to
-   `OWNER/lupa@v0.1.0` and run every case above, including live Ollama. All must pass. Do not
-   touch `v0.1.0`. If a case fails, fix on `main`, cut a new tag (`v0.1.1`), and restart from step 2.
+3. **Canary on the immutable tag.** In the consumer test repository, pin the workflow to
+   `cpenaforte/lupa@<tag commit SHA>` and run every case above, including live Ollama. All must pass. Do
+   not touch `vX.Y.Z`. If a case fails, fix on `main`, cut a new tag (`vX.Y.(Z+1)`), and restart from step 2.
    `v1` has not moved yet, so nothing consumes the failed release.
    - **SARIF check:** to verify the SARIF upload in the canary, enable **both** `security-events: write`
      and `actions: read` in the workflow, then confirm the findings appear in the repository's
@@ -110,33 +116,32 @@ Release order (strict; `v1` moves exactly once, as the last tag move):
      `agent done: ... stop=final`, plus `agent linked repositories: ...` for the linked-repo PR.
      For a model without tool support, verify the run falls back to single-shot with the warning
      `agent tools unsupported for this model: using single-shot`.
-4. **Substitute the tag's commit SHA into BOTH templates**, then commit on `main` (follow-up commit C).
-   Get the SHA from the tag, never type it by hand. The first `sed` replaces the placeholder with the
-   owner and the SHA; the second drops the stale `# replace with a released SHA` comment. Replace
-   `OWNER` with the real owner login before running:
+4. **Re-pin pull request.** Substitute the tag's commit SHA into every file that pins the action, then open
+   a pull request. Get the SHA from the tag, never type it by hand. The pin appears in the three workflow
+   templates, in the README's copy of the minimal workflow, and in `tests/templates.test.ts`:
 
    ```bash
-   SHA=$(git rev-parse "v0.1.0^{commit}")
-   echo "$SHA"   # 40 hex
-   OWNER=your-login
-   sed -i "s#OWNER/lupa@0000000000000000000000000000000000000000#$OWNER/lupa@$SHA#" docs/workflow-template.yml docs/workflow-template-privileged.yml
-   sed -i 's/ # replace with a released SHA$//' docs/workflow-template.yml docs/workflow-template-privileged.yml
-   grep -n "$SHA" docs/workflow-template.yml docs/workflow-template-privileged.yml   # both files, no placeholder left
-   npx vitest run tests/templates.test.ts tests/ci.test.ts
-   git add docs/workflow-template.yml docs/workflow-template-privileged.yml
-   git commit -m "docs: pin templates to v0.1.0 ($SHA)"
-   git push origin main
+   NEW=$(git rev-parse "vX.Y.Z^{commit}")
+   echo "$NEW"   # 40 hex
+   sed -i "s#cpenaforte/lupa@$OLD#cpenaforte/lupa@$NEW#g" docs/workflow-template.yml docs/workflow-template-privileged.yml docs/workflow-template-minimal.yml README.md tests/templates.test.ts
+   sed -i "s#@$NEW \# v[0-9.]*#@$NEW \# vX.Y.Z#" docs/workflow-template-minimal.yml README.md
+   grep -c "$NEW" docs/workflow-template.yml docs/workflow-template-privileged.yml docs/workflow-template-minimal.yml README.md   # each file: 1
+   npx vitest run tests/templates.test.ts tests/ci.test.ts tests/readme.test.ts
    ```
 
-5. **Move the floating major tag `v1`** to that commit C on `main` (the one that pins the templates).
-   The action code at C is identical to the tag's, because the commit only changes docs. Check it:
+   Rename the release in the pin test's title in `tests/templates.test.ts`, commit as
+   `docs: pin templates to vX.Y.Z (<sha>)`, open the PR and merge it when CI is green.
+5. **Move the floating major tag `v1`** to the merge commit `C` of that PR on `main`. The action code at
+   `C` is identical to the tag's, because the commit only changes docs and tests. Check it:
 
    ```bash
-   git diff --quiet v0.1.0 HEAD -- action.yml dist src   # must exit 0
-   git tag -f v1 HEAD   # HEAD is C
+   git fetch origin main
+   git diff --quiet vX.Y.Z origin/main -- action.yml dist src   # must exit 0
+   git tag -f v1 origin/main   # origin/main is C
    git push --force origin v1
    ```
 
-6. **Marketplace.** On the GitHub release for `v0.1.0`, tick "Publish this Action to the GitHub
-   Marketplace". Check the listing copy against `action.yml` (`name: "Lupa"`, the `description`
-   field, the inputs and outputs, and the `branding:` block from step 1).
+6. **Marketplace.** Once the canary has passed, edit the GitHub release for `vX.Y.Z`: clear "pre-release",
+   mark it as the latest release and tick "Publish this Action to the GitHub Marketplace". Check the
+   listing copy against `action.yml` (`name`, the `description` field, the inputs and outputs, and the
+   `branding:` block from step 1).

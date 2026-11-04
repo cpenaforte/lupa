@@ -21090,7 +21090,7 @@ function getInputs() {
     llmApiKey: readString("llm_api_key"),
     ...llmTemperature !== void 0 ? { llmTemperature } : {},
     ...llmTopP !== void 0 ? { llmTopP } : {},
-    llmMaxTokens: readInt("llm_max_tokens", 8e3, 1),
+    llmMaxTokens: readInt("llm_max_tokens", 16e3, 1),
     failLevel: parseFailLevel(readString("fail_level", "warning")),
     analysisPolicy: readEnum("analysis_policy", ["advisory", "required"], "advisory"),
     maxDiffChars: readInt("max_diff_chars", 6e4, 1),
