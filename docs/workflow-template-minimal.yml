@@ -48,7 +48,7 @@ jobs:
         id: review
         # Exit 2 (warnings) must not block the merge; the gate step below decides.
         continue-on-error: true
-        uses: cpenaforte/lupa@f621b79e3bce7fc0331542b47b54ff5504d5a571 # v0.12.0
+        uses: cpenaforte/lupa@cbc17a39b53d2d921d33ac784084145b34ed7126 # v0.13.0
         env:
           PR_REVIEWER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_REVIEWER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}

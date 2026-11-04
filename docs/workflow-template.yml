@@ -123,7 +123,7 @@ jobs:
         id: review
         # Exit 2 (warning) must never block the merge; the gate step below decides.
         continue-on-error: true
-        uses: cpenaforte/lupa@f621b79e3bce7fc0331542b47b54ff5504d5a571
+        uses: cpenaforte/lupa@cbc17a39b53d2d921d33ac784084145b34ed7126
         env:
           PR_REVIEWER_BASE_SHA: ${{ steps.shas.outputs.base_sha }}
           PR_REVIEWER_HEAD_SHA: ${{ steps.shas.outputs.head_sha }}
