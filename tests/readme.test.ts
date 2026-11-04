@@ -47,7 +47,8 @@ describe("README", () => {
     expect(note).toContain("top_p");
     expect(note).toContain("family");
     expect(note).toContain("validated per model family (for example, `n` must be 1, and `temperature` and `top_p` cannot be set together)");
-    expect(r).toContain("Compare with the typical figure above (about 3k input and 600 output tokens)");
+    expect(r).toContain("Compare with the measured figure above (about 5k input and 4k to 7k output tokens)");
+    expect(r).not.toContain("600 output tokens");
     expect(r).not.toContain("has evidence");
     expect(r).not.toContain("writable App token");
     expect(r).not.toContain("OPENCODE_API_KEY");
